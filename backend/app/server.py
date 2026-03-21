@@ -304,13 +304,17 @@ async def lifespan(app: FastAPI):
     logger.info("[STARTUP] Initializing database...")
     await init_db()
 
-    # 1a. Verify database connection
+    # 1a. Verify database connection with retries
     logger.info("[STARTUP] Database backend: %s (%s)", _DB_BACKEND, _DB_LOCATION)
-    _db_ok = await check_db_connection(retries=3, delay=2.0)
-    if _db_ok:
-        logger.info("[STARTUP] ✓ Database connection verified")
-    else:
-        logger.warning("[STARTUP] ⚠ Database connection could not be verified — app will start but DB operations may fail")
+    logger.info("[STARTUP] Verifying database connection...")
+    _db_ok = await check_db_connection(retries=5, delay=1.0)
+    if not _db_ok:
+        logger.error(
+            "[STARTUP] ✗ Database connection failed after retries. "
+            "Check DATABASE_URL and ensure PostgreSQL is running."
+        )
+        raise RuntimeError("Database connection failed during startup")
+    logger.info("[STARTUP] ✓ Database connection verified")
 
     # 1b. Restore trading state from DB (positions, risk, PnL)
     logger.info("[STARTUP] Restoring trading state...")
@@ -439,14 +443,16 @@ app.include_router(trading.router)
 
 @app.get("/health")
 async def health():
-    """Enhanced health check with system status including DB connectivity."""
+    """Enhanced health check with database connectivity."""
     db_ok = await check_db_connection(retries=1, delay=0.0)
+    db_backend = "PostgreSQL" if _DATABASE_URL.startswith("postgresql") else "SQLite"
+
     return {
         "status": "ok" if db_ok else "degraded",
         "service": "stockai-pro",
         "version": "2.0",
         "database": "connected" if db_ok else "unreachable",
-        "database_backend": _DB_BACKEND,
+        "database_backend": db_backend,
         "instruments": get_instrument_count(),
         "smartapi_connected": _ws_connector.is_logged_in if _ws_connector else False,
         "ws_clients": get_client_count(),
