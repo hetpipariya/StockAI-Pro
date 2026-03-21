@@ -173,11 +173,17 @@ export function useTradingEngine() {
 
 // Dynamically connect WS safely matching environment
     const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.port === '5173'
-    const wsProtocol = isLocal ? 'ws:' : 'wss:'
-    const wsHost = isLocal ? '127.0.0.1:8000' : window.location.host
-    const wsUrl = `${wsProtocol}//${wsHost}/live`
-  const ws = useWebsocket(wsUrl)
-
+    
+    // We must read the target domain from environment variables first to allow cross-domain frontend->backend bridging (like Cloudflare Pages -> Railway)
+    let wsUrl = ''
+    if (import.meta.env.VITE_WS_URL) {
+      wsUrl = import.meta.env.VITE_WS_URL
+    } else {
+      const wsProtocol = isLocal ? 'ws:' : 'wss:'
+      // Fallback only if no env variable exists, though this is heavily flawed for cross-domain production.
+      const wsHost = isLocal ? '127.0.0.1:8000' : window.location.host
+      wsUrl = `${wsProtocol}//${wsHost}/live`
+    }
   const fetchData = async (fetchToken) => {
     try {
       const tf = timeframe === '1d' ? '1d' : timeframe
