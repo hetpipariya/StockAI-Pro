@@ -1,6 +1,5 @@
 import os
 import logging
-from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -39,56 +38,49 @@ def _resolve_database_url() -> str:
     """Resolve a valid async DATABASE_URL for the running environment.
 
     Resolution order:
-    1. Read DATABASE_URL from the environment.
-    2. If empty → fall back to SQLite.
-    3. Railway provides ``postgres://`` scheme → rewrite to
-       ``postgresql+asyncpg://``.
-    4. If the hostname is the docker-compose service name ``postgres``
-       (not resolvable outside Docker) → fall back to SQLite.
-    5. Ensure ``postgresql://`` URLs get the ``+asyncpg`` driver prefix.
+    1. Read DATABASE_URL from environment (Railway auto-injects this)
+    2. If empty → use SQLite fallback (development only)
+    3. Convert postgres:// → postgresql+asyncpg:// (Railway legacy format)
+    4. Ensure postgresql:// URLs have +asyncpg driver
+    5. Return the URL as-is if already valid
     """
     raw = os.getenv("DATABASE_URL", "").strip()
 
+    # No DATABASE_URL set → use SQLite (development/fallback only)
     if not raw:
-        _cfg_logger.info(
-            "[DB] DATABASE_URL not set — using SQLite fallback (%s)", _SQLITE_FALLBACK
+        _cfg_logger.warning(
+            "[DB] DATABASE_URL not set — using SQLite fallback (%s). "
+            "For production, ensure DATABASE_URL is set via Railway environment.",
+            _SQLITE_FALLBACK
         )
         return _SQLITE_FALLBACK
 
-    # Railway uses the legacy 'postgres://' scheme; SQLAlchemy needs 'postgresql://'
+    # Convert Railway's legacy postgres:// scheme to postgresql+asyncpg://
     if raw.startswith("postgres://"):
         raw = "postgresql+asyncpg://" + raw[len("postgres://"):]
-        _cfg_logger.info("[DB] Rewrote 'postgres://' → 'postgresql+asyncpg://'")
+        _cfg_logger.info("[DB] Converted postgres:// → postgresql+asyncpg://")
+        return raw
 
-    # SQLite URLs — ensure the aiosqlite driver is present
+    # Handle SQLite URLs
     if raw.startswith("sqlite"):
         if "+aiosqlite" not in raw:
             raw = raw.replace("sqlite://", "sqlite+aiosqlite://", 1)
         _cfg_logger.info("[DB] Using SQLite: %s", raw)
         return raw
 
-    # For PostgreSQL URLs, inspect the hostname
-    try:
-        parsed = urlparse(raw)
-        hostname = (parsed.hostname or "").lower()
-        if hostname == "postgres":
-            _cfg_logger.warning(
-                "[DB] DATABASE_URL hostname is 'postgres' (docker-compose local name) "
-                "which is not reachable in this environment — falling back to SQLite (%s)",
-                _SQLITE_FALLBACK,
-            )
-            return _SQLITE_FALLBACK
-    except Exception as exc:
-        _cfg_logger.warning(
-            "[DB] Could not parse DATABASE_URL (%s) — falling back to SQLite", exc
-        )
-        return _SQLITE_FALLBACK
-
-    # Ensure the asyncpg driver is specified for plain postgresql:// URLs
+    # Ensure PostgreSQL URLs have asyncpg driver
     if raw.startswith("postgresql://") and "+asyncpg" not in raw:
         raw = raw.replace("postgresql://", "postgresql+asyncpg://", 1)
+        _cfg_logger.info("[DB] Added asyncpg driver to postgresql:// URL")
+        return raw
 
-    _cfg_logger.info("[DB] Using PostgreSQL (asyncpg)")
+    # URL is already valid (postgresql+asyncpg://, etc.)
+    if raw.startswith("postgresql+asyncpg://"):
+        _cfg_logger.info("[DB] Using PostgreSQL with asyncpg driver")
+        return raw
+
+    # Fallback for any other URL format
+    _cfg_logger.warning("[DB] Using DATABASE_URL as-is: %s", raw[:50])
     return raw
 
 
