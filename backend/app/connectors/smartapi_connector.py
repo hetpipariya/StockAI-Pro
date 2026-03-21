@@ -251,6 +251,8 @@ class SmartAPIConnector:
                     d = resp["data"]
                     self._auth_token = d.get("jwtToken", self._auth_token)
                     self._refresh_token = d.get("refreshToken", self._refresh_token)
+                    if hasattr(self._obj, "getfeedToken"):
+                        self._feed_token = self._obj.getfeedToken()
                     self._login_time = time.monotonic()
                     self._sync_store_session({
                         "authToken": self._auth_token,
@@ -535,6 +537,13 @@ class SmartAPIConnector:
 
                     def _on_error(wsapp, error):
                         logger.error(f"[WS] Error: {error}")
+                        if "AG800" in str(error) or "Invalid Token" in str(error):
+                            logger.error("[WS] Force clearing session due to Token Error")
+                            self._sync_clear_session()
+                            try:
+                                self.login(force=True)
+                            except Exception:
+                                pass
 
                     def _on_close(wsapp):
                         logger.info("[WS] Connection closed")

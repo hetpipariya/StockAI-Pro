@@ -74,7 +74,9 @@ def _on_smartapi_tick(msg):
     Callback when SmartAPI WS receives tick — runs in WS thread.
     Resolves token → symbol, aggregates into candles, broadcasts to clients.
     """
-    global _cached_candle_builder_15m, _cached_get_executor
+    global _cached_candle_builder_15m, _cached_get_executor, _last_live_tick_time
+    import time
+    _last_live_tick_time = time.time()
     try:
         # Debug: log raw tick structure
         if isinstance(msg, dict):
@@ -249,15 +251,20 @@ async def refresh_instruments():
     load_instruments(force=True)
 
 
+import time
 import random
+
+_last_live_tick_time = 0.0
 
 async def mock_ws_data_job():
     """Fallback: broadcast mock ticks to keep connection active when market closed or no data."""
-    global _smartapi_ws_started
-    if not is_market_open() or not _smartapi_ws_started:
+    global _last_live_tick_time
+    idle_time = time.time() - _last_live_tick_time
+    if not is_market_open() or idle_time > 10:
+        logger.info(f"[MOCK-WS] Broadcasting mock data (idle for {idle_time:.1f}s)")
         for sym in DEFAULT_WATCHLIST[:10]:
             base_price = 100.0 + random.uniform(-1, 1)
-            tick_data = {"ltp": base_price, "volume": random.randint(10, 50), "bid": base_price - 0.05, "ask": base_price + 0.05, "is_mock": True}
+            tick_data = {"ltp": base_price, "volume": random.randint(10, 50), "bid": base_price - 0.05, "ask": base_price + 0.05, "signal": "HOLD", "is_mock": True}
             await broadcast_tick(sym, tick_data)
 
 async def auto_start_ws():
