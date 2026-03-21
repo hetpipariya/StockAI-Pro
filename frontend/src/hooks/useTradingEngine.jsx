@@ -171,11 +171,11 @@ export function useTradingEngine() {
   const activeFetchTokenRef = useRef(0)
   const isPaginatingRef = useRef(false)
 
-  // In dev, connect WS directly to backend (port 8000)
-  const isDev = window.location.port === '5173'
-  const wsHost = isDev ? `127.0.0.1:8000` : window.location.host
-  const fallbackWsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${wsHost}/live`
-  const wsUrl = import.meta.env.VITE_WS_URL || fallbackWsUrl
+// Dynamically connect WS safely matching environment
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.port === '5173'
+    const wsProtocol = isLocal ? 'ws:' : 'wss:'
+    const wsHost = isLocal ? '127.0.0.1:8000' : window.location.host
+    const wsUrl = `${wsProtocol}//${wsHost}/live`
   const ws = useWebsocket(wsUrl)
 
   const fetchData = async (fetchToken) => {
