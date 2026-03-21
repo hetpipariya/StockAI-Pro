@@ -501,7 +501,9 @@ def _sanitize_symbols(values) -> list[str]:
 @app.websocket("/live")
 async def websocket_live(ws: WebSocket):
     """Frontend WebSocket endpoint for real-time data."""
+    print("WS CONNECTED HIT")
     await ws.accept()
+    print("WS CONNECTED")
     register_client(ws)
 
     # Send initial status
@@ -535,6 +537,7 @@ async def websocket_live(ws: WebSocket):
 
             try:
                 msg = json.loads(data)
+                print("WS RECEIVED:", msg)
                 if not isinstance(msg, dict):
                     continue
 
@@ -579,5 +582,11 @@ async def websocket_live(ws: WebSocket):
 @app.websocket("/ws/market")
 async def websocket_market(ws: WebSocket):
     """Alias for /live — frontend can connect via /ws/market."""
+    await websocket_live(ws)
+
+
+@app.websocket("/ws/live")
+async def websocket_wslive(ws: WebSocket):
+    """Alias for /ws/live."""
     await websocket_live(ws)
 

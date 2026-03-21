@@ -92,6 +92,7 @@ async def _broadcast(msg: dict):
     clients_list = list(_clients)
     if clients_list:
         logger.info(f"[WS] Sending: {payload[:200]}... to {len(clients_list)} clients")
+        print("WS SENT:", payload)
     results = await asyncio.gather(
         *[_send_safe(ws, payload) for ws in clients_list],
         return_exceptions=True,
