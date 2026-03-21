@@ -30,5 +30,14 @@ RUN pip install --no-cache /wheels/*
 
 COPY . .
 
-# Run alembic migrations and start gunicorn with uvicorn workers
-CMD ["sh", "-c", "alembic upgrade head && gunicorn app.server:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000"]
+# Run alembic migrations (PostgreSQL only) then start the server.
+# If DATABASE_URL is absent, points to the docker-compose 'postgres' hostname,
+# or starts with 'sqlite', migrations are skipped and the app uses SQLite.
+CMD ["sh", "-c", "\
+  DB=${DATABASE_URL:-}; \
+  if echo \"$DB\" | grep -qE '^postgres(ql)?[+:]' && ! echo \"$DB\" | grep -qE '@postgres(:|/)'; then \
+    echo '[DOCKER] Running alembic migrations for PostgreSQL...' && alembic upgrade head; \
+  else \
+    echo '[DOCKER] Skipping alembic migrations (SQLite or local docker hostname detected)'; \
+  fi && \
+  gunicorn app.server:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000"]

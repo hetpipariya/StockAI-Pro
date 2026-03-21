@@ -1,7 +1,11 @@
 import os
+import logging
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 SMARTAPI_API_KEY = os.getenv("SMARTAPI_API_KEY", "")
 SMARTAPI_CLIENT_ID = os.getenv("SMARTAPI_CLIENT_ID", "")
@@ -27,7 +31,60 @@ JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", "24"))
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./stockai.db")
+
+
+def _resolve_database_url() -> str:
+    """Resolve DATABASE_URL from environment with Railway-aware fallback.
+
+    Railway automatically injects DATABASE_URL for linked PostgreSQL services.
+    If the variable is absent or still points to the docker-compose service
+    hostname 'postgres', the app falls back to a local SQLite database so it
+    can start cleanly without a PostgreSQL instance.
+    """
+    raw_url = os.getenv("DATABASE_URL", "")
+
+    if not raw_url:
+        logger.info("[DB] DATABASE_URL not set — falling back to SQLite (stockai.db)")
+        return "sqlite+aiosqlite:///./stockai.db"
+
+    # Railway (and some other providers) emit postgres:// instead of postgresql://
+    if raw_url.startswith("postgres://"):
+        raw_url = "postgresql" + raw_url[8:]
+
+    # Detect the docker-compose service hostname which is only reachable inside
+    # a compose network and will fail with "could not translate host name" on Railway.
+    try:
+        hostname = urlparse(raw_url).hostname or ""
+        if hostname == "postgres":
+            logger.warning(
+                "[DB] DATABASE_URL contains the docker-compose hostname 'postgres' "
+                "which cannot be resolved on Railway. "
+                "Falling back to SQLite (stockai.db). "
+                "Set DATABASE_URL to your Railway PostgreSQL connection URL to use PostgreSQL."
+            )
+            return "sqlite+aiosqlite:///./stockai.db"
+    except Exception:
+        pass
+
+    # Ensure the asyncpg driver prefix is present for async PostgreSQL connections
+    if raw_url.startswith("postgresql://") and "+asyncpg" not in raw_url:
+        raw_url = raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+    # Log the resolved URL with password masked to avoid credential leakage
+    try:
+        from urllib.parse import urlunparse
+        parsed = urlparse(raw_url)
+        safe = parsed._replace(netloc=parsed.netloc.replace(
+            f":{parsed.password}@", ":***@"
+        ) if parsed.password else parsed.netloc)
+        safe_url = urlunparse(safe)
+    except Exception:
+        safe_url = raw_url[:30] + "..."
+    logger.info("[DB] DATABASE_URL resolved: %s", safe_url)
+    return raw_url
+
+
+DATABASE_URL: str = _resolve_database_url()
 
 MARKET_OPEN = os.getenv("MARKET_OPEN", "09:15")
 MARKET_CLOSE = os.getenv("MARKET_CLOSE", "15:30")

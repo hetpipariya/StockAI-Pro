@@ -1,6 +1,7 @@
+import asyncio
 import logging
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column, sessionmaker
 from sqlalchemy import String, Float, Integer, DateTime, UniqueConstraint, Index, Boolean
 from datetime import datetime
@@ -168,13 +169,41 @@ except Exception as e:
 
 
 async def init_db():
-    if engine:
+    if engine is None:
+        logger.error("[DB] Engine is not initialized; skipping table creation")
+        return
+
+    _retries = 5
+    _delay = 2.0
+    for attempt in range(1, _retries + 1):
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
             logger.info("[DB] ✓ Tables initialized (candles, predictions, orders)")
+            return
         except Exception as e:
-            logger.error("[DB] Initialization failed: %s", e)
+            if attempt < _retries:
+                logger.warning(
+                    "[DB] Initialization attempt %d/%d failed: %s — retrying in %.0fs",
+                    attempt, _retries, e, _delay,
+                )
+                await asyncio.sleep(_delay)
+                _delay *= 2
+            else:
+                logger.error("[DB] Initialization failed after %d attempts: %s", _retries, e)
+
+
+async def check_db_connection() -> bool:
+    """Return True if the database is reachable, False otherwise."""
+    if engine is None:
+        return False
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return True
+    except Exception as e:
+        logger.warning("[DB] Health check failed: %s", e)
+        return False
 
 
 async def get_db_session():
