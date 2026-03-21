@@ -498,6 +498,8 @@ def _sanitize_symbols(values) -> list[str]:
     return sanitized
 
 
+print("WS ROUTE LOADED")
+
 @app.websocket("/live")
 async def websocket_live(ws: WebSocket):
     """Frontend WebSocket endpoint for real-time data."""
