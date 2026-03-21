@@ -1,6 +1,7 @@
+import asyncio
 import logging
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column, sessionmaker
 from sqlalchemy import String, Float, Integer, DateTime, UniqueConstraint, Index, Boolean
 from datetime import datetime
@@ -175,6 +176,40 @@ async def init_db():
             logger.info("[DB] ✓ Tables initialized (candles, predictions, orders)")
         except Exception as e:
             logger.error("[DB] Initialization failed: %s", e)
+
+
+async def check_db_connection(retries: int = 3, delay: float = 2.0) -> bool:
+    """Verify the database is reachable. Retries with exponential backoff.
+
+    Returns True when a connection succeeds, False after all retries are
+    exhausted.
+    """
+    if not engine:
+        logger.error("[DB] Engine not initialized — cannot check connection")
+        return False
+
+    for attempt in range(1, retries + 1):
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            logger.info("[DB] ✓ Connection verified (attempt %d/%d)", attempt, retries)
+            return True
+        except Exception as exc:
+            wait = delay * (2 ** (attempt - 1))
+            if attempt < retries:
+                logger.warning(
+                    "[DB] Connection check failed (attempt %d/%d): %s — retrying in %.1fs",
+                    attempt,
+                    retries,
+                    exc,
+                    wait,
+                )
+                await asyncio.sleep(wait)
+            else:
+                logger.error(
+                    "[DB] Connection check failed after %d attempts: %s", retries, exc
+                )
+    return False
 
 
 async def get_db_session():

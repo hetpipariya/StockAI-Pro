@@ -30,5 +30,5 @@ RUN pip install --no-cache /wheels/*
 
 COPY . .
 
-# Run alembic migrations and start gunicorn with uvicorn workers
-CMD ["sh", "-c", "alembic upgrade head && gunicorn app.server:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000"]
+# Run alembic migrations (PostgreSQL only) and start gunicorn with uvicorn workers
+CMD ["sh", "-c", "python -c \"from app.config import DATABASE_URL; exit(0 if DATABASE_URL.startswith('sqlite') else 1)\" && echo '[STARTUP] SQLite detected — skipping alembic migrations' || (echo '[STARTUP] PostgreSQL detected — running alembic migrations' && alembic upgrade head); gunicorn app.server:app --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000"]

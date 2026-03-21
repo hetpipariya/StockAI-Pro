@@ -29,12 +29,13 @@ from app.websocket.relay import (
     broadcast_candle, broadcast_status, get_client_count,
 )
 from app.connectors import SmartAPIConnector, get_symbol_token
-from app.services.db import init_db
+from app.services.db import init_db, check_db_connection
 from app.services.redis_client import get_redis
 from app.services.instrument_master import load_instruments, get_token, get_symbol, get_instrument_count
 from app.services.tick_aggregator import tick_aggregator
 from app.services.candle_store import store_candles
 from app.services.market_state import is_market_open
+from app.config import DATABASE_URL as _DATABASE_URL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,6 +43,15 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# Safe DB label for logging (hides credentials)
+_DB_BACKEND = "SQLite" if _DATABASE_URL.startswith("sqlite") else "PostgreSQL"
+try:
+    from urllib.parse import urlparse as _urlparse
+    _parsed = _urlparse(_DATABASE_URL)
+    _DB_LOCATION = f"{_parsed.hostname}:{_parsed.port}{_parsed.path}" if _parsed.hostname else _DATABASE_URL
+except Exception:
+    _DB_LOCATION = _DATABASE_URL
 
 _smartapi_ws_started = False
 _ws_connector: SmartAPIConnector | None = None
@@ -294,6 +304,14 @@ async def lifespan(app: FastAPI):
     logger.info("[STARTUP] Initializing database...")
     await init_db()
 
+    # 1a. Verify database connection
+    logger.info("[STARTUP] Database backend: %s (%s)", _DB_BACKEND, _DB_LOCATION)
+    _db_ok = await check_db_connection(retries=3, delay=2.0)
+    if _db_ok:
+        logger.info("[STARTUP] ✓ Database connection verified")
+    else:
+        logger.warning("[STARTUP] ⚠ Database connection could not be verified — app will start but DB operations may fail")
+
     # 1b. Restore trading state from DB (positions, risk, PnL)
     logger.info("[STARTUP] Restoring trading state...")
     try:
@@ -420,12 +438,15 @@ app.include_router(trading.router)
 
 
 @app.get("/health")
-def health():
-    """Enhanced health check with system status."""
+async def health():
+    """Enhanced health check with system status including DB connectivity."""
+    db_ok = await check_db_connection(retries=1, delay=0.0)
     return {
-        "status": "ok",
+        "status": "ok" if db_ok else "degraded",
         "service": "stockai-pro",
         "version": "2.0",
+        "database": "connected" if db_ok else "unreachable",
+        "database_backend": _DB_BACKEND,
         "instruments": get_instrument_count(),
         "smartapi_connected": _ws_connector.is_logged_in if _ws_connector else False,
         "ws_clients": get_client_count(),
