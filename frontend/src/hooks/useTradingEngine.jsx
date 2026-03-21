@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useWebsocket } from './useWebsocket'
 import { INDICATOR_CATALOG } from '../components/ChartToolbar/ChartToolbar'
 
-const API_BASE = '/api/v1'
+const API_BASE = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api/v1` : '/api/v1'
 
 const isPlainObject = (value) => !!value && typeof value === 'object' && !Array.isArray(value)
 export const toFiniteNumber = (value) => {
@@ -174,7 +174,8 @@ export function useTradingEngine() {
   // In dev, connect WS directly to backend (port 8000)
   const isDev = window.location.port === '5173'
   const wsHost = isDev ? `127.0.0.1:8000` : window.location.host
-  const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${wsHost}/live`
+  const fallbackWsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${wsHost}/live`
+  const wsUrl = import.meta.env.VITE_WS_URL || fallbackWsUrl
   const ws = useWebsocket(wsUrl)
 
   const fetchData = async (fetchToken) => {

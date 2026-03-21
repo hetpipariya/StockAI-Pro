@@ -13,7 +13,7 @@ export default function IntelligencePanel({ prediction, snapshot, symbol, timefr
     // Fallback sync with `prediction` prop since useTradingEngine fetches it
     const fetchLocalSignal = async () => {
       try {
-        const res = await fetch(`/api/v1/predict?symbol=${symbol}&horizon=${timeframe || '15m'}`);
+        const res = await fetch(`${import.meta.env.VITE_API_URL || ''}/api/v1/predict?symbol=${symbol}&horizon=${timeframe || '15m'}`);
         const data = await res.json();
         console.log('[DEBUG] Full API Response (Predict):', data);
         console.log('[DEBUG] Target & Stop Loss:', { target: data?.target, stop_loss: data?.stop_loss });

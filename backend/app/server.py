@@ -384,7 +384,7 @@ app = FastAPI(title="StockAI Pro API", version="2.0", lifespan=lifespan)
 # ─── CORS: restrict to known origins (production + dev) ───
 _ALLOWED_ORIGINS = [
     origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,https://stockai-pro.pages.dev").split(",")
     if origin.strip()
 ]
 app.add_middleware(
