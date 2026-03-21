@@ -249,20 +249,29 @@ async def refresh_instruments():
     load_instruments(force=True)
 
 
+import random
+
+async def mock_ws_data_job():
+    """Fallback: broadcast mock ticks to keep connection active when market closed or no data."""
+    global _smartapi_ws_started
+    if not is_market_open() or not _smartapi_ws_started:
+        for sym in DEFAULT_WATCHLIST[:10]:
+            base_price = 100.0 + random.uniform(-1, 1)
+            tick_data = {"ltp": base_price, "volume": random.randint(10, 50), "bid": base_price - 0.05, "ask": base_price + 0.05, "is_mock": True}
+            await broadcast_tick(sym, tick_data)
+
 async def auto_start_ws():
-    """Auto-start SmartAPI WS when market opens (runs every minute Mon-Fri 9-15h)."""
+    """Auto-start SmartAPI WS and manage reconnects."""
     global _smartapi_ws_started, _ws_connector
-    if is_market_open() and not _smartapi_ws_started:
-        logger.info("[SCHEDULER] Market is open — auto-starting WebSocket")
+    if not _smartapi_ws_started:
+        logger.info("[SCHEDULER] Auto-starting WebSocket")
         if not _ws_connector:
             _ws_connector = SmartAPIConnector()
-            _ws_connector.login()
+            try:
+                _ws_connector.login()
+            except Exception as e:
+                logger.error(f"[WS] Login failed: {e}")
         _start_smartapi_ws(DEFAULT_WATCHLIST)
-    elif not is_market_open() and _smartapi_ws_started:
-        logger.info("[SCHEDULER] Market closed — stopping WebSocket")
-        if _ws_connector:
-            _ws_connector.stop_ws()
-        _smartapi_ws_started = False
 
 
 async def prewarm_predictions():
@@ -341,18 +350,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"[STARTUP] SmartAPI login failed (will use mock data): {e}")
 
-    # 5. Start WebSocket if market is open
-    if is_market_open():
-        logger.info("[STARTUP] Market is open — starting WebSocket...")
-        _start_smartapi_ws(DEFAULT_WATCHLIST)
-    else:
-        logger.info("[STARTUP] Market is closed — WebSocket deferred")
+    # 5. Start WebSocket
+    logger.info("[STARTUP] Starting WebSocket connection unconditionally...")
+    _start_smartapi_ws(DEFAULT_WATCHLIST)
 
     # 6. Start scheduler
     scheduler.add_job(regen_token, 'cron', hour=8, minute=30)
     scheduler.add_job(refresh_instruments, 'cron', hour=8, minute=0)
     scheduler.add_job(prewarm_predictions, 'cron', minute='*/15')
-    scheduler.add_job(auto_start_ws, 'cron', minute='*/1', hour='9-15', day_of_week='mon-fri')
+    scheduler.add_job(auto_start_ws, 'cron', minute='*/1')
+    scheduler.add_job(mock_ws_data_job, 'interval', seconds=5)
     scheduler.add_job(sync_broker_positions, 'cron', minute='*/5', hour='9-15', day_of_week='mon-fri')
     scheduler.start()
     logger.info("[STARTUP] ✓ Scheduler started (including auto WS start + broker sync jobs)")
@@ -530,8 +537,8 @@ async def websocket_live(ws: WebSocket):
                     sub_symbols = _sanitize_symbols(msg.get("symbols", []))
                     logger.info(f"[WS] Client subscribing to: {sub_symbols}")
 
-                    # Start SmartAPI WS if not already running and market is open
-                    if not _smartapi_ws_started and sub_symbols and is_market_open():
+                    # Start SmartAPI WS if not already running
+                    if not _smartapi_ws_started and sub_symbols:
                         _start_smartapi_ws(sub_symbols)
 
                     await ws.send_text(json.dumps({
