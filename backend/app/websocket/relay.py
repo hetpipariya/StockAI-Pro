@@ -41,6 +41,7 @@ async def broadcast_tick(symbol: str, tick: dict):
         "bid": tick.get("bid", tick.get("ltp")),
         "ask": tick.get("ask", tick.get("ltp")),
         "volume": tick.get("volume", 0),
+        "signal": tick.get("signal", "HOLD"),
     }
 
     await _broadcast(msg)

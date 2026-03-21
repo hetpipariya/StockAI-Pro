@@ -34,7 +34,7 @@ export default function IntelligencePanel({ prediction, snapshot, symbol, timefr
     fetchLocalSignal();
   }, [symbol, timeframe]);
 
-  const activeData = signalData || prediction;
+  const activeData = prediction || signalData;
 
   const toFiniteNumber = (value) => {
     const num = Number(value)

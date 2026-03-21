@@ -356,6 +356,11 @@ export function useTradingEngine() {
 
       if (latest.type === 'tick') {
         tickUpdate = latest // We only care about the most recent tick in this batch
+        console.log("WS DATA:", latest)
+        
+        if (latest.signal && latest.signal !== 'HOLD') {
+           setPrediction(prev => ({ ...(prev || {}), signal: latest.signal }))
+        }
       } else if (latest.type === 'candle_update') {
         candleUpdates.push(latest) // Keep all candle updates to maintain structural integrity
       }
