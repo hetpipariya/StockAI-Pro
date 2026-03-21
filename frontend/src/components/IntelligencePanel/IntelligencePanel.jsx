@@ -3,38 +3,7 @@ import SentimentPanel from '../SentimentPanel/SentimentPanel'
 import { useState, useEffect } from 'react'
 
 export default function IntelligencePanel({ prediction, snapshot, symbol, timeframe, hideNews = false }) {
-  const [signalData, setSignalData] = useState(null)
-  const [isLoading, setIsLoading] = useState(true)
-
-  useEffect(() => {
-    if (!symbol) return;
-    setIsLoading(true);
-    
-    // Fallback sync with `prediction` prop since useTradingEngine fetches it
-    const fetchLocalSignal = async () => {
-      try {
-        const res = await fetch(`${import.meta.env.VITE_API_URL || ''}/api/v1/predict?symbol=${symbol}&horizon=${timeframe || '15m'}`);
-        const data = await res.json();
-        console.log('[DEBUG] Full API Response (Predict):', data);
-        console.log('[DEBUG] Target & Stop Loss:', { target: data?.target, stop_loss: data?.stop_loss });
-        
-        if (data && !data.error) {
-          setSignalData(data);
-        } else {
-          setSignalData(null);
-        }
-      } catch (err) {
-        console.error('Signal Engine Fetch Error:', err);
-        setSignalData(null);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchLocalSignal();
-  }, [symbol, timeframe]);
-
-  const activeData = prediction || signalData;
+  const activeData = prediction;
 
   const toFiniteNumber = (value) => {
     const num = Number(value)

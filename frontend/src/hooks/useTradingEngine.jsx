@@ -242,7 +242,11 @@ export function useTradingEngine() {
       }
       
       setSnapshot(!snap?.error && isPlainObject(snap) ? snap : null)
-      setPrediction(!pred?.error && isPlainObject(pred) ? pred : null)
+      setPrediction(prev => {
+        if (pred?.error || !isPlainObject(pred)) return prev;
+        if (!prev) return pred;
+        return { ...pred, signal: prev.signal || pred.signal };
+      })
       setIndicatorData(Array.isArray(ind?.data) ? ind.data.filter((row) => isPlainObject(row)) : [])
 
       const predConfidence = toFiniteNumber(pred?.confidence) ?? 0
@@ -359,6 +363,7 @@ export function useTradingEngine() {
         console.log("WS DATA:", latest)
         
         if (latest.signal) {
+           console.log("UPDATED SIGNAL:", latest.signal)
            setPrediction(prev => ({ ...(prev || {}), signal: latest.signal }))
         }
       } else if (latest.type === 'candle_update') {
