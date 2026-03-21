@@ -41,7 +41,7 @@ async def get_predict(
         # 2. Get current LTP
         ltp = 0.0
         try:
-            snap = _fetch_snapshot(symbol)
+            snap = await _fetch_snapshot(symbol)
             ltp = float(snap.get("ltp", 0) or 0)
         except Exception:
             if candles:

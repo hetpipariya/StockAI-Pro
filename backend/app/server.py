@@ -47,6 +47,10 @@ _smartapi_ws_started = False
 _ws_connector: SmartAPIConnector | None = None
 _event_loop: asyncio.AbstractEventLoop | None = None
 
+# Cached imports for tick loop performance
+_cached_candle_builder_15m = None
+_cached_get_executor = None
+
 # Default watchlist symbols to subscribe on startup
 DEFAULT_WATCHLIST = [
     "RELIANCE", "TCS", "INFY", "HDFCBANK", "SBIN",
@@ -60,6 +64,7 @@ def _on_smartapi_tick(msg):
     Callback when SmartAPI WS receives tick — runs in WS thread.
     Resolves token → symbol, aggregates into candles, broadcasts to clients.
     """
+    global _cached_candle_builder_15m, _cached_get_executor
     try:
         # Debug: log raw tick structure
         if isinstance(msg, dict):
@@ -100,8 +105,10 @@ def _on_smartapi_tick(msg):
         completed_candle = tick_aggregator.process_tick(symbol, ltp, vol)
 
         # 1b. Feed into 15m candle builder for live trading
-        from app.trading.candle_builder import candle_builder_15m
-        completed_15m = candle_builder_15m.process_tick(symbol, ltp, vol)
+        if _cached_candle_builder_15m is None:
+            from app.trading.candle_builder import candle_builder_15m
+            _cached_candle_builder_15m = candle_builder_15m
+        completed_15m = _cached_candle_builder_15m.process_tick(symbol, ltp, vol)
 
         # 2. Broadcast raw tick to frontend (for price badge)
         tick_data = {"ltp": ltp, "volume": vol, "bid": best_bid, "ask": best_ask}
@@ -117,8 +124,10 @@ def _on_smartapi_tick(msg):
             _schedule_async(_run_live_executor(symbol))
 
         # 5. Check exits on every tick for open positions
-        from app.trading.live_executor import get_executor
-        executor = get_executor()
+        if _cached_get_executor is None:
+            from app.trading.live_executor import get_executor
+            _cached_get_executor = get_executor
+        executor = _cached_get_executor()
         if executor.router.has_position(symbol):
             exit_result = executor.check_exits(symbol, ltp)
             if exit_result:

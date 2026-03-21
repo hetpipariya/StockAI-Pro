@@ -81,12 +81,13 @@ def get_connector() -> SmartAPIConnector:
     return _connector
 
 
-def _fetch_snapshot(symbol: str) -> dict:
+async def _fetch_snapshot(symbol: str) -> dict:
     """Fetch live price snapshot via SmartAPI."""
+    import asyncio
     token = get_token(symbol) or get_symbol_token(symbol)
     ts = get_tradingsymbol(symbol)
-    conn = get_connector()
-    data = conn.get_ltp(token, SMARTAPI_EXCHANGE, ts)
+    conn = await asyncio.to_thread(get_connector)
+    data = await asyncio.to_thread(conn.get_ltp, token, SMARTAPI_EXCHANGE, ts)
     if not data:
         raise ValueError(f"LTP not available for {symbol}")
     return {
@@ -150,7 +151,7 @@ async def get_snapshot(symbol: str = Query(..., description="e.g. RELIANCE")):
     if cached:
         return cached
     try:
-        out = _fetch_snapshot(symbol)
+        out = await _fetch_snapshot(symbol)
         await set_cache(key, out, ttl=5)
         return out
     except Exception as e:
@@ -200,9 +201,10 @@ async def get_history(
 
     # 3. Fetch from SmartAPI (fill gaps)
     try:
+        import asyncio
         token = get_token(symbol) or get_symbol_token(symbol)
         logger.info(f"[MARKET] Fetching history: symbol={symbol}, token={token}, interval={interval}")
-        conn = get_connector()
+        conn = await asyncio.to_thread(get_connector)
         to_dt = datetime.now()
         # Use 7 days for intraday to guarantee hitting trading days
         if interval in ("1m", "3m", "5m", "15m", "30m"):
@@ -211,7 +213,7 @@ async def get_history(
             from_dt = to_dt - timedelta(days=30)
         else:
             from_dt = to_dt - timedelta(days=365)
-        rows = conn.fetch_history(token, SMARTAPI_EXCHANGE, interval, from_dt, to_dt, limit)
+        rows = await asyncio.to_thread(conn.fetch_history, token, SMARTAPI_EXCHANGE, interval, from_dt, to_dt, limit)
 
         if rows:
             ohlcv = []

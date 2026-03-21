@@ -345,85 +345,89 @@ export function useTradingEngine() {
     const newMessages = ws.messages.slice(lastProcessedMsgIdx.current)
     lastProcessedMsgIdx.current = ws.messages.length
 
+    let tickUpdate = null
+    let candleUpdates = []
+
+    // 1. Accumulate latest relevant updates to minimize redundant render cycles
     for (const latest of newMessages) {
       if (!isPlainObject(latest)) continue
+      if (latest.symbol !== symbol) continue
 
-      if (latest.type === 'tick' && latest.symbol === symbol) {
-        const ltp = toFiniteNumber(latest.ltp)
-        const bid = toFiniteNumber(latest.bid)
-        const ask = toFiniteNumber(latest.ask)
-        const volume = toFiniteNumber(latest.volume)
-
-        if (ltp != null) {
-          setSnapshot(prev => ({
-            ...(isPlainObject(prev) ? prev : {}),
-            ltp,
-            bid: bid ?? ltp,
-            ask: ask ?? ltp,
-            volume: volume ?? 0,
-          }))
-          setOhlcv(prev => {
-            if (!Array.isArray(prev) || prev.length === 0) return prev
-            const newOhlcv = [...prev]
-            const last = { ...newOhlcv[newOhlcv.length - 1] }
-            
-            // Live Tick Spike Validation (Clamped to 3% max deviation)
-            const changePct = Math.abs(ltp - last.close) / (last.close || 1)
-            if (changePct > 0.03) {
-              console.warn(`[WS Tick] Ignored abnormal >3% spike: ${last.close} -> ${ltp}`)
-              return prev
-            }
-
-            const lastHigh = toFiniteNumber(last.high) ?? ltp
-            const lastLow = toFiniteNumber(last.low) ?? ltp
-            last.close = ltp
-            last.high = Math.max(lastHigh, ltp)
-            last.low = Math.min(lastLow, ltp)
-            newOhlcv[newOhlcv.length - 1] = last
-            return newOhlcv
-          })
-          setIsMockData(false)
-        }
+      if (latest.type === 'tick') {
+        tickUpdate = latest // We only care about the most recent tick in this batch
+      } else if (latest.type === 'candle_update') {
+        candleUpdates.push(latest) // Keep all candle updates to maintain structural integrity
       }
+    }
 
-      if (latest.type === 'candle_update' && latest.symbol === symbol) {
-        let open = toFiniteNumber(latest.open)
-        let high = toFiniteNumber(latest.high)
-        let low = toFiniteNumber(latest.low)
-        let close = toFiniteNumber(latest.close)
-        const volume = toFiniteNumber(latest.volume) ?? 0
-        const timestamp = typeof latest.timestamp === 'string' && latest.timestamp ? latest.timestamp : null
+    // 2. Perform batched Snapshot state update
+    if (tickUpdate) {
+      const ltp = toFiniteNumber(tickUpdate.ltp)
+      const bid = toFiniteNumber(tickUpdate.bid)
+      const ask = toFiniteNumber(tickUpdate.ask)
+      const volume = toFiniteNumber(tickUpdate.volume)
 
-        if (open == null || high == null || low == null || !timestamp) continue
-        
-        setOhlcv(prev => {
-          if (!Array.isArray(prev) || prev.length === 0) {
-            return [{ time: timestamp, open, high, low, close: close ?? open, volume }]
+      if (ltp != null) {
+        setSnapshot(prev => ({
+          ...(isPlainObject(prev) ? prev : {}),
+          ltp,
+          bid: bid ?? ltp,
+          ask: ask ?? ltp,
+          volume: volume ?? 0,
+        }))
+        setIsMockData(false)
+      }
+    }
+
+    // 3. Perform single batched OHLCV state update combining candles and final tick
+    if (candleUpdates.length > 0 || tickUpdate) {
+      setOhlcv(prev => {
+        if (!Array.isArray(prev) || prev.length === 0) {
+          // If empty and we have a candle, initialize it
+          if (candleUpdates.length > 0) {
+            const first = candleUpdates[0]
+            const open = toFiniteNumber(first.open)
+            const close = toFiniteNumber(first.close)
+            if (open != null && close != null) {
+                return [{ time: first.timestamp, open, high: toFiniteNumber(first.high) || Math.max(open, close), low: toFiniteNumber(first.low) || Math.min(open, close), close, volume: toFiniteNumber(first.volume) || 0 }]
+            }
           }
+          return prev
+        }
 
-          const tfMs = TIMEFRAME_TO_MS[timeframe] || 60000
+        const newOhlcv = [...prev]
+        const tfMs = TIMEFRAME_TO_MS[timeframe] || 60000
+        let modified = false
+
+        // Process all candle completions
+        for (const latest of candleUpdates) {
+          let open = toFiniteNumber(latest.open)
+          let high = toFiniteNumber(latest.high)
+          let low = toFiniteNumber(latest.low)
+          let close = toFiniteNumber(latest.close)
+          const volume = toFiniteNumber(latest.volume) ?? 0
+          const timestamp = typeof latest.timestamp === 'string' && latest.timestamp ? latest.timestamp : null
+
+          if (open == null || high == null || low == null || !timestamp) continue
           if (latest.interval && latest.interval !== timeframe) {
             console.warn(`[WS Candle] Rejected mismatched timeframe block. Expected ${timeframe}`)
-            return prev
+            continue
           }
-          
-          const previousClose = prev[prev.length - 1].close;
-          if (close == null) close = previousClose;
-          if (open == null) open = previousClose;
 
-          // Live Candle Spike Validation (Clamped to 3%)
+          const previousClose = newOhlcv[newOhlcv.length - 1].close
+          if (close == null) close = previousClose
+          if (open == null) open = previousClose
+
           const changePct = Math.abs(close - previousClose) / (previousClose || 1)
           if (changePct > 0.03) {
              console.warn(`[WS Candle] Suppressed abnormal >3% spike: ${previousClose} -> ${close}`)
              open = previousClose; close = previousClose; high = previousClose; low = previousClose;
           }
 
-          // Structural Fallback
           high = Math.max(high, open, close)
           low = Math.min(low, open, close)
 
           const newCandle = { time: timestamp, open, high, low, close, volume }
-          const newOhlcv = [...prev]
           const lastIdx = newOhlcv.length - 1
           
           const currMs = new Date(timestamp).getTime()
@@ -431,34 +435,50 @@ export function useTradingEngine() {
           const timeDiffMs = currMs - prevMs
 
           if (lastIdx >= 0 && newOhlcv[lastIdx]?.time === timestamp) {
-            // Replace candle with same timestamp
-            console.debug(`[WS Merge] Replacing candle at ${timestamp} (same timestamp)`)
             newOhlcv[lastIdx] = newCandle
           } else if (currMs >= prevMs + tfMs || currMs < prevMs) {
-            // Push if properly sequenced to the next interval bound, OR if backend forcefully resets stream
-            const isGap = timeDiffMs >= tfMs * 2
-            if (isGap) {
-              console.warn(`[WS Merge] Potential gap detected: ${new Date(prevMs).toISOString()} → ${new Date(currMs).toISOString()} (${(timeDiffMs/1000).toFixed(0)}s, expected ${tfMs/1000}s)`)
+            if (timeDiffMs >= tfMs * 2) {
+              console.warn(`[WS Merge] Potential gap detected: ${new Date(prevMs).toISOString()} → ${new Date(currMs).toISOString()}`)
             }
-            console.debug(`[WS Merge] Appending new candle at ${timestamp} (${timeDiffMs}ms since last)`)
             newOhlcv.push(newCandle)
           } else {
-            // Mismatched sub-interval update (e.g. 1m candle hitting a 5m chart bucket)
-            // Dynamically merge inside the current bucket instead of throwing off the X-axis!
-            console.debug(`[WS Merge] Merging sub-interval candle into current bucket (${timeDiffMs}ms since last)`)
             const last = newOhlcv[lastIdx]
             last.close = close
             last.high = Math.max(last.high, high)
             last.low = Math.min(last.low, low)
             last.volume += volume
           }
-          
+          modified = true
+        }
+
+        // Apply final tick to the current active candle wick
+        if (tickUpdate) {
+          const ltp = toFiniteNumber(tickUpdate.ltp)
+          if (ltp != null) {
+            const last = { ...newOhlcv[newOhlcv.length - 1] }
+            const changePct = Math.abs(ltp - last.close) / (last.close || 1)
+            if (changePct <= 0.03) {
+              const lastHigh = toFiniteNumber(last.high) ?? ltp
+              const lastLow = toFiniteNumber(last.low) ?? ltp
+              last.close = ltp
+              last.high = Math.max(lastHigh, ltp)
+              last.low = Math.min(lastLow, ltp)
+              newOhlcv[newOhlcv.length - 1] = last
+              modified = true
+            } else {
+              console.warn(`[WS Tick] Ignored abnormal >3% spike: ${last.close} -> ${ltp}`)
+            }
+          }
+        }
+
+        if (modified) {
           if (newOhlcv.length > 500) newOhlcv.shift()
           return newOhlcv
-        })
-      }
+        }
+        return prev
+      })
     }
-  }, [ws.messages, symbol])
+  }, [ws.messages, symbol, timeframe])
 
   return {
     symbol, setSymbol,
