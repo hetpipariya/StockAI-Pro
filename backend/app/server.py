@@ -29,7 +29,7 @@ from app.websocket.relay import (
     broadcast_candle, broadcast_status, get_client_count,
 )
 from app.connectors import SmartAPIConnector, get_symbol_token
-from app.services.db import init_db
+from app.services.db import init_db, check_db_connection
 from app.services.redis_client import get_redis
 from app.services.instrument_master import load_instruments, get_token, get_symbol, get_instrument_count
 from app.services.tick_aggregator import tick_aggregator
@@ -292,6 +292,8 @@ async def lifespan(app: FastAPI):
 
     # 1. Init database (creates tables)
     logger.info("[STARTUP] Initializing database...")
+    from app.config import DATABASE_URL as _db_url
+    logger.info("[STARTUP] Database backend: %s", "SQLite" if _db_url.startswith("sqlite") else "PostgreSQL")
     await init_db()
 
     # 1b. Restore trading state from DB (positions, risk, PnL)
@@ -420,12 +422,14 @@ app.include_router(trading.router)
 
 
 @app.get("/health")
-def health():
+async def health():
     """Enhanced health check with system status."""
+    db_ok = await check_db_connection()
     return {
-        "status": "ok",
+        "status": "ok" if db_ok else "degraded",
         "service": "stockai-pro",
         "version": "2.0",
+        "db_connected": db_ok,
         "instruments": get_instrument_count(),
         "smartapi_connected": _ws_connector.is_logged_in if _ws_connector else False,
         "ws_clients": get_client_count(),
