@@ -252,9 +252,15 @@ export function useTradingEngine() {
       
       setSnapshot(!snap?.error && isPlainObject(snap) ? snap : null)
       setPrediction(prev => {
-        if (pred?.error || !isPlainObject(pred)) return prev;
-        if (!prev) return pred;
-        return { ...pred, signal: prev.signal || pred.signal };
+        const newPred = pred;
+        console.log('[PREDICTION UPDATE]', symbol, newPred);  // Debug log
+        if (newPred?.error) {
+          console.warn('[PREDICTION ERROR]', newPred.error);
+          return prev;
+        }
+        if (!isPlainObject(newPred)) return prev;
+        if (!prev) return newPred;
+        return { ...newPred, signal: prev.signal || newPred.signal };
       })
       setIndicatorData(Array.isArray(ind?.data) ? ind.data.filter((row) => isPlainObject(row)) : [])
 
