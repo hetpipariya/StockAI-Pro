@@ -28,7 +28,7 @@ async def get_indicators(
         candles = history_response["data"]
         
         if not candles:
-            return {"symbol": symbol, "data": []}
+            return {"status": "success", "data": {"symbol": symbol, "data": []}, "message": "No candles found"}
             
         df = IndicatorEngine.compute_all(candles)
         
@@ -37,7 +37,7 @@ async def get_indicators(
             df.reset_index(inplace=True)
         elif 'time' not in df.columns:
             # If time is neither column nor index, skip (shouldn't happen)
-            return {"symbol": symbol, "data": []}
+            return {"status": "success", "data": {"symbol": symbol, "data": []}, "message": "Time column missing"}
         
         # Parse requested indicators
         ind_list = [i.strip().lower() for i in indicators.split(",")]
@@ -81,9 +81,13 @@ async def get_indicators(
         result_data = result_df.to_dict(orient="records")
         
         return {
-            "symbol": symbol,
-            "interval": interval,
-            "data": result_data
+            "status": "success",
+            "data": {
+                "symbol": symbol,
+                "interval": interval,
+                "data": result_data
+            },
+            "message": "Indicators calculated successfully"
         }
         
     except Exception as e:

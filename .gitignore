@@ -214,7 +214,7 @@ venv/
 node_modules/
 logs/
 *.log
-models/
+models/\r\n# But allow backend models for Docker builds\r\n!backend/models/\r\n!backend/models/*.pkl
 *.parquet
 .DS_Store
 *.egg-info/

@@ -18,18 +18,37 @@ from app.inference.feature_engineering import (
     FEATURE_VERSION,
 )
 import json
+import os
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Point to root/models (local) or /app/models (Docker)
+# ── Model directory resolution ──────────────────────────────────────────────
+# Priority: MODEL_PATH env var → /app/models (Docker) → relative paths
 _p2 = Path(__file__).resolve().parents[2]
 _p3 = Path(__file__).resolve().parents[3]
-if (_p2 / "models" / "model.pkl").exists() or (_p2 / "models").exists():
-    MODEL_DIR = _p2 / "models"
+
+_env_model_path = os.getenv("MODEL_PATH", "").strip()
+MODEL_DIR = None
+
+if _env_model_path and Path(_env_model_path).exists():
+    MODEL_DIR = Path(_env_model_path)
 else:
-    MODEL_DIR = _p3 / "models"
+    for candidate in [
+        Path("/app/models"),
+        _p2 / "models",
+        _p3 / "models",
+    ]:
+        if (candidate / "model.pkl").exists():
+            MODEL_DIR = candidate
+            break
+
+if MODEL_DIR is None:
+    MODEL_DIR = _p2 / "models"
+
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
+logger.info("[MODELS] Using model directory: %s (exists=%s, has_model=%s)",
+            MODEL_DIR, MODEL_DIR.exists(), (MODEL_DIR / "model.pkl").exists())
 
 _ensemble_model = None
 _scaler = None

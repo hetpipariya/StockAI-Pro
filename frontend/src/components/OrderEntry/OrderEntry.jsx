@@ -1,9 +1,7 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 
-const _rawApi = import.meta.env.VITE_API_URL || "";
-const _cleanApi = _rawApi.replace(/\/$/, "");
-const API_BASE = _cleanApi ? `${_cleanApi}/api/v1` : "/api/v1";
+const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "") + "/api/v1";
 const RR_PRESETS = [
   { label: '1:1', rr: 1 },
   { label: '1:2', rr: 2 },

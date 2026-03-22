@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import os
 import json
+import time
 import asyncio
 import logging
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -361,7 +363,16 @@ async def lifespan(app: FastAPI):
     logger.info("[STARTUP] Starting WebSocket connection unconditionally...")
     _start_smartapi_ws(DEFAULT_WATCHLIST)
 
-    # 6. Start scheduler
+    # 6. Model warmup — load and run a dummy prediction to detect issues early
+    logger.info("[STARTUP] Warming up ML model...")
+    try:
+        from app.inference.runner import predict_symbol
+        warmup_result = predict_symbol(symbol="RELIANCE", timeframe="15m", latest_ltp=1400.0)
+        logger.info("[STARTUP] ✓ Model warmup complete: signal=%s confidence=%d%%", warmup_result.signal, warmup_result.confidence)
+    except Exception as e:
+        logger.warning("[STARTUP] ⚠ Model warmup failed (will use fallback): %s", e)
+
+    # 7. Start scheduler
     scheduler.add_job(regen_token, 'cron', hour=8, minute=30)
     scheduler.add_job(refresh_instruments, 'cron', hour=8, minute=0)
     scheduler.add_job(prewarm_predictions, 'cron', minute='*/15')
@@ -369,10 +380,10 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(mock_ws_data_job, 'interval', seconds=5)
     scheduler.add_job(sync_broker_positions, 'cron', minute='*/5', hour='9-15', day_of_week='mon-fri')
     scheduler.start()
-logger.info(f"[STARTUP] ✓ Scheduler started. SmartAPI WS: {'started' if _smartapi_ws_started else 'failed'}")
+    logger.info(f"[STARTUP] ✓ Scheduler started. SmartAPI WS: {'started' if _smartapi_ws_started else 'failed'}")
 
     logger.info("=" * 60)
-    logger.info("  StockAI Pro — Backend Ready")
+    logger.info("  StockAI Pro — Backend Ready (Production)")
     logger.info(f"  Instruments: {get_instrument_count()}")
     logger.info(f"  SmartAPI: {'Connected' if _ws_connector.is_logged_in else 'Not connected'}")
     logger.info(f"  Market: {'Open' if is_market_open() else 'Closed'}")
@@ -398,7 +409,7 @@ app = FastAPI(title="StockAI Pro API", version="2.0", lifespan=lifespan)
 # ─── CORS: restrict to known origins (production + dev) ───
 _ALLOWED_ORIGINS = [
     origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,https://stockai-pro.pages.dev,https://stockai-pro-production.up.railway.app").split(",")
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,https://stockai-pro.pages.dev,https://stockai-pro-production.up.railway.app,https://perceptive-comfort-production.up.railway.app").split(",")
     if origin.strip()
 ]
 app.add_middleware(
@@ -409,31 +420,85 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
 
-# ─── Global rate limiter for login/auth endpoints ───
+# ─── Global rate limiter ───
 _login_attempts: dict[str, list[float]] = {}
-_LOGIN_RATE_LIMIT = 5        # max attempts
+_LOGIN_RATE_LIMIT = 5        # max attempts for auth
 _LOGIN_RATE_WINDOW = 300     # per 5 minutes
 
+# General API rate limiting: 60 requests per minute per IP
+_api_requests: dict[str, list[float]] = defaultdict(list)
+_API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", "60"))
+_API_RATE_WINDOW = 60  # 1 minute
+
+
 @app.middleware("http")
-async def rate_limit_auth(request: Request, call_next):
-    """Rate-limit authentication endpoints to prevent brute-force attacks."""
-    import time
+async def production_middleware(request: Request, call_next):
+    """Combined production middleware: rate limiting, request logging, timeout."""
     path = request.url.path
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+
+    # 1. Auth rate limiting (strict: 5/5min)
     if path in ("/api/v1/auth/login", "/token"):
-        client_ip = request.client.host if request.client else "unknown"
-        now = time.monotonic()
         attempts = _login_attempts.get(client_ip, [])
-        # Clean old attempts outside window
         attempts = [t for t in attempts if now - t < _LOGIN_RATE_WINDOW]
         if len(attempts) >= _LOGIN_RATE_LIMIT:
-            logger.warning(f"[RATE-LIMIT] Blocked login attempt from {client_ip} — {len(attempts)} attempts in {_LOGIN_RATE_WINDOW}s")
+            logger.warning("[RATE-LIMIT] Auth blocked from %s (%d attempts)", client_ip, len(attempts))
             return JSONResponse(
                 status_code=429,
-                content={"detail": "Too many login attempts. Please wait 5 minutes."},
+                content={"status": "error", "message": "Too many login attempts. Wait 5 minutes.", "data": None},
             )
         attempts.append(now)
         _login_attempts[client_ip] = attempts
-    return await call_next(request)
+
+    # 2. General API rate limiting (60 req/min per IP)
+    if path.startswith("/api/"):
+        reqs = _api_requests[client_ip]
+        reqs[:] = [t for t in reqs if now - t < _API_RATE_WINDOW]
+        if len(reqs) >= _API_RATE_LIMIT:
+            logger.warning("[RATE-LIMIT] API blocked from %s (%d req/min)", client_ip, len(reqs))
+            return JSONResponse(
+                status_code=429,
+                content={"status": "error", "message": f"Rate limit exceeded ({_API_RATE_LIMIT}/min). Slow down.", "data": None},
+            )
+        reqs.append(now)
+
+    # 3. Request timing + logging
+    start_time = time.perf_counter()
+    try:
+        response = await asyncio.wait_for(call_next(request), timeout=45.0)
+    except asyncio.TimeoutError:
+        elapsed = time.perf_counter() - start_time
+        logger.error("[TIMEOUT] %s %s timed out after %.1fs from %s", request.method, path, elapsed, client_ip)
+        return JSONResponse(
+            status_code=504,
+            content={"status": "error", "message": "Request timed out", "data": None},
+        )
+    except Exception as exc:
+        elapsed = time.perf_counter() - start_time
+        logger.error("[ERROR] %s %s failed after %.1fs: %s", request.method, path, elapsed, exc)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": "Internal server error", "data": None},
+        )
+
+    elapsed = time.perf_counter() - start_time
+    # Only log API requests (skip /metrics, /health, static files)
+    if path.startswith("/api/") and elapsed > 0.5:
+        logger.info("[API] %s %s → %d (%.2fs) from %s", request.method, path, response.status_code, elapsed, client_ip)
+
+    return response
+
+# ─── Global exception handler ───
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all exception handler — ensures JSON response on any unhandled error."""
+    logger.error("[UNHANDLED] %s %s — %s: %s", request.method, request.url.path, type(exc).__name__, exc, exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"status": "error", "message": str(exc), "data": None},
+    )
+
 
 # Instrument the app for Prometheus metric scraping
 Instrumentator().instrument(app).expose(app)

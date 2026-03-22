@@ -2,9 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useWebsocket } from './useWebsocket'
 import { INDICATOR_CATALOG } from '../components/ChartToolbar/ChartToolbar'
 
-const _rawApi = import.meta.env.VITE_API_URL || "";
-const _cleanApi = _rawApi.replace(/\/$/, "");
-const API_BASE = _cleanApi ? `${_cleanApi}/api/v1` : "/api/v1";
+const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "") + "/api/v1";
 
 const isPlainObject = (value) => !!value && typeof value === 'object' && !Array.isArray(value)
 export const toFiniteNumber = (value) => {
@@ -22,6 +20,25 @@ const parseJsonSafe = async (response, fallback = null) => {
     
     return fallback
   }
+}
+
+// Retry wrapper for fetch with exponential backoff
+const fetchWithRetry = async (url, retries = 2, delay = 1500) => {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetch(url)
+      if (res.ok || i === retries) return res
+      console.warn(`[API Retry] ${url} returned ${res.status}, attempt ${i + 1}/${retries + 1}`)
+    } catch (e) {
+      if (i === retries) {
+        console.error(`[API Retry] ${url} failed after ${retries + 1} attempts:`, e)
+        return null
+      }
+      console.warn(`[API Retry] ${url} network error, attempt ${i + 1}/${retries + 1}`)
+    }
+    await new Promise(r => setTimeout(r, delay * (i + 1)))
+  }
+  return null
 }
 
 const TIMEFRAME_TO_MS = {
@@ -199,17 +216,17 @@ export function useTradingEngine() {
       const indKeysStr = backendKeys.length > 0 ? backendKeys.join(',') : ''
 
       const fetches = [
-        fetch(`${API_BASE}/market/history?symbol=${symbol}&interval=${tf}&limit=500`).catch(e => { console.error('History fetch error', e); return null; }),
-        fetch(`${API_BASE}/market/snapshot?symbol=${symbol}`).catch(e => { console.error('Snapshot fetch error', e); return null; }),
-        fetch(`${API_BASE}/predict?symbol=${symbol}&horizon=15m`).catch(e => { console.error('Predict fetch error', e); return null; }),
-        fetch(`${API_BASE}/market/status`).catch(e => { console.error('Status fetch error', e); return null; }),
+        fetchWithRetry(`${API_BASE}/market/history?symbol=${symbol}&interval=${tf}&limit=500`),
+        fetchWithRetry(`${API_BASE}/market/snapshot?symbol=${symbol}`),
+        fetchWithRetry(`${API_BASE}/predict?symbol=${symbol}&horizon=15m`),
+        fetchWithRetry(`${API_BASE}/market/status`, 1, 1000),
       ]
       if (indKeysStr) {
-        fetches.push(fetch(`${API_BASE}/indicators?symbol=${symbol}&interval=${tf}&indicators=${indKeysStr}`).catch(e => { console.error('Indicators fetch error', e); return null; }))
+        fetches.push(fetchWithRetry(`${API_BASE}/indicators?symbol=${symbol}&interval=${tf}&indicators=${indKeysStr}`))
       }
       
       const [histRes, snapRes, predRes, statRes, indRes] = await Promise.all(fetches)
-      const [hist, snap, pred, stat, ind] = await Promise.all([
+      const [histRaw, snapRaw, predRaw, statRaw, indRaw] = await Promise.all([
         parseJsonSafe(histRes, {}),
         parseJsonSafe(snapRes, {}),
         parseJsonSafe(predRes, {}),
@@ -217,9 +234,19 @@ export function useTradingEngine() {
         indRes ? parseJsonSafe(indRes, {}) : Promise.resolve({}),
       ])
 
+      const hist = histRaw?.data || {}
+      const snap = snapRaw?.data || {}
+      const pred = predRaw?.data || {}
+      const stat = statRaw?.data || {}
+      const ind = indRaw?.data || {}
+
+      const histError = histRaw?.status === 'error' || hist?.error;
+      const snapError = snapRaw?.status === 'error' || snap?.error;
+      const predError = predRaw?.status === 'error' || pred?.error;
+
       if (fetchToken !== activeFetchTokenRef.current) return
 
-      if (hist?.error) {
+      if (histError) {
          setErrorMsg("No market data available")
       } else {
          setErrorMsg(null)
@@ -248,16 +275,16 @@ export function useTradingEngine() {
           return Array.from(map.values()).sort((a, b) => new Date(a.time) - new Date(b.time));
         })
         setIsMockData(false)
-      } else if (!hist?.error && fetchToken === 1) {
+      } else if (!histError && fetchToken === 1) {
         setOhlcv([])
       }
       
-      setSnapshot(!snap?.error && isPlainObject(snap) ? snap : null)
+      setSnapshot(!snapError && isPlainObject(snap) ? snap : null)
       setPrediction(prev => {
         const newPred = pred;
         console.log('[PREDICTION UPDATE]', symbol, newPred);  // Debug log
-        if (newPred?.error) {
-          console.warn('[PREDICTION ERROR]', newPred.error);
+        if (predError) {
+          console.warn('[PREDICTION ERROR]', newPred?.error || 'Unknown error');
           return prev;
         }
         if (!isPlainObject(newPred)) return prev;
@@ -267,12 +294,12 @@ export function useTradingEngine() {
       setIndicatorData(Array.isArray(ind?.data) ? ind.data.filter((row) => isPlainObject(row)) : [])
 
       const predConfidence = toFiniteNumber(pred?.confidence) ?? 0
-      if (!pred?.error && pred?.signal && pred.signal !== 'HOLD' && predConfidence >= 70) {
+      if (!predError && pred?.signal && pred.signal !== 'HOLD' && predConfidence >= 70) {
         if (!previousPredictionRef.current || previousPredictionRef.current.signal !== pred.signal) {
           setActiveSignal(pred)
         }
       }
-      previousPredictionRef.current = pred?.error ? null : pred
+      previousPredictionRef.current = predError ? null : pred
 
       setMarketStatus(isPlainObject(stat) ? stat : null)
       setLoading(false)
@@ -296,7 +323,8 @@ export function useTradingEngine() {
       
       console.info(`[Pagination] Loading history before ${toTime}`)
       const res = await fetch(`${API_BASE}/market/history?symbol=${symbol}&interval=${tf}&limit=500&to_time=${toTime}`)
-      const hist = await parseJsonSafe(res, {})
+      const histRaw = await parseJsonSafe(res, {})
+      const hist = histRaw?.data || {}
       
       const rawNewCandles = Array.isArray(hist?.data) ? hist.data.filter((candle) => isPlainObject(candle)) : []
       const newCandles = validateAndCleanOHLCV(rawNewCandles, timeframe)

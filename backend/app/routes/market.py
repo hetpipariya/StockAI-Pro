@@ -140,7 +140,7 @@ async def _db_snapshot(symbol: str) -> dict | None:
 @router.get("/status")
 async def market_status():
     """Market open/close status."""
-    return get_market_status()
+    return {"status": "success", "data": get_market_status(), "message": "Status OK"}
 
 
 @router.get("/snapshot")
@@ -149,11 +149,11 @@ async def get_snapshot(symbol: str = Query(..., description="e.g. RELIANCE")):
     key = f"snap:{symbol}"
     cached = await get_cache(key)
     if cached:
-        return cached
+        return {"status": "success", "data": cached, "message": "Snapshot from cache"}
     try:
         out = await _fetch_snapshot(symbol)
         await set_cache(key, out, ttl=5)
-        return out
+        return {"status": "success", "data": out, "message": "Live snapshot"}
     except Exception as e:
         logger.warning(f"[MARKET] SmartAPI snapshot failed for {symbol}: {e}")
 
@@ -161,9 +161,9 @@ async def get_snapshot(symbol: str = Query(..., description="e.g. RELIANCE")):
     db_snap = await _db_snapshot(symbol)
     if db_snap:
         await set_cache(key, db_snap, ttl=30)
-        return db_snap
+        return {"status": "success", "data": db_snap, "message": "DB snapshot"}
 
-    return _mock_snapshot(symbol)
+    return {"status": "success", "data": _mock_snapshot(symbol), "message": "Mock snapshot"}
 
 
 @router.get("/history")
@@ -180,7 +180,7 @@ async def get_history(
     key = f"hist:{symbol}:{interval}:{limit}"
     cached = await get_cache(key)
     if cached:
-        return cached
+        return {"status": "success", "data": cached, "message": "History from cache"}
 
     # 2. Try DB
     db_candles = await get_candles(symbol, interval, limit=limit)
@@ -197,7 +197,7 @@ async def get_history(
     if len(db_candles) >= limit * 0.8 and not db_is_stale:
         out = {"symbol": symbol, "interval": interval, "data": db_candles, "source": "database", "count": len(db_candles)}
         await set_cache(key, out, ttl=30)
-        return out
+        return {"status": "success", "data": out, "message": "History from database"}
 
     # 3. Fetch from SmartAPI (fill gaps)
     try:
@@ -229,7 +229,7 @@ async def get_history(
 
                 out = {"symbol": symbol, "interval": interval, "data": ohlcv, "source": "smartapi", "count": len(ohlcv)}
                 await set_cache(key, out, ttl=60)
-                return out
+                return {"status": "success", "data": out, "message": "History from API"}
 
     except Exception as e:
         logger.warning(f"[MARKET] SmartAPI history error for {symbol}: {e}")
@@ -237,12 +237,13 @@ async def get_history(
     # 4. Fall back to DB data if we have any
     if db_candles:
         out = {"symbol": symbol, "interval": interval, "data": db_candles, "source": "database", "count": len(db_candles)}
-        return out
+        return {"status": "success", "data": out, "message": "History from stale DB"}
 
     # 5. Last resort: mock data
     logger.warning(f"[MARKET] Using mock data for {symbol}/{interval}")
     ohlcv = _mock_ohlcv(symbol, interval, limit)
-    return {"symbol": symbol, "interval": interval, "data": ohlcv, "source": "mock", "count": len(ohlcv)}
+    out = {"symbol": symbol, "interval": interval, "data": ohlcv, "source": "mock", "count": len(ohlcv)}
+    return {"status": "success", "data": out, "message": "Mock history"}
 
 
 # ─── Curated top symbols for quick access ───
@@ -278,7 +279,7 @@ _TOP_SYMBOLS = [
 @router.get("/top-symbols")
 async def top_symbols():
     """Curated top market symbols — indices + NIFTY 50 blue chips."""
-    return {"symbols": _TOP_SYMBOLS}
+    return {"status": "success", "data": {"symbols": _TOP_SYMBOLS}, "message": "Top symbols"}
 
 
 @router.get("/top-volume")
@@ -289,7 +290,7 @@ async def top_volume():
     key = "top_volume"
     cached = await get_cache(key)
     if cached:
-        return cached
+        return {"status": "success", "data": cached, "message": "Top volume from cache"}
 
     top_vol = [
         {"symbol": "TATASTEEL", "name": "Tata Steel Ltd", "sector": "Metals", "volume": "42.3M", "change": 2.15},
@@ -300,5 +301,5 @@ async def top_volume():
     ]
     result = {"stocks": top_vol}
     await set_cache(key, result, ttl=60)
-    return result
+    return {"status": "success", "data": result, "message": "Top volume"}
 

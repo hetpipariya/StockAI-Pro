@@ -29,8 +29,11 @@ COPY --from=builder /app/requirements.txt .
 RUN pip install --no-cache /wheels/*
 
 COPY . .
-# Ensure ML models available
+# Ensure ML models available at /app/models
 COPY models/ ./models/
 
-# Run alembic migrations (PostgreSQL only) and start gunicorn with uvicorn workers
-CMD ["sh", "-c", "python -c \"from app.config import DATABASE_URL; exit(0 if DATABASE_URL.startswith('sqlite') else 1)\" && echo '[STARTUP] SQLite detected â€” skipping alembic migrations' || (echo '[STARTUP] PostgreSQL detected â€” running alembic migrations' && alembic upgrade head); uvicorn app.server:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips=\"*\""]
+# Set model path for the application
+ENV MODEL_PATH=/app/models
+
+# Run alembic migrations (PostgreSQL only) and start uvicorn
+CMD ["sh", "-c", "echo '[DOCKER] Model files:' && ls -la /app/models/*.pkl 2>/dev/null || echo 'WARNING: No model files found'; python -c \"from app.config import DATABASE_URL; exit(0 if DATABASE_URL.startswith('sqlite') else 1)\" && echo '[STARTUP] SQLite — skipping migrations' || (echo '[STARTUP] PostgreSQL — running migrations' && alembic upgrade head); uvicorn app.server:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips=\"*\""]
