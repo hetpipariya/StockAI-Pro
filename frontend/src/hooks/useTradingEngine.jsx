@@ -184,6 +184,9 @@ export function useTradingEngine() {
       const wsHost = isLocal ? '127.0.0.1:8000' : window.location.host
       wsUrl = `${wsProtocol}//${wsHost}/live`
     }
+
+  const ws = useWebsocket(wsUrl)
+
   const fetchData = async (fetchToken) => {
     try {
       const tf = timeframe === '1d' ? '1d' : timeframe

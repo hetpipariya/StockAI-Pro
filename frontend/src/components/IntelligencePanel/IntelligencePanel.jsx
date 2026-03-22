@@ -1,5 +1,6 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import SentimentPanel from '../SentimentPanel/SentimentPanel'
+import NewsPanel from '../NewsPanel/NewsPanel'
 import { useState, useEffect } from 'react'
 
 export default function IntelligencePanel({ prediction, snapshot, symbol, timeframe, hideNews = false }) {

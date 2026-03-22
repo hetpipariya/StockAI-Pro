@@ -12,12 +12,12 @@ export default function RightPanel({ prediction: parentPrediction, snapshot, sym
         const res = await fetch(`${import.meta.env.VITE_API_URL || ''}/api/v1/predict?symbol=${symbol}&horizon=${timeframe}`);
         const response = await res.json();
         console.log("API Response:", response);
-        console.log("Target:", response.target_price);
+        console.log("Target:", response.target || response.target_price);
         setSignalData({
           signal: response.signal || "HOLD",
           confidence: response.confidence || 0,
-          target: response.target_price,
-          stopLoss: response.stop_loss
+          target: response.target || response.target_price,
+          stopLoss: response.stop || response.stop_loss
         });
       } catch (e) {
         console.error("Failed to fetch signal", e);
