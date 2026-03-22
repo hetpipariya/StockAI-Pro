@@ -2,7 +2,9 @@ import { useState, useEffect, useRef } from 'react'
 import { useWebsocket } from './useWebsocket'
 import { INDICATOR_CATALOG } from '../components/ChartToolbar/ChartToolbar'
 
-const API_BASE = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api/v1` : '/api/v1'
+const _rawApi = import.meta.env.VITE_API_URL || "";
+const _cleanApi = _rawApi.replace(/\/$/, "");
+const API_BASE = _cleanApi ? `${_cleanApi}/api/v1` : "/api/v1";
 
 const isPlainObject = (value) => !!value && typeof value === 'object' && !Array.isArray(value)
 export const toFiniteNumber = (value) => {

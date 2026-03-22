@@ -9,7 +9,7 @@ export default function RightPanel({ prediction: parentPrediction, snapshot, sym
     async function fetchSignalData() {
       if (!symbol) return;
       try {
-        const res = await fetch(`${import.meta.env.VITE_API_URL || ''}/api/v1/predict?symbol=${symbol}&horizon=${timeframe}`);
+        const res = await fetch(`${(import.meta.env.VITE_API_URL || '').replace(/\/$/, '')}/api/v1/predict?symbol=${symbol}&horizon=${timeframe}`);
         const response = await res.json();
         console.log("API Response:", response);
         console.log("Target:", response.target || response.target_price);

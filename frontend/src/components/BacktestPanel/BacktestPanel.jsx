@@ -8,7 +8,9 @@ import {
 } from 'lightweight-charts'
 import { useEffect, useRef } from 'react'
 
-const API_BASE = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api/v1` : '/api/v1'
+const _rawApi = import.meta.env.VITE_API_URL || "";
+const _cleanApi = _rawApi.replace(/\/$/, "");
+const API_BASE = _cleanApi ? `${_cleanApi}/api/v1` : "/api/v1";
 
 export default function BacktestPanel({ symbol, onSelect }) {
   const { token } = useAuth()

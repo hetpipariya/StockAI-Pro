@@ -22,8 +22,13 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Point to root/models, not root/backend/models
-MODEL_DIR = Path(__file__).resolve().parents[3] / "models"
+# Point to root/models (local) or /app/models (Docker)
+_p2 = Path(__file__).resolve().parents[2]
+_p3 = Path(__file__).resolve().parents[3]
+if (_p2 / "models" / "model.pkl").exists() or (_p2 / "models").exists():
+    MODEL_DIR = _p2 / "models"
+else:
+    MODEL_DIR = _p3 / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 _ensemble_model = None

@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 
-const API_BASE = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api/v1` : '/api/v1'
+const _rawApi = import.meta.env.VITE_API_URL || "";
+const _cleanApi = _rawApi.replace(/\/$/, "");
+const API_BASE = _cleanApi ? `${_cleanApi}/api/v1` : "/api/v1";
 
 export default function SentimentPanel({ symbol }) {
   const [data, setData] = useState({ fear_greed: 50, label: 'Neutral' })

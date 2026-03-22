@@ -1,7 +1,9 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 
-const API_BASE = import.meta.env.VITE_API_URL ? `${import.meta.env.VITE_API_URL}/api/v1` : '/api/v1'
+const _rawApi = import.meta.env.VITE_API_URL || "";
+const _cleanApi = _rawApi.replace(/\/$/, "");
+const API_BASE = _cleanApi ? `${_cleanApi}/api/v1` : "/api/v1";
 const WATCHLIST_TABS = ['Scalping', 'Swing', 'Long-term']
 const STORAGE_KEY = 'stockai-watchlists'
 
