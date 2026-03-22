@@ -11,6 +11,7 @@ router = APIRouter(prefix="/api/v1", tags=["predict"])
 
 
 @router.get("/predict")
+@router.get("/signal")
 async def get_predict(
     symbol: str = Query(...),
     horizon: str = Query("15m", description="15m prediction horizon"),

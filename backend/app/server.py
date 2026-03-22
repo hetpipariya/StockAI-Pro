@@ -369,7 +369,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(mock_ws_data_job, 'interval', seconds=5)
     scheduler.add_job(sync_broker_positions, 'cron', minute='*/5', hour='9-15', day_of_week='mon-fri')
     scheduler.start()
-    logger.info("[STARTUP] ✓ Scheduler started (including auto WS start + broker sync jobs)")
+logger.info(f"[STARTUP] ✓ Scheduler started. SmartAPI WS: {'started' if _smartapi_ws_started else 'failed'}")
 
     logger.info("=" * 60)
     logger.info("  StockAI Pro — Backend Ready")
@@ -398,7 +398,7 @@ app = FastAPI(title="StockAI Pro API", version="2.0", lifespan=lifespan)
 # ─── CORS: restrict to known origins (production + dev) ───
 _ALLOWED_ORIGINS = [
     origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,https://stockai-pro.pages.dev").split(",")
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,https://stockai-pro.pages.dev,https://stockai-pro-production.up.railway.app").split(",")
     if origin.strip()
 ]
 app.add_middleware(

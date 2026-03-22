@@ -30,7 +30,7 @@ RUN pip install --no-cache /wheels/*
 
 COPY . .
 # Ensure ML models available
-COPY models/*.pkl ./models/
+COPY models/ ./models/
 
 # Run alembic migrations (PostgreSQL only) and start gunicorn with uvicorn workers
 CMD ["sh", "-c", "python -c \"from app.config import DATABASE_URL; exit(0 if DATABASE_URL.startswith('sqlite') else 1)\" && echo '[STARTUP] SQLite detected â€” skipping alembic migrations' || (echo '[STARTUP] PostgreSQL detected â€” running alembic migrations' && alembic upgrade head); uvicorn app.server:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips=\"*\""]
