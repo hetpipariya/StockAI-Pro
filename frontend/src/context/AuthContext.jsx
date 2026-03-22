@@ -2,9 +2,7 @@ import { createContext, useContext, useState, useEffect } from 'react'
 
 const AuthContext = createContext(null)
 
-const _rawAuth = import.meta.env.VITE_API_URL || "";
-const _cleanAuth = _rawAuth.replace(/\/$/, "");
-const API_URL = _cleanAuth ? `${_cleanAuth}/api/v1/auth` : "/api/v1/auth";
+const API_URL = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "") + "/api/v1/auth";
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null)
