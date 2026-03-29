@@ -225,9 +225,24 @@ export const AppProvider = ({ children }) => {
       setError(null);
 
       try {
-        const payload = await api.getBundle(normalizedSymbol, normalizedTimeframe, 200, '15m');
+        const payload = await api.getBundle(normalizedSymbol, normalizedTimeframe, 100, '15m');
         if (requestId !== bundleRequestIdRef.current) return;
         setBundleData(payload);
+        const bundledPrediction = payload?.prediction;
+        if (bundledPrediction && typeof bundledPrediction === 'object') {
+          setSignalData({
+            symbol: normalizedSymbol,
+            signal: bundledPrediction.signal,
+            confidence: bundledPrediction.confidence,
+            currentPrice: payload?.snapshot?.ltp,
+            target: bundledPrediction.target_price,
+            stopLoss: bundledPrediction.stop_loss,
+            regime: bundledPrediction.regime,
+            explanation: bundledPrediction.explanation,
+            timestamp: new Date().toISOString(),
+          });
+          setSignalError(null);
+        }
         setWatchlistPrices((prev) => ({
           ...prev,
           [normalizedSymbol]: mapWatchlistPrice(payload?.snapshot || {}),
@@ -249,44 +264,21 @@ export const AppProvider = ({ children }) => {
     [showToast]
   );
 
-  const fetchSignalData = useCallback(
-    async (symbol, { showErrorToast = false } = {}) => {
-      const normalizedSymbol = String(symbol || '').trim().toUpperCase();
-      if (!normalizedSymbol) return;
-
-      const requestId = ++signalRequestIdRef.current;
-      setIsSignalLoading(true);
-      setSignalError(null);
-
-      try {
-        const payload = await api.getPrediction(normalizedSymbol);
-        if (requestId !== signalRequestIdRef.current) return;
-        setSignalData(payload);
-      } catch (err) {
-        if (requestId !== signalRequestIdRef.current) return;
-        const message = err?.message || 'Failed to load live signal';
-        setSignalError(message);
-        setSignalData(null);
-        if (showErrorToast) {
-          showToast(message, 'error');
-        }
-      } finally {
-        if (requestId === signalRequestIdRef.current) {
-          setIsSignalLoading(false);
-        }
-      }
-    },
-    [showToast]
-  );
-
   useEffect(() => {
     selectedSymbolRef.current = selectedSymbol;
   }, [selectedSymbol]);
 
   useEffect(() => {
     fetchBundleData(selectedSymbol, selectedTimeframe, false);
-    fetchSignalData(selectedSymbol, { showErrorToast: false });
-  }, [fetchBundleData, fetchSignalData, selectedSymbol, selectedTimeframe]);
+
+    const pollId = setInterval(() => {
+      fetchBundleData(selectedSymbol, selectedTimeframe, false);
+    }, 20000);
+
+    return () => {
+      clearInterval(pollId);
+    };
+  }, [fetchBundleData, selectedSymbol, selectedTimeframe]);
 
   const clearSocket = useCallback(() => {
     clearTimeout(reconnectTimerRef.current);
@@ -429,12 +421,11 @@ export const AppProvider = ({ children }) => {
 
   const refreshBundle = useCallback(() => {
     fetchBundleData(selectedSymbol, selectedTimeframe, true);
-    fetchSignalData(selectedSymbol, { showErrorToast: true });
-  }, [fetchBundleData, fetchSignalData, selectedSymbol, selectedTimeframe]);
+  }, [fetchBundleData, selectedSymbol, selectedTimeframe]);
 
   const refreshSignal = useCallback(() => {
-    fetchSignalData(selectedSymbol, { showErrorToast: true });
-  }, [fetchSignalData, selectedSymbol]);
+    fetchBundleData(selectedSymbol, selectedTimeframe, true);
+  }, [fetchBundleData, selectedSymbol, selectedTimeframe]);
 
   const candles = useMemo(() => {
     const rows = Array.isArray(bundleData?.history?.candles) ? bundleData.history.candles : [];

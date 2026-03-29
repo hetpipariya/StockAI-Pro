@@ -11,7 +11,7 @@ import {
 const ACCESS_TOKEN_KEY = 'stockai_access_token';
 const REFRESH_TOKEN_KEY = 'stockai_refresh_token';
 const USER_KEY = 'stockai_user';
-const DEFAULT_TIMEOUT_MS = 12000;
+const DEFAULT_TIMEOUT_MS = 8000;
 const AUTH_TIMEOUT_MS = 20000;
 const AUTH_LOGIN_ENDPOINT = '/auth/login';
 const API_BASE = CONFIG_API_BASE;
@@ -377,7 +377,7 @@ export const api = {
       horizon,
     }).toString();
     return apiFetch(`/bundle/${encodeURIComponent(symbol)}?${qs}`, {
-      timeoutMs: 15000,
+      timeoutMs: 8000,
     });
   },
 
@@ -501,7 +501,7 @@ export const getBundle = async (symbol, tf) => {
 
 let keepAliveTimer = null;
 
-export const startApiKeepAlive = (intervalMs = 240000) => {
+export const startApiKeepAlive = (intervalMs = 30000) => {
   if (typeof window === 'undefined') return;
   if (keepAliveTimer) return;
 
@@ -513,7 +513,7 @@ export const startApiKeepAlive = (intervalMs = 240000) => {
     }
   };
 
-  keepAliveTimer = window.setInterval(run, Math.max(60000, Number(intervalMs) || 240000));
+  keepAliveTimer = window.setInterval(run, Math.max(30000, Number(intervalMs) || 30000));
   void run();
 };
 
