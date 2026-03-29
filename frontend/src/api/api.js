@@ -217,6 +217,23 @@ const normalizeHistoryRows = (historyPayload) => {
     .filter((row) => row.time && row.open != null && row.high != null && row.low != null && row.close != null);
 };
 
+const shouldFallbackToQueryPredict = (rawPayload, normalizedPayload) => {
+  const payload = unwrapData(rawPayload);
+  const explanation = String(
+    payload?.explanation || normalizedPayload?.explanation || ''
+  ).toLowerCase();
+
+  if (explanation.includes('no quant model artifact found')) {
+    return true;
+  }
+
+  const currentPrice = Number(normalizedPayload?.currentPrice || 0);
+  const target = Number(normalizedPayload?.target || 0);
+  const stopLoss = Number(normalizedPayload?.stopLoss || 0);
+
+  return currentPrice === 0 && target === 0 && stopLoss === 0;
+};
+
 const extractErrorMessage = (payload, fallback) => {
   if (!payload || typeof payload !== 'object') return fallback;
   return (
@@ -605,7 +622,15 @@ export const api = {
       if (!normalized) {
         throw { status: 0, message: 'Invalid prediction payload', url: `${API_BASE}/predict/${normalizedSymbol}` };
       }
-      return normalized;
+      if (!shouldFallbackToQueryPredict(payload, normalized)) {
+        return normalized;
+      }
+
+      const fallbackPayload = await apiFetch(
+        `/predict?symbol=${encodeURIComponent(normalizedSymbol)}&horizon=${encodeURIComponent('15m')}`
+      );
+      const fallbackNormalized = normalizePredictionPayload(fallbackPayload, normalizedSymbol);
+      return fallbackNormalized || normalized;
     } catch (pathError) {
       const fallbackPayload = await apiFetch(
         `/predict?symbol=${encodeURIComponent(normalizedSymbol)}&horizon=${encodeURIComponent('15m')}`

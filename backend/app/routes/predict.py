@@ -31,12 +31,13 @@ def _path_hold_fallback(symbol: str, reason: str) -> dict:
 
 @router.get("/predict/{symbol}")
 async def get_predict_by_path(symbol: str):
-    """Simple path-based prediction endpoint returning signal, confidence, levels, and reasoning."""
+    """Path alias for prediction endpoint; delegates to the main runner pipeline."""
     normalized_symbol = symbol.strip().upper()
     try:
-        from app.inference.quant_predictor import predict_signal
-
-        return predict_signal(normalized_symbol)
+        response = await get_predict(symbol=normalized_symbol, horizon="15m", debug=False)
+        if isinstance(response, dict) and isinstance(response.get("data"), dict):
+            return response["data"]
+        return response
     except Exception as exc:
         logger.error("Path prediction failed for %s: %s", normalized_symbol, exc)
         return _path_hold_fallback(normalized_symbol, reason=f"HOLD fallback: {exc}")
