@@ -460,6 +460,39 @@ def _hold_fallback(symbol: str, reason: str = "Prediction unavailable", current_
     }
 
 
+def _normalize_feature_key(value: str) -> str:
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+
+def _align_feature_columns(features: pd.DataFrame, feature_columns: List[str]) -> pd.DataFrame:
+    """Build a compatibility frame that always matches model feature columns.
+
+    Missing features are backfilled with 0.0 to avoid runtime crashes when
+    minor training/live schema drift exists.
+    """
+    if features.empty:
+        return pd.DataFrame(columns=feature_columns)
+
+    lookup_exact = {str(col): col for col in features.columns}
+    lookup_norm = {_normalize_feature_key(str(col)): col for col in features.columns}
+
+    aligned = pd.DataFrame(index=features.index)
+    for expected in feature_columns:
+        if expected in lookup_exact:
+            aligned[expected] = features[lookup_exact[expected]]
+            continue
+
+        norm_key = _normalize_feature_key(expected)
+        alias_col = lookup_norm.get(norm_key)
+        if alias_col is not None:
+            aligned[expected] = features[alias_col]
+            continue
+
+        aligned[expected] = 0.0
+
+    return aligned.fillna(0.0)
+
+
 def predict_signal(symbol: str) -> Dict[str, Any]:
     normalized_symbol = symbol.strip().upper()
 
@@ -475,11 +508,8 @@ def predict_signal(symbol: str) -> Dict[str, Any]:
         if features.empty:
             raise ValueError(f"Feature generation produced empty frame for {normalized_symbol}")
 
-        missing_feature_cols = [col for col in feature_columns if col not in features.columns]
-        if missing_feature_cols:
-            raise ValueError(f"Missing feature columns in live data: {missing_feature_cols}")
-
-        latest_features = features.iloc[-1]
+        aligned_features = _align_feature_columns(features, feature_columns)
+        latest_features = aligned_features.iloc[-1]
         latest_vector = latest_features[feature_columns].astype(float).values.reshape(1, -1)
         if not np.isfinite(latest_vector).all():
             raise ValueError("Live feature vector contains non-finite values")

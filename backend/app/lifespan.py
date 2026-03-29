@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI
 
-from app.config import DATABASE_URL
+from app.config import DATABASE_URL, ENABLE_WS
 from app.connectors import SmartAPIConnector
 from app.services.db import check_db_connection, init_db
 from app.services.instrument_master import get_instrument_count, load_instruments
@@ -65,7 +65,15 @@ def _log_model_artifact_status() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup/shutdown lifecycle."""
-    set_event_loop(asyncio.get_running_loop())
+    loop = asyncio.get_running_loop()
+    set_event_loop(loop)
+
+    def _loop_exception_handler(_loop: asyncio.AbstractEventLoop, context: dict):
+        msg = context.get("message", "Unhandled event loop exception")
+        err = context.get("exception")
+        logger.error("[LOOP] %s | exception=%s", msg, err)
+
+    loop.set_exception_handler(_loop_exception_handler)
 
     logger.info("[STARTUP] Initializing database...")
     try:
@@ -75,7 +83,11 @@ async def lifespan(app: FastAPI):
         logger.exception("[STARTUP] DB schema initialization failed: %s", exc)
 
     logger.info("[STARTUP] Database backend: %s (%s)", _DB_BACKEND, _DB_LOCATION)
-    db_ok = await check_db_connection(retries=3, delay=2.0)
+    try:
+        db_ok = await check_db_connection(retries=3, delay=2.0)
+    except Exception as exc:
+        logger.warning("[STARTUP] DB health check failed: %s", exc)
+        db_ok = False
     if db_ok:
         logger.info("[STARTUP] Database connection verified")
     else:
@@ -103,19 +115,23 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("[STARTUP] Instrument master load failed: %s", exc)
 
-    connector = SmartAPIConnector()
-    set_ws_connector(connector)
-    try:
-        await asyncio.to_thread(connector.login)
-        logger.info("[STARTUP] SmartAPI logged in")
-    except Exception as exc:
-        logger.warning("[STARTUP] SmartAPI login failed (mock mode possible): %s", exc)
+    connector = None
+    if ENABLE_WS:
+        connector = SmartAPIConnector()
+        set_ws_connector(connector)
+        try:
+            await asyncio.to_thread(connector.login)
+            logger.info("[STARTUP] SmartAPI logged in")
+        except Exception as exc:
+            logger.warning("[STARTUP] SmartAPI login failed (mock mode possible): %s", exc)
 
-    logger.info("[STARTUP] Starting SmartAPI websocket...")
-    try:
-        start_smartapi_ws(DEFAULT_WATCHLIST)
-    except Exception as exc:
-        logger.warning("[STARTUP] SmartAPI websocket start failed: %s", exc)
+        logger.info("[STARTUP] Starting SmartAPI websocket...")
+        try:
+            start_smartapi_ws(DEFAULT_WATCHLIST)
+        except Exception as exc:
+            logger.warning("[STARTUP] SmartAPI websocket start failed: %s", exc)
+    else:
+        logger.warning("[STARTUP] ENABLE_WS=false — SmartAPI WebSocket startup skipped")
 
     _log_model_artifact_status()
 
@@ -139,7 +155,7 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     logger.info("  StockAI Pro - Backend Ready")
     logger.info("  Instruments: %s", get_instrument_count())
-    logger.info("  SmartAPI: %s", "Connected" if connector.is_logged_in else "Not connected")
+    logger.info("  SmartAPI: %s", "Connected" if (connector and connector.is_logged_in) else "Not connected")
     logger.info("  Market: %s", "Open" if is_market_open() else "Closed")
     logger.info("  WS Stream: %s", "started" if is_ws_streaming() else "not started")
     logger.info("=" * 60)
@@ -148,7 +164,10 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("[SHUTDOWN] Stopping services...")
-    stop_scheduler()
+    try:
+        stop_scheduler()
+    except Exception as exc:
+        logger.warning("[SHUTDOWN] Scheduler stop failed: %s", exc)
 
     ws_connector = get_ws_connector()
     if ws_connector:

@@ -25,6 +25,32 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _bundle_hold_fallback(symbol: str, interval: str, horizon: str, reason: str) -> dict:
+    return {
+        "status": "success",
+        "data": {
+            "symbol": symbol,
+            "interval": interval,
+            "horizon": horizon,
+            "snapshot": {"symbol": symbol, "ltp": 0.0},
+            "history": {"count": 0, "source": "FALLBACK", "data_source": "FALLBACK", "candles": []},
+            "indicators": {},
+            "prediction": {
+                "signal": "HOLD",
+                "confidence": 0,
+                "prediction": 0.0,
+                "stop_loss": 0.0,
+                "target_price": 0.0,
+                "regime": "Unknown",
+                "factors": [reason],
+                "explanation": reason,
+            },
+            "latency_ms": 0.0,
+        },
+        "message": "Bundle fallback",
+    }
+
+
 @router.get("/bundle/{symbol}")
 async def get_bundle(
     symbol: str,
@@ -49,22 +75,25 @@ async def get_bundle(
             ),
             timeout=6.0,
         )
-    except asyncio.TimeoutError as exc:
+    except asyncio.TimeoutError:
         logger.warning("[BUNDLE] Upstream timeout symbol=%s interval=%s", normalized_symbol, interval)
-        raise HTTPException(status_code=504, detail="Bundle upstream timeout") from exc
+        return _bundle_hold_fallback(normalized_symbol, interval, horizon, "Upstream timeout")
+    except Exception as exc:
+        logger.warning("[BUNDLE] Upstream error symbol=%s interval=%s err=%s", normalized_symbol, interval, exc)
+        return _bundle_hold_fallback(normalized_symbol, interval, horizon, "Upstream failure")
 
     snapshot = snapshot_resp.get("data", {}) if isinstance(snapshot_resp, dict) else {}
     history_payload = history_resp.get("data", {}) if isinstance(history_resp, dict) else {}
     candles = history_payload.get("data", []) if isinstance(history_payload, dict) else []
 
     if not isinstance(candles, list) or len(candles) < 50:
-        raise HTTPException(status_code=422, detail="Need at least 50 candles to build bundle prediction")
+        return _bundle_hold_fallback(normalized_symbol, interval, horizon, "Insufficient candles")
 
     ltp = _to_float(snapshot.get("ltp", 0.0), 0.0)
     if ltp <= 0:
         ltp = _to_float(candles[-1].get("close", 0.0), 0.0)
     if ltp <= 0:
-        raise HTTPException(status_code=422, detail="Invalid market price for prediction")
+        return _bundle_hold_fallback(normalized_symbol, interval, horizon, "Invalid market price")
 
     try:
         prediction, indicators_df = await asyncio.wait_for(
@@ -80,9 +109,12 @@ async def get_bundle(
             ),
             timeout=6.0,
         )
-    except asyncio.TimeoutError as exc:
+    except asyncio.TimeoutError:
         logger.warning("[BUNDLE] Compute timeout symbol=%s horizon=%s", normalized_symbol, horizon)
-        raise HTTPException(status_code=504, detail="Bundle compute timeout") from exc
+        return _bundle_hold_fallback(normalized_symbol, interval, horizon, "Compute timeout")
+    except Exception as exc:
+        logger.warning("[BUNDLE] Compute error symbol=%s horizon=%s err=%s", normalized_symbol, horizon, exc)
+        return _bundle_hold_fallback(normalized_symbol, interval, horizon, "Compute failure")
     latest_indicators: dict[str, Any] = {}
     if not indicators_df.empty:
         latest = indicators_df.iloc[-1].to_dict()

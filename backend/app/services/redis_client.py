@@ -40,7 +40,15 @@ async def get_redis() -> Optional[redis.Redis]:
     _redis_last_attempt = time.monotonic()
 
     try:
-        client = redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=3)
+        use_ssl = str(REDIS_URL).startswith("rediss://")
+        client = redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+            ssl_cert_reqs=None if use_ssl else "required",
+            health_check_interval=30,
+        )
         await client.ping()
         _redis = client
         _redis_failed = False

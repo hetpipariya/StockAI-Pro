@@ -531,31 +531,44 @@ class SmartAPIConnector:
                             logger.error(f"[WS] Tick handler error: {e}")
 
                     def _on_open(wsapp):
-                        logger.info(f"[WS] ✓ Connected — subscribing {len(token_list)} groups")
-                        self._ws_reconnect_delay = 1.0  # Reset backoff
-                        sws.subscribe(correlation_id, mode, token_list)
+                        try:
+                            logger.info(f"[WS] ✓ Connected — subscribing {len(token_list)} groups")
+                            self._ws_reconnect_delay = 1.0  # Reset backoff
+                            sws.subscribe(correlation_id, mode, token_list)
+                        except Exception as e:
+                            logger.error(f"[WS] on_open handler failed: {e}")
 
                     def _on_error(wsapp, error):
-                        logger.error(f"[WS] Error: {error}")
-                        if "AG800" in str(error) or "Invalid Token" in str(error):
-                            logger.error("[WS] Force clearing session due to Token Error")
-                            self._sync_clear_session()
-                            try:
-                                self.login(force=True)
-                            except Exception:
-                                pass
+                        try:
+                            logger.error(f"[WS] Error: {error}")
+                            if "AG800" in str(error) or "Invalid Token" in str(error):
+                                logger.error("[WS] Force clearing session due to Token Error")
+                                self._sync_clear_session()
+                                try:
+                                    self.login(force=True)
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            logger.error(f"[WS] on_error handler failed: {e}")
 
-                    def _on_close(wsapp):
-                        logger.info("[WS] Connection closed")
-                        if self._ws_should_reconnect:
-                            logger.info(f"[WS] Reconnecting in {self._ws_reconnect_delay:.1f}s")
-                            time.sleep(self._ws_reconnect_delay)
-                            self._ws_reconnect_delay = min(self._ws_reconnect_delay * 1.5, 30.0)
-                            # Refresh session before reconnect
-                            try:
-                                self._refresh_session()
-                            except Exception:
-                                pass
+                    def _on_close(wsapp, close_status_code=None, close_msg=None):
+                        try:
+                            logger.info(
+                                "[WS] Connection closed: code=%s message=%s",
+                                close_status_code,
+                                close_msg,
+                            )
+                            if self._ws_should_reconnect:
+                                logger.info(f"[WS] Reconnecting in {self._ws_reconnect_delay:.1f}s")
+                                time.sleep(self._ws_reconnect_delay)
+                                self._ws_reconnect_delay = min(self._ws_reconnect_delay * 1.5, 30.0)
+                                # Refresh session before reconnect
+                                try:
+                                    self._refresh_session()
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            logger.error(f"[WS] on_close handler failed: {e}")
 
                     sws.on_data = _on_data
                     sws.on_open = _on_open
