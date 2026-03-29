@@ -34,6 +34,16 @@ def _create_current_schema(bind) -> None:
     Base.metadata.create_all(bind=bind, checkfirst=True)
 
 
+def _column_exists(bind, table_name: str, column_name: str) -> bool:
+    inspector = sa.inspect(bind)
+    return any(column.get("name") == column_name for column in inspector.get_columns(table_name))
+
+
+def _index_exists(bind, table_name: str, index_name: str) -> bool:
+    inspector = sa.inspect(bind)
+    return any(index.get("name") == index_name for index in inspector.get_indexes(table_name))
+
+
 def upgrade() -> None:
     """Upgrade schema."""
     bind = op.get_bind()
@@ -78,10 +88,35 @@ def upgrade() -> None:
     op.create_index('ix_orders_user_status', 'orders', ['user_id', 'status'], unique=False)
     op.create_index('ix_orders_user_symbol', 'orders', ['user_id', 'symbol'], unique=False)
     op.create_foreign_key(None, 'orders', 'users', ['user_id'], ['id'], ondelete='CASCADE')
-    op.add_column('positions', sa.Column('id', sa.Integer(), autoincrement=True, nullable=False))
+    if not _column_exists(bind, 'positions', 'id'):
+        op.add_column('positions', sa.Column('id', sa.Integer(), autoincrement=True, nullable=True))
+    if bind.dialect.name == 'postgresql':
+        op.execute(sa.text("CREATE SEQUENCE IF NOT EXISTS positions_id_seq"))
+        op.execute(sa.text("UPDATE positions SET id = nextval('positions_id_seq') WHERE id IS NULL"))
+        op.execute(sa.text("ALTER TABLE positions ALTER COLUMN id SET DEFAULT nextval('positions_id_seq')"))
+    else:
+        op.execute(sa.text("UPDATE positions SET id = 0 WHERE id IS NULL"))
+    op.alter_column('positions', 'id',
+               existing_type=sa.Integer(),
+               nullable=False)
     op.add_column('positions', sa.Column('user_id', sa.Integer(), nullable=True))
-    op.add_column('positions', sa.Column('mode', sa.String(length=10), nullable=False))
-    op.add_column('positions', sa.Column('opened_at', sa.DateTime(), nullable=False))
+    if not _column_exists(bind, 'positions', 'mode'):
+        op.add_column('positions', sa.Column('mode', sa.String(length=10), nullable=True))
+    op.execute(sa.text("UPDATE positions SET mode = 'paper' WHERE mode IS NULL"))
+    op.alter_column('positions', 'mode',
+               existing_type=sa.String(length=10),
+               nullable=False)
+    if not _column_exists(bind, 'positions', 'opened_at'):
+        op.add_column('positions', sa.Column('opened_at', sa.DateTime(), nullable=True))
+    if _column_exists(bind, 'positions', 'timestamp'):
+        op.execute(sa.text(
+            "UPDATE positions SET opened_at = COALESCE(opened_at, timestamp, CURRENT_TIMESTAMP) WHERE opened_at IS NULL"
+        ))
+    else:
+        op.execute(sa.text("UPDATE positions SET opened_at = COALESCE(opened_at, CURRENT_TIMESTAMP) WHERE opened_at IS NULL"))
+    op.alter_column('positions', 'opened_at',
+               existing_type=sa.DateTime(),
+               nullable=False)
     op.alter_column('positions', 'stop_loss',
                existing_type=sa.FLOAT(),
                nullable=True)
@@ -149,14 +184,52 @@ def upgrade() -> None:
     op.create_index('ix_trade_logs_user_symbol', 'trade_logs', ['user_id', 'symbol'], unique=False)
     op.create_index('ix_trade_logs_user_timestamp', 'trade_logs', ['user_id', 'timestamp'], unique=False)
     op.create_foreign_key(None, 'trade_logs', 'users', ['user_id'], ['id'], ondelete='CASCADE')
-    op.add_column('users', sa.Column('email', sa.String(length=255), nullable=True))
-    op.add_column('users', sa.Column('is_active', sa.Boolean(), nullable=False))
-    op.add_column('users', sa.Column('is_verified', sa.Boolean(), nullable=False))
-    op.add_column('users', sa.Column('starting_capital', sa.Float(), nullable=False))
-    op.add_column('users', sa.Column('trading_mode', sa.String(length=10), nullable=False))
-    op.add_column('users', sa.Column('refresh_token_hash', sa.String(length=255), nullable=True))
-    op.add_column('users', sa.Column('updated_at', sa.DateTime(), nullable=False))
-    op.create_index(op.f('ix_users_email'), 'users', ['email'], unique=True)
+    if not _column_exists(bind, 'users', 'email'):
+        op.add_column('users', sa.Column('email', sa.String(length=255), nullable=True))
+
+    if not _column_exists(bind, 'users', 'is_active'):
+        op.add_column('users', sa.Column('is_active', sa.Boolean(), nullable=True))
+    op.execute(sa.text("UPDATE users SET is_active = TRUE WHERE is_active IS NULL"))
+    op.alter_column('users', 'is_active',
+               existing_type=sa.Boolean(),
+               nullable=False)
+
+    if not _column_exists(bind, 'users', 'is_verified'):
+        op.add_column('users', sa.Column('is_verified', sa.Boolean(), nullable=True))
+    op.execute(sa.text("UPDATE users SET is_verified = FALSE WHERE is_verified IS NULL"))
+    op.alter_column('users', 'is_verified',
+               existing_type=sa.Boolean(),
+               nullable=False)
+
+    if not _column_exists(bind, 'users', 'starting_capital'):
+        op.add_column('users', sa.Column('starting_capital', sa.Float(), nullable=True))
+    op.execute(sa.text("UPDATE users SET starting_capital = 100000.0 WHERE starting_capital IS NULL"))
+    op.alter_column('users', 'starting_capital',
+               existing_type=sa.Float(),
+               nullable=False)
+
+    if not _column_exists(bind, 'users', 'trading_mode'):
+        op.add_column('users', sa.Column('trading_mode', sa.String(length=10), nullable=True))
+    op.execute(sa.text("UPDATE users SET trading_mode = 'PAPER' WHERE trading_mode IS NULL"))
+    op.alter_column('users', 'trading_mode',
+               existing_type=sa.String(length=10),
+               nullable=False)
+
+    if not _column_exists(bind, 'users', 'refresh_token_hash'):
+        op.add_column('users', sa.Column('refresh_token_hash', sa.String(length=255), nullable=True))
+
+    if not _column_exists(bind, 'users', 'updated_at'):
+        op.add_column('users', sa.Column('updated_at', sa.DateTime(), nullable=True))
+    op.execute(sa.text(
+        "UPDATE users SET updated_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP) WHERE updated_at IS NULL"
+    ))
+    op.alter_column('users', 'updated_at',
+               existing_type=sa.DateTime(),
+               nullable=False)
+
+    users_email_index = op.f('ix_users_email')
+    if not _index_exists(bind, 'users', users_email_index):
+        op.create_index(users_email_index, 'users', ['email'], unique=True)
     # ### end Alembic commands ###
 
 
@@ -227,7 +300,13 @@ def downgrade() -> None:
                existing_type=sa.VARCHAR(length=10),
                nullable=False)
     op.drop_column('predictions', 'user_id')
-    op.add_column('positions', sa.Column('timestamp', sa.DATETIME(), nullable=False))
+    op.add_column('positions', sa.Column('timestamp', sa.DATETIME(), nullable=True))
+    op.execute(sa.text(
+        "UPDATE positions SET timestamp = COALESCE(timestamp, opened_at, CURRENT_TIMESTAMP) WHERE timestamp IS NULL"
+    ))
+    op.alter_column('positions', 'timestamp',
+               existing_type=sa.DateTime(),
+               nullable=False)
     op.drop_constraint(None, 'positions', type_='foreignkey')
     op.drop_constraint('uq_position_user_symbol', 'positions', type_='unique')
     op.drop_index('ix_positions_user_id', table_name='positions')

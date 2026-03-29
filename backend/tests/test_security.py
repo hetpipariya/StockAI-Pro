@@ -15,7 +15,9 @@ from app.server import app
 async def test_tampered_access_token_is_rejected(client, signup_user):
     created = await signup_user("tamper")
     token = created["tokens"]["access_token"]
-    tampered = token[:-1] + ("a" if token[-1] != "a" else "b")
+    header, payload, signature = token.split(".")
+    replacement = "A" if signature[0] != "A" else "B"
+    tampered = f"{header}.{payload}.{replacement}{signature[1:]}"
 
     response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {tampered}"})
 
