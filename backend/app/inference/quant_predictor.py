@@ -2,20 +2,85 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pickle
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import joblib
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-MODELS_DIR = PROJECT_ROOT / "experiments" / "models"
+_FILE_PATH = Path(__file__).resolve()
+_PARENTS = _FILE_PATH.parents
+BACKEND_ROOT = _PARENTS[2] if len(_PARENTS) > 2 else _FILE_PATH.parent
+PROJECT_ROOT = _PARENTS[3] if len(_PARENTS) > 3 else BACKEND_ROOT
+
+
+def _iter_model_dir_candidates() -> List[Path]:
+    candidates: List[Path] = []
+
+    for env_key in ("QUANT_MODEL_DIR", "MODEL_PATH"):
+        raw_value = os.getenv(env_key, "").strip()
+        if raw_value:
+            candidates.append(Path(raw_value))
+
+    candidates.extend(
+        [
+            PROJECT_ROOT / "experiments" / "models",
+            BACKEND_ROOT / "experiments" / "models",
+            BACKEND_ROOT / "models",
+            PROJECT_ROOT / "models",
+            Path("/app/experiments/models"),
+            Path("/app/models"),
+        ]
+    )
+
+    deduped: List[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def _looks_like_model_dir(path: Path) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    if any(path.glob("model_v*.pkl")):
+        return True
+    if (path / "latest_model.json").exists():
+        return True
+    if (path / "model.pkl").exists():
+        return True
+    return False
+
+
+def _resolve_models_dir() -> Path:
+    candidates = _iter_model_dir_candidates()
+
+    for candidate in candidates:
+        if _looks_like_model_dir(candidate):
+            return candidate.resolve()
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_dir():
+            return candidate.resolve()
+
+    fallback = (BACKEND_ROOT / "models").resolve()
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
+MODELS_DIR = _resolve_models_dir()
 LEGACY_MODEL_PATH = MODELS_DIR / "model.pkl"
 LATEST_POINTER_PATH = MODELS_DIR / "latest_model.json"
 MODEL_VERSION_PATTERN = re.compile(r"model_v(\d+)\.pkl$")
@@ -24,6 +89,8 @@ MIN_SIGNAL_CONFIDENCE = 0.55
 _ARTIFACT: Optional[Dict[str, Any]] = None
 _ARTIFACT_PATH: Optional[Path] = None
 _ARTIFACT_MTIME_NS: Optional[int] = None
+
+logger.info("[QUANT] Using model directory: %s", MODELS_DIR)
 
 
 def _utc_now_iso() -> str:
@@ -110,6 +177,17 @@ def _compute_features(df: pd.DataFrame) -> pd.DataFrame:
     out["higher_high_ratio"] = out["high"].diff().gt(0).rolling(20).mean()
     out["lower_low_ratio"] = out["low"].diff().lt(0).rolling(20).mean()
 
+    # Legacy 19-feature compatibility (backend/models/features.pkl)
+    out["rsi_14"] = out["rsi"]
+    out["pct_change_1d"] = out["close"].pct_change(1)
+    out["pct_change_5d"] = out["close"].pct_change(5)
+    out["roll_std_5d"] = out["pct_change_1d"].rolling(5).std()
+    out["roll_std_20d"] = out["pct_change_1d"].rolling(20).std()
+    out["roll_mean_5d"] = out["close"].rolling(5).mean()
+    out["roll_mean_20d"] = out["close"].rolling(20).mean()
+    out["trend_strength"] = (out["close"] - out["ema_20"]) / out["ema_20"].replace(0, np.nan)
+    out["rsi_momentum"] = out["rsi_14"].diff()
+
     out.replace([np.inf, -np.inf], np.nan, inplace=True)
     out.dropna(inplace=True)
     return out
@@ -150,12 +228,26 @@ def _resolve_pointer_model_path() -> Optional[Path]:
         if not value:
             continue
 
-        candidate = Path(str(value))
-        if not candidate.is_absolute():
-            candidate = MODELS_DIR / candidate
+        raw_candidate = Path(str(value))
+        lookup_candidates: List[Path] = []
 
-        if candidate.exists():
-            return candidate.resolve()
+        if raw_candidate.is_absolute():
+            lookup_candidates.append(raw_candidate)
+        else:
+            lookup_candidates.append(MODELS_DIR / raw_candidate)
+            lookup_candidates.append(PROJECT_ROOT / raw_candidate)
+            lookup_candidates.append(BACKEND_ROOT / raw_candidate)
+
+        lookup_candidates.append(MODELS_DIR / raw_candidate.name)
+
+        seen: set[str] = set()
+        for candidate in lookup_candidates:
+            key_name = str(candidate)
+            if key_name in seen:
+                continue
+            seen.add(key_name)
+            if candidate.exists():
+                return candidate.resolve()
 
     return None
 
@@ -177,6 +269,44 @@ def _resolve_latest_model_path() -> Path:
     )
 
 
+def _deserialize_file(path: Path) -> Any:
+    try:
+        return joblib.load(path)
+    except Exception:
+        with path.open("rb") as fp:
+            return pickle.load(fp)
+
+
+def _normalize_loaded_artifact(payload: Any) -> Dict[str, Any]:
+    artifact: Dict[str, Any]
+    if isinstance(payload, dict):
+        artifact = dict(payload)
+    else:
+        artifact = {"model": payload}
+
+    if "model" not in artifact and artifact.get("estimator") is not None:
+        artifact["model"] = artifact.get("estimator")
+
+    if "feature_columns" not in artifact:
+        features = artifact.get("features") or artifact.get("feature_cols")
+        if isinstance(features, (list, tuple)):
+            artifact["feature_columns"] = list(features)
+
+    if artifact.get("scaler") is None:
+        scaler_path = MODELS_DIR / "scaler.pkl"
+        if scaler_path.exists():
+            artifact["scaler"] = _deserialize_file(scaler_path)
+
+    if "feature_columns" not in artifact:
+        features_path = MODELS_DIR / "features.pkl"
+        if features_path.exists():
+            loaded_features = _deserialize_file(features_path)
+            if isinstance(loaded_features, (list, tuple)):
+                artifact["feature_columns"] = list(loaded_features)
+
+    return artifact
+
+
 def _load_artifact() -> Dict[str, Any]:
     global _ARTIFACT, _ARTIFACT_MTIME_NS, _ARTIFACT_PATH
 
@@ -191,8 +321,8 @@ def _load_artifact() -> Dict[str, Any]:
     ):
         return _ARTIFACT
 
-    with model_path.open("rb") as fp:
-        artifact = pickle.load(fp)
+    payload = _deserialize_file(model_path)
+    artifact = _normalize_loaded_artifact(payload)
 
     required = ["model", "scaler", "feature_columns"]
     missing = [key for key in required if key not in artifact]
