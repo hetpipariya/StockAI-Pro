@@ -1,0 +1,95 @@
+{
+  "status": "success",
+  "run_id": "20260329T090252Z",
+  "dataset_rows": 33480,
+  "dataset_path": "E:\\Projects\\stockai-pro\\experiments\\data\\processed\\final_dataset.csv",
+  "coverage_years": {
+    "RELIANCE": {
+      "5m": 0.15342465753424658,
+      "15m": 0.15342465753424658
+    },
+    "TCS": {
+      "5m": 0.15342465753424658,
+      "15m": 0.15342465753424658
+    },
+    "INFY": {
+      "5m": 0.15342465753424658,
+      "15m": 0.15342465753424658
+    },
+    "HDFCBANK": {
+      "5m": 0.15342465753424658,
+      "15m": 0.15342465753424658
+    },
+    "ICICIBANK": {
+      "5m": 0.15342465753424658,
+      "15m": 0.15342465753424658
+    },
+    "SBIN": {
+      "5m": 0.15342465753424658,
+      "15m": 0.15342465753424658
+    },
+    "ITC": {
+      "5m": 0.15342465753424658,
+      "15m": 0.15342465753424658
+    },
+    "AXISBANK": {
+      "5m": 0.15342465753424658,
+      "15m": 0.15342465753424658
+    },
+    "KOTAKBANK": {
+      "5m": 0.15342465753424658,
+      "15m": 0.15342465753424658
+    }
+  },
+  "best_accuracy": 0.8599163679808841,
+  "best_model": "xgboost",
+  "test_accuracy": 0.8599163679808841,
+  "unseen_accuracy": 0.8587216248506571,
+  "model_path": "E:\\Projects\\stockai-pro\\experiments\\models\\model.pkl",
+  "model": {
+    "version": 1,
+    "versioned_model_path": "E:\\Projects\\stockai-pro\\experiments\\models\\model_v1.pkl",
+    "compat_model_path": "E:\\Projects\\stockai-pro\\experiments\\models\\model.pkl",
+    "latest_meta_path": "E:\\Projects\\stockai-pro\\experiments\\models\\latest_model.json"
+  },
+  "report_path": "E:\\Projects\\stockai-pro\\experiments\\reports\\evaluation_report_v1.json",
+  "attempts": [
+    {
+      "attempt": 1,
+      "max_iterations": 1,
+      "best_model": {
+        "name": "xgboost",
+        "iteration": 0,
+        "accuracy": 0.8599163679808841,
+        "precision": 0.6993332134982264,
+        "recall": 0.5525669287794267,
+        "confusion_matrix": [
+          [
+            133,
+            235,
+            0
+          ],
+          [
+            50,
+            2685,
+            64
+          ],
+          [
+            0,
+            120,
+            61
+          ]
+        ]
+      },
+      "model": {
+        "version": 1,
+        "versioned_model_path": "E:\\Projects\\stockai-pro\\experiments\\models\\model_v1.pkl",
+        "compat_model_path": "E:\\Projects\\stockai-pro\\experiments\\models\\model.pkl",
+        "latest_meta_path": "E:\\Projects\\stockai-pro\\experiments\\models\\latest_model.json"
+      },
+      "report_path": "E:\\Projects\\stockai-pro\\experiments\\reports\\evaluation_report_v1.json"
+    }
+  ],
+  "target_accuracy": 0.5,
+  "finished_at": "2026-03-29T09:03:39.533574Z"
+}

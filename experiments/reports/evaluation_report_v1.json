@@ -1,0 +1,175 @@
+{
+  "best_model": {
+    "name": "xgboost",
+    "iteration": 0,
+    "accuracy": 0.8599163679808841,
+    "precision": 0.6993332134982264,
+    "recall": 0.5525669287794267,
+    "confusion_matrix": [
+      [
+        133,
+        235,
+        0
+      ],
+      [
+        50,
+        2685,
+        64
+      ],
+      [
+        0,
+        120,
+        61
+      ]
+    ]
+  },
+  "train_metrics": {
+    "accuracy": 0.9548237753882916,
+    "precision": 0.9322865158731425,
+    "recall": 0.7583033776844249,
+    "confusion_matrix": [
+      [
+        1123,
+        720,
+        0
+      ],
+      [
+        144,
+        23805,
+        32
+      ],
+      [
+        1,
+        313,
+        646
+      ]
+    ]
+  },
+  "test_metrics": {
+    "accuracy": 0.8599163679808841,
+    "precision": 0.6993332134982264,
+    "recall": 0.5525669287794267,
+    "confusion_matrix": [
+      [
+        133,
+        235,
+        0
+      ],
+      [
+        50,
+        2685,
+        64
+      ],
+      [
+        0,
+        120,
+        61
+      ]
+    ]
+  },
+  "unseen_metrics": {
+    "accuracy": 0.8587216248506571,
+    "precision": 0.551059936701347,
+    "recall": 0.47885133686661724,
+    "confusion_matrix": [
+      [
+        70,
+        145,
+        0
+      ],
+      [
+        59,
+        2774,
+        119
+      ],
+      [
+        0,
+        150,
+        31
+      ]
+    ]
+  },
+  "overfit_gap": 0.09610215053763449,
+  "stable_predictions": true,
+  "history": [
+    {
+      "iteration": 0,
+      "model": "logistic_regression",
+      "accuracy": 0.6624850657108722,
+      "precision": 0.5330992099747355,
+      "recall": 0.822282619065621,
+      "confusion_matrix": [
+        [
+          346,
+          21,
+          1
+        ],
+        [
+          550,
+          1706,
+          543
+        ],
+        [
+          0,
+          15,
+          166
+        ]
+      ]
+    },
+    {
+      "iteration": 0,
+      "model": "random_forest",
+      "accuracy": 0.7156511350059738,
+      "precision": 0.5409295131192485,
+      "recall": 0.7771812971763848,
+      "confusion_matrix": [
+        [
+          288,
+          79,
+          1
+        ],
+        [
+          406,
+          1954,
+          439
+        ],
+        [
+          0,
+          27,
+          154
+        ]
+      ]
+    },
+    {
+      "iteration": 0,
+      "model": "xgboost",
+      "accuracy": 0.8599163679808841,
+      "precision": 0.6993332134982264,
+      "recall": 0.5525669287794267,
+      "confusion_matrix": [
+        [
+          133,
+          235,
+          0
+        ],
+        [
+          50,
+          2685,
+          64
+        ],
+        [
+          0,
+          120,
+          61
+        ]
+      ]
+    }
+  ],
+  "model": {
+    "version": 1,
+    "versioned_model_path": "E:\\Projects\\stockai-pro\\experiments\\models\\model_v1.pkl",
+    "compat_model_path": "E:\\Projects\\stockai-pro\\experiments\\models\\model.pkl",
+    "latest_meta_path": "E:\\Projects\\stockai-pro\\experiments\\models\\latest_model.json"
+  },
+  "target_accuracy_threshold": 0.5
+}

@@ -1,0 +1,135 @@
+"""Security-focused API tests: auth hardening, injection, and websocket checks."""
+
+from datetime import datetime, timedelta, timezone
+
+import jwt
+import pytest
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+from app import config
+from app.server import app
+
+
+@pytest.mark.anyio
+async def test_tampered_access_token_is_rejected(client, signup_user):
+    created = await signup_user("tamper")
+    token = created["tokens"]["access_token"]
+    tampered = token[:-1] + ("a" if token[-1] != "a" else "b")
+
+    response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {tampered}"})
+
+    assert response.status_code == 401
+    body = response.json()
+    assert body["status"] == "error"
+    assert "invalid token" in body["message"].lower()
+
+
+@pytest.mark.anyio
+async def test_expired_access_token_is_rejected(client):
+    now = datetime.now(tz=timezone.utc)
+    expired_token = jwt.encode(
+        {
+            "sub": "9999",
+            "username": "expired_user",
+            "type": "access",
+            "iat": now - timedelta(hours=2),
+            "exp": now - timedelta(minutes=5),
+        },
+        config.JWT_SECRET,
+        algorithm=config.JWT_ALGORITHM,
+    )
+
+    response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {expired_token}"})
+
+    assert response.status_code == 401
+    body = response.json()
+    assert body["status"] == "error"
+    assert "expired" in body["message"].lower()
+
+
+@pytest.mark.anyio
+async def test_login_bruteforce_rate_limit_blocks_after_threshold(client):
+    for _ in range(5):
+        attempt = await client.post(
+            "/api/v1/auth/login",
+            json={"username": "unknown_user", "password": "WrongPass123"},
+        )
+        assert attempt.status_code == 401
+
+    blocked = await client.post(
+        "/api/v1/auth/login",
+        json={"username": "unknown_user", "password": "WrongPass123"},
+    )
+    assert blocked.status_code == 429
+    body = blocked.json()
+    assert body["status"] == "error"
+    assert "too many login attempts" in body["message"].lower()
+
+
+@pytest.mark.anyio
+async def test_signup_rejects_sql_injection_username(client):
+    payload = {
+        "username": "' OR 1=1 --",
+        "password": "SecurePass123",
+        "email": "sql_injection@example.com",
+    }
+
+    response = await client.post("/api/v1/auth/signup", json=payload)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["message"] == "Request validation failed"
+
+
+@pytest.mark.anyio
+async def test_signup_rejects_xss_payload_username(client):
+    payload = {
+        "username": "<script>alert(1)</script>",
+        "password": "SecurePass123",
+        "email": "xss_test@example.com",
+    }
+
+    response = await client.post("/api/v1/auth/signup", json=payload)
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["message"] == "Request validation failed"
+
+
+@pytest.mark.anyio
+async def test_unhandled_exceptions_are_sanitized(client, monkeypatch):
+    async def _raise_secret(*_args, **_kwargs):
+        raise RuntimeError("db_password=SUPER_SECRET_VALUE")
+
+    monkeypatch.setattr("app.routes.news.get_cache", _raise_secret)
+
+    response = await client.get("/api/v1/news?symbol=RELIANCE")
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["message"] == "Internal server error"
+    assert "SUPER_SECRET_VALUE" not in response.text
+
+
+@pytest.mark.parametrize("path", ["/ws", "/live"])
+def test_websocket_rejects_missing_auth_token(path):
+    with TestClient(app) as test_client:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with test_client.websocket_connect(path):
+                pass
+
+    assert exc_info.value.code == 4001
+
+
+@pytest.mark.parametrize("path", ["/ws", "/live"])
+def test_websocket_rejects_invalid_auth_token(path):
+    with TestClient(app) as test_client:
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with test_client.websocket_connect(f"{path}?token=invalid.jwt.token"):
+                pass
+
+    assert exc_info.value.code == 4001
