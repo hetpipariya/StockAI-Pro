@@ -15,7 +15,7 @@ from app.config import SMARTAPI_EXCHANGE, CACHE_TTL_CANDLES_SECONDS, CACHE_TTL_S
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/market", tags=["market"])
+router = APIRouter(prefix="/api/market", tags=["market"])
 
 # Lazy singleton connector
 _connector: SmartAPIConnector | None = None

@@ -15,7 +15,7 @@ from app.inference.models import load_models
 from app.routes.auth import get_current_user
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/v1/backtest", tags=["backtest"])
+router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
 # Risk configurations 
 SLIPPAGE_BPS = 0.02 / 100 

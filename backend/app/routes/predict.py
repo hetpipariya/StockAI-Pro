@@ -9,7 +9,7 @@ from app.services.db import async_session, PredictionModel
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1", tags=["predict"])
+router = APIRouter(prefix="/api", tags=["predict"])
 
 
 def _path_hold_fallback(symbol: str, reason: str) -> dict:

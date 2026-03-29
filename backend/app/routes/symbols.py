@@ -5,7 +5,7 @@ from fastapi import APIRouter, Query
 from app.services.instrument_master import search_symbols, get_instrument_count
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/v1/symbols", tags=["symbols"])
+router = APIRouter(prefix="/api/symbols", tags=["symbols"])
 
 
 @router.get("/search")

@@ -10,7 +10,7 @@ from app.config import SMARTAPI_EXCHANGE
 from app.services.db import async_session, OrderModel, UserModel
 from app.routes.auth import get_current_user
 
-router = APIRouter(prefix="/api/v1", tags=["order"])
+router = APIRouter(prefix="/api", tags=["order"])
 
 _connector: SmartAPIConnector | None = None
 

@@ -30,9 +30,9 @@ from app.utils.auth_utils import (
 from app import config
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
-compat_router = APIRouter(prefix="/api/v1", tags=["auth"])
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+router = APIRouter(prefix="/api/auth", tags=["auth"])
+compat_router = APIRouter(prefix="/api", tags=["auth"])
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
 # ── Pydantic Schemas ──────────────────────────────────────────────────
@@ -114,7 +114,7 @@ async def get_current_user(
 # ── Optional Auth (for endpoints that benefit from user context) ──────
 
 _optional_oauth2 = OAuth2PasswordBearer(
-    tokenUrl="/api/v1/auth/login", auto_error=False
+    tokenUrl="/api/auth/login", auto_error=False
 )
 
 
@@ -131,7 +131,7 @@ async def get_optional_user(
         return None
 
 
-# ── POST /api/v1/auth/signup ──────────────────────────────────────────
+# ── POST /api/auth/signup ──────────────────────────────────────────
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 async def signup(
@@ -215,7 +215,7 @@ async def signup(
     }
 
 
-# ── POST /api/v1/auth/login ──────────────────────────────────────────
+# ── POST /api/auth/login ──────────────────────────────────────────
 
 @router.post("/login")
 async def login(
@@ -293,7 +293,7 @@ async def login_help():
     """Human-friendly response when the login API route is opened in a browser."""
     return {
         "status": "error",
-        "message": "Use POST /api/v1/auth/login with JSON {username, password}.",
+        "message": "Use POST /api/auth/login with JSON {username, password}.",
         "hint": "For UI login, open /login on the frontend app (e.g. https://stockai-pro.in/login).",
     }
 
@@ -303,7 +303,7 @@ async def signup_compat(
     data: SignupRequest,
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Compatibility alias for clients using /api/v1/signup."""
+    """Compatibility alias for clients using /api/signup."""
     return await signup(data, session)
 
 
@@ -312,17 +312,17 @@ async def login_compat(
     data: LoginRequest,
     session: AsyncSession = Depends(get_async_session),
 ):
-    """Compatibility alias for clients using /api/v1/login."""
+    """Compatibility alias for clients using /api/login."""
     return await login(data, session)
 
 
 @compat_router.get("/login", include_in_schema=False)
 async def login_help_compat():
-    """Compatibility alias for browser visits to /api/v1/login."""
+    """Compatibility alias for browser visits to /api/login."""
     return await login_help()
 
 
-# ── POST /api/v1/auth/login (OAuth2 form-data — for Swagger UI) ──────
+# ── POST /api/auth/login (OAuth2 form-data — for Swagger UI) ──────
 
 @router.post("/token")
 async def login_form(
@@ -338,7 +338,7 @@ async def login_form(
     return await login(login_req, session)
 
 
-# ── GET /api/v1/auth/me ───────────────────────────────────────────────
+# ── GET /api/auth/me ───────────────────────────────────────────────
 
 @router.get("/me")
 async def get_me(current_user: UserModel = Depends(get_current_user)):
@@ -360,7 +360,7 @@ async def get_me(current_user: UserModel = Depends(get_current_user)):
     }
 
 
-# ── POST /api/v1/auth/refresh ─────────────────────────────────────────
+# ── POST /api/auth/refresh ─────────────────────────────────────────
 
 @router.post("/refresh")
 async def refresh_token(
@@ -420,7 +420,7 @@ async def refresh_token(
     }
 
 
-# ── POST /api/v1/auth/logout ──────────────────────────────────────────
+# ── POST /api/auth/logout ──────────────────────────────────────────
 
 @router.post("/logout")
 async def logout(

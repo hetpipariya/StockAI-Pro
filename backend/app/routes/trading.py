@@ -25,7 +25,7 @@ from app.services.db import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/trading", tags=["trading"])
+router = APIRouter(prefix="/api/trading", tags=["trading"])
 
 
 @router.get("/status")

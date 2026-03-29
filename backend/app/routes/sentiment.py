@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query
 from app.routes.news import get_news
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/v1/sentiment", tags=["sentiment"])
+router = APIRouter(prefix="/api/sentiment", tags=["sentiment"])
 
 # Keyword dictionary for quick scoring
 BULLISH_KEYWORDS = ["gain", "growth", "profit", "strong", "beat", "surge", "up", "buy", "bullish", "positive", "resilience"]

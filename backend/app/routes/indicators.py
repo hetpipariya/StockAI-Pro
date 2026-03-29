@@ -6,7 +6,7 @@ from app.services.indicators import IndicatorEngine
 from app.routes.market import get_history
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/v1/indicators", tags=["indicators"])
+router = APIRouter(prefix="/api/indicators", tags=["indicators"])
 
 @router.get("")
 async def get_indicators(

@@ -11,7 +11,7 @@ from app.config import NEWS_API_KEY
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/news", tags=["news"])
+router = APIRouter(prefix="/api/news", tags=["news"])
 
 
 def _analyze_sentiment(text: str) -> str:

@@ -19,8 +19,6 @@ docker-compose, and the README) while also supporting the conventional path.
 """
 
 from app.server import app  # noqa: F401 — re-export the FastAPI instance
-from app.config import BACKEND_HOST, BACKEND_PORT
-
 import logging
 
 logger = logging.getLogger(__name__)
@@ -31,5 +29,5 @@ __all__ = ["app"]
 if __name__ == "__main__":
     import uvicorn
 
-    logger.info("[BOOT] Starting FastAPI on %s:%s", BACKEND_HOST, BACKEND_PORT)
-    uvicorn.run("app.main:app", host=BACKEND_HOST, port=BACKEND_PORT, proxy_headers=True, forwarded_allow_ips="*")
+    logger.info("[BOOT] Starting FastAPI on %s:%s", "0.0.0.0", 8000)
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, proxy_headers=True, forwarded_allow_ips="*")

@@ -237,7 +237,7 @@ def add_production_middleware(app: FastAPI) -> None:
         rate_key = _extract_rate_key(request, client_ip)
         now = time.monotonic()
 
-        if request.method == "POST" and path in ("/api/v1/auth/login", "/api/v1/auth/token"):
+        if request.method == "POST" and path in ("/api/auth/login", "/api/auth/token"):
             if rate_key not in _login_attempts:
                 _login_attempts[rate_key] = deque()
             attempts = _login_attempts[rate_key]

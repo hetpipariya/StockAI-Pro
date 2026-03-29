@@ -88,25 +88,25 @@ app.include_router(trading.router)
 setup_websocket_routes(app)
 
 
-def _list_api_v1_routes() -> list[str]:
-    paths = {route.path for route in app.routes if getattr(route, "path", "").startswith("/api/v1")}
+def _list_api_routes() -> list[str]:
+    paths = {route.path for route in app.routes if getattr(route, "path", "").startswith("/api")}
     return sorted(paths)
 
 
-@app.get("/api/v1")
-async def api_v1_index():
-    endpoints = _list_api_v1_routes()
+@app.get("/api")
+async def api_index():
+    endpoints = _list_api_routes()
     return {
         "status": "ok",
         "service": "stockai-pro",
-        "base": "/api/v1",
+        "base": "/api",
         "count": len(endpoints),
         "endpoints": endpoints,
         "docs": "/docs",
     }
 
 
-@app.get("/api/v1/system/db-ping")
+@app.get("/api/system/db-ping")
 async def api_db_ping():
     db_ok = await check_db_connection(retries=1, delay=0.0)
     return {
@@ -117,29 +117,12 @@ async def api_db_ping():
     }
 
 
-@app.get("/health")
+@app.get("/api/health")
 async def health():
-    try:
-        db_ok = await check_db_connection(retries=1, delay=0.0)
-    except Exception:
-        db_ok = False
-
-    ws_connector = get_ws_connector()
-    last_tick_age = get_last_tick_age_seconds()
-    safe_last_tick_age = round(last_tick_age, 2) if math.isfinite(last_tick_age) else None
     return {
-        "status": "ok" if db_ok else "degraded",
-        "service": "stockai-pro",
-        "version": "2.0",
-        "database": "connected" if db_ok else "unreachable",
-        "database_backend": _DB_BACKEND,
-        "instruments": get_instrument_count(),
-        "smartapi_connected": ws_connector.is_logged_in if ws_connector else False,
-        "ws_clients": get_client_count(),
-        "market_open": is_market_open(),
-        "ws_streaming": is_ws_streaming(),
-        "ws_state": get_ws_state(),
-        "ws_last_tick_age_seconds": safe_last_tick_age,
+        "success": True,
+        "status": "ok",
+        "service": "stockai-pro-backend",
     }
 
 
@@ -177,8 +160,8 @@ async def root_status():
         "status": "ok",
         "service": "stockai-pro",
         "docs": "/docs",
-        "health": "/health",
+        "health": "/api/health",
         "ws": "/ws",
         "ws_legacy": "/live",
-        "api": "/api/v1",
+        "api": "/api",
     }

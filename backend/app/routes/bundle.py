@@ -15,7 +15,7 @@ from app.services.redis_client import get_cache, set_cache
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1", tags=["bundle"])
+router = APIRouter(prefix="/api", tags=["bundle"])
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
