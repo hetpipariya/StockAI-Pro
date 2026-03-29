@@ -69,8 +69,8 @@ except Exception:
 app = FastAPI(title="StockAI Pro API", version="2.0", lifespan=lifespan)
 
 app.add_middleware(GZipMiddleware, minimum_size=500)
-configure_cors(app)
 add_production_middleware(app)
+configure_cors(app)
 add_exception_handlers(app)
 Instrumentator().instrument(app).expose(app)
 

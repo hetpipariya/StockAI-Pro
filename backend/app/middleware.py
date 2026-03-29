@@ -151,6 +151,23 @@ async def _normalize_json_response(request: Request, response: Response) -> Resp
     )
 
 
+def _corsify_error_response(request: Request, response: JSONResponse) -> JSONResponse:
+    """Ensure middleware-generated error responses remain visible to browser clients."""
+    origin = (request.headers.get("origin") or "").strip()
+    if not origin:
+        return response
+
+    response.headers["Access-Control-Allow-Origin"] = origin
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+
+    vary = response.headers.get("Vary", "")
+    vary_tokens = {token.strip() for token in vary.split(",") if token.strip()}
+    if "Origin" not in vary_tokens:
+        response.headers["Vary"] = f"{vary}, Origin" if vary else "Origin"
+
+    return response
+
+
 def configure_cors(app: FastAPI) -> list[str]:
     """Attach CORS middleware and return effective origins list."""
     default_origins = [
@@ -228,7 +245,7 @@ def add_production_middleware(app: FastAPI) -> None:
             while attempts and attempts[0] < cutoff:
                 attempts.popleft()
             if len(attempts) >= _LOGIN_RATE_LIMIT:
-                return JSONResponse(
+                response = JSONResponse(
                     status_code=429,
                     content={
                         "success": False,
@@ -239,10 +256,11 @@ def add_production_middleware(app: FastAPI) -> None:
                         "timestamp": _utc_now_iso(),
                     },
                 )
+                return _corsify_error_response(request, response)
             attempts.append(now)
 
         if path.startswith("/api/") and not _check_rate_limit(rate_key):
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=429,
                 content={
                     "success": False,
@@ -253,6 +271,7 @@ def add_production_middleware(app: FastAPI) -> None:
                     "timestamp": _utc_now_iso(),
                 },
             )
+            return _corsify_error_response(request, response)
 
         start_time = time.perf_counter()
         try:
@@ -260,7 +279,7 @@ def add_production_middleware(app: FastAPI) -> None:
         except asyncio.TimeoutError:
             elapsed = time.perf_counter() - start_time
             logger.error("[TIMEOUT] %s %s timed out after %.1fs from %s", request.method, path, elapsed, client_ip)
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=504,
                 content={
                     "success": False,
@@ -271,10 +290,11 @@ def add_production_middleware(app: FastAPI) -> None:
                     "timestamp": _utc_now_iso(),
                 },
             )
+            return _corsify_error_response(request, response)
         except Exception as exc:
             elapsed = time.perf_counter() - start_time
             logger.error("[ERROR] %s %s failed after %.1fs: %s", request.method, path, elapsed, exc)
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=500,
                 content={
                     "success": False,
@@ -285,6 +305,7 @@ def add_production_middleware(app: FastAPI) -> None:
                     "timestamp": _utc_now_iso(),
                 },
             )
+            return _corsify_error_response(request, response)
 
         elapsed = time.perf_counter() - start_time
         if path.startswith("/api/") and elapsed > 0.5:

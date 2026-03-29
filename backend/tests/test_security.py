@@ -50,21 +50,28 @@ async def test_expired_access_token_is_rejected(client):
 
 @pytest.mark.anyio
 async def test_login_bruteforce_rate_limit_blocks_after_threshold(client):
+    headers = {"Origin": "https://stockai-pro.in"}
+
     for _ in range(5):
         attempt = await client.post(
             "/api/v1/auth/login",
             json={"username": "unknown_user", "password": "WrongPass123"},
+            headers=headers,
         )
         assert attempt.status_code == 401
 
     blocked = await client.post(
         "/api/v1/auth/login",
         json={"username": "unknown_user", "password": "WrongPass123"},
+        headers=headers,
     )
     assert blocked.status_code == 429
     body = blocked.json()
     assert body["status"] == "error"
     assert "too many login attempts" in body["message"].lower()
+    allow_origin = blocked.headers.get("access-control-allow-origin")
+    assert allow_origin in {"*", headers["Origin"]}
+    assert blocked.headers.get("access-control-allow-credentials") == "true"
 
 
 @pytest.mark.anyio
@@ -106,13 +113,17 @@ async def test_unhandled_exceptions_are_sanitized(client, monkeypatch):
 
     monkeypatch.setattr("app.routes.news.get_cache", _raise_secret)
 
-    response = await client.get("/api/v1/news?symbol=RELIANCE")
+    headers = {"Origin": "https://stockai-pro.in"}
+    response = await client.get("/api/v1/news?symbol=RELIANCE", headers=headers)
 
     assert response.status_code == 500
     body = response.json()
     assert body["status"] == "error"
     assert body["message"] == "Internal server error"
     assert "SUPER_SECRET_VALUE" not in response.text
+    allow_origin = response.headers.get("access-control-allow-origin")
+    assert allow_origin in {"*", headers["Origin"]}
+    assert response.headers.get("access-control-allow-credentials") == "true"
 
 
 @pytest.mark.parametrize("path", ["/ws", "/live"])
