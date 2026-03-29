@@ -1,53 +1,8 @@
-import { API_BASE, API_ORIGIN, API_ORIGIN_CANDIDATES } from './env'
+import { API_V1_BASE, buildApiUrl as buildAbsoluteApiUrl } from '../config/api'
 
 const DEFAULT_CACHE_TTL_MS = 3000
 const responseCache = new Map()
-const FALLBACK_API_ORIGIN = 'https://stockai-pro.onrender.com'
-const API_ORIGIN_STORAGE_KEY = 'stockai_api_origin'
-const CLOUDFLARE_ORIGIN_FAILURE_CODES = new Set([520, 521, 522, 523, 524, 525, 526])
-
-const trimTrailingSlash = (value) => String(value || '').replace(/\/+$/, '')
-const toApiBase = (origin) => `${trimTrailingSlash(origin)}/api/v1`
-const extractOriginFromApiBase = (apiBase) => trimTrailingSlash(apiBase).replace(/\/api\/v1$/i, '')
-
-const isHttpOrigin = (value) => /^https?:\/\/[^/]+$/i.test(trimTrailingSlash(value))
-
-const readStoredApiOrigin = () => {
-  if (typeof window === 'undefined') return ''
-  try {
-    const stored = trimTrailingSlash(localStorage.getItem(API_ORIGIN_STORAGE_KEY) || '')
-    return isHttpOrigin(stored) ? stored : ''
-  } catch (_) {
-    return ''
-  }
-}
-
-const persistHealthyApiOrigin = (origin) => {
-  const normalized = trimTrailingSlash(origin)
-  if (!isHttpOrigin(normalized) || typeof window === 'undefined') return
-  try {
-    localStorage.setItem(API_ORIGIN_STORAGE_KEY, normalized)
-  } catch (_) {
-    // ignore storage failures
-  }
-}
-
-const getApiBaseCandidates = () => {
-  const storedOrigin = readStoredApiOrigin()
-  return [
-    API_BASE,
-    ...API_ORIGIN_CANDIDATES.map(toApiBase),
-    toApiBase(storedOrigin),
-    toApiBase(API_ORIGIN),
-    toApiBase(FALLBACK_API_ORIGIN),
-  ].filter((value, index, arr) => Boolean(value) && arr.indexOf(value) === index)
-}
-
-const isFailoverSafeMethod = (method) => ['GET', 'HEAD', 'OPTIONS'].includes(String(method || 'GET').toUpperCase())
-const isFailoverEligibleError = (error) => {
-  const status = Number(error?.status)
-  return status === 0 || CLOUDFLARE_ORIGIN_FAILURE_CODES.has(status)
-}
+const API_BASE = API_V1_BASE
 
 const parseApiError = (data, status, statusText) => {
   if (Array.isArray(data?.detail)) {
@@ -70,9 +25,11 @@ const toQueryString = (params = {}) => {
 }
 
 export const buildApiUrl = (path, params, apiBase = API_BASE) => {
-  const normalizedPath = String(path || '').startsWith('/') ? path : `/${path}`
+  const resolvedBaseUrl = apiBase === API_BASE
+    ? buildAbsoluteApiUrl(path)
+    : `${apiBase}${String(path || '').startsWith('/') ? path : `/${path}`}`
   const query = toQueryString(params)
-  return query ? `${apiBase}${normalizedPath}?${query}` : `${apiBase}${normalizedPath}`
+  return query ? `${resolvedBaseUrl}?${query}` : resolvedBaseUrl
 }
 
 export const apiRequest = async (
@@ -87,89 +44,73 @@ export const apiRequest = async (
   } = {}
 ) => {
   const normalizedMethod = String(method || 'GET').toUpperCase()
-  const apiBaseCandidates = isFailoverSafeMethod(normalizedMethod)
-    ? getApiBaseCandidates()
-    : [getApiBaseCandidates()[0]]
+  const url = buildApiUrl(path, params)
+  const controller = signal ? null : new AbortController()
+  const timeoutId = setTimeout(() => {
+    controller?.abort()
+  }, timeoutMs)
 
-  let lastError = null
+  try {
+    console.log('Calling API:', url)
 
-  for (let baseIndex = 0; baseIndex < apiBaseCandidates.length; baseIndex += 1) {
-    const apiBase = apiBaseCandidates[baseIndex]
-    const url = buildApiUrl(path, params, apiBase)
-    const controller = signal ? null : new AbortController()
-    const timeoutId = setTimeout(() => {
-      controller?.abort()
-    }, timeoutMs)
-
-    try {
-      console.log('Calling API:', url)
-
-      const mergedHeaders = {
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-        ...headers,
-      }
-
-      const response = await fetch(url, {
-        method: normalizedMethod,
-        headers: mergedHeaders,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: signal || controller?.signal,
-      })
-
-      let payload = null
-      try {
-        payload = await response.json()
-      } catch {
-        payload = null
-      }
-
-      if (!response.ok) {
-        const message = parseApiError(payload, response.status, response.statusText)
-        const error = new Error(message)
-        error.status = response.status
-        error.data = payload
-        throw error
-      }
-
-      persistHealthyApiOrigin(extractOriginFromApiBase(apiBase))
-      return payload
-    } catch (error) {
-      const isAbortError =
-        error?.name === 'AbortError' ||
-        /signal aborted without reason/i.test(String(error?.message || '')) ||
-        /operation was aborted/i.test(String(error?.message || ''))
-
-      let normalizedError = error
-
-      if (isAbortError) {
-        console.error('[API] Request aborted:', error?.message || 'Unknown abort reason')
-        normalizedError = new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s. Please check your connection and try again.`)
-        normalizedError.status = 0
-      } else if (error instanceof TypeError) {
-        console.error('[API] Network error:', error?.message || 'TypeError')
-        normalizedError = new Error('Network error: Unable to reach StockAI API. Please check your internet connection.')
-        normalizedError.status = 0
-      } else if (!error?.message) {
-        normalizedError = new Error('Network/API error occurred. Please try again.')
-        normalizedError.status = Number(error?.status) || 0
-      }
-
-      lastError = normalizedError
-
-      const hasNextBase = baseIndex < apiBaseCandidates.length - 1
-      if (hasNextBase && isFailoverEligibleError(normalizedError)) {
-        const nextApiBase = apiBaseCandidates[baseIndex + 1]
-        console.warn(`[API] Failing over request ${path} from ${apiBase} to ${nextApiBase}`)
-        continue
-      }
-
-      throw normalizedError
-    } finally {
-      clearTimeout(timeoutId)
+    const mergedHeaders = {
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...headers,
     }
-  }
 
-  throw lastError || new Error('Network/API error occurred. Please try again.')
+    const response = await fetch(url, {
+      method: normalizedMethod,
+      headers: mergedHeaders,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: signal || controller?.signal,
+    })
+
+    let payload = null
+    try {
+      payload = await response.json()
+    } catch {
+      payload = null
+    }
+
+    if (!response.ok) {
+      const message = parseApiError(payload, response.status, response.statusText)
+      const error = new Error(message)
+      error.status = response.status
+      error.data = payload
+      throw error
+    }
+
+    return payload
+  } catch (error) {
+    const isAbortError =
+      error?.name === 'AbortError' ||
+      /signal aborted without reason/i.test(String(error?.message || '')) ||
+      /operation was aborted/i.test(String(error?.message || ''))
+
+    if (isAbortError) {
+      console.error('[API] Request aborted:', error?.message || 'Unknown abort reason')
+      const timeoutError = new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s. Please check your connection and try again.`)
+      timeoutError.status = 0
+      throw timeoutError
+    }
+
+    if (error instanceof TypeError) {
+      console.error('[API] Network error:', error?.message || 'TypeError')
+      const networkError = new Error('Network error: Unable to reach StockAI API. Please check your internet connection.')
+      networkError.status = 0
+      throw networkError
+    }
+
+    if (!error?.message) {
+      const unknownError = new Error('Network/API error occurred. Please try again.')
+      unknownError.status = Number(error?.status) || 0
+      throw unknownError
+    }
+
+    throw error
+  } finally {
+    clearTimeout(timeoutId)
+  }
 }
 
 export const apiGet = (path, options = {}) => apiRequest(path, { ...options, method: 'GET' })

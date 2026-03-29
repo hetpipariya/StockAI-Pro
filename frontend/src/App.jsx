@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import DesktopLayout from './layouts/DesktopLayout';
 import MobileLayout from './layouts/MobileLayout';
@@ -9,6 +9,21 @@ import ProtectedRoute from './components/Auth/ProtectedRoute';
 import { ToastProvider } from './components/ui/Toast';
 import LoginPage from './pages/LoginPage';
 import SignupPage from './pages/SignupPage';
+import { API_BASE, isBackendReservedPath } from './config/api';
+
+function BackendPathRedirectGuard() {
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const { pathname, search, hash } = window.location;
+    if (!isBackendReservedPath(pathname)) return;
+
+    const target = `${API_BASE}${pathname}${search}${hash}`;
+    window.location.replace(target);
+  }, []);
+
+  return null;
+}
 
 function Dashboard() {
   const width = useWindowWidth();
@@ -23,15 +38,18 @@ function Dashboard() {
 
 export default function App() {
   return (
-    <ToastProvider>
-      <AuthProvider>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/signup" element={<SignupPage />} />
-          <Route path="/" element={<Dashboard />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </AuthProvider>
-    </ToastProvider>
+    <>
+      <BackendPathRedirectGuard />
+      <ToastProvider>
+        <AuthProvider>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/signup" element={<SignupPage />} />
+            <Route path="/" element={<Dashboard />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
+      </ToastProvider>
+    </>
   );
 }

@@ -2,102 +2,20 @@
  * @file api.js
  * Centralized API module for StockAI-Pro.
  */
-
-const getEnvVar = (reactName, viteName, fallback) => {
-  try {
-    if (import.meta && import.meta.env && import.meta.env[viteName]) {
-      return import.meta.env[viteName];
-    }
-    if (typeof process !== 'undefined' && process.env && process.env[reactName]) {
-      return process.env[reactName];
-    }
-  } catch (e) {
-    // Ignore ReferenceErrors
-  }
-  return fallback;
-};
+import {
+  API_BASE as CONFIG_API_BASE,
+  API_V1_BASE,
+  buildApiUrl as buildAbsoluteApiUrl,
+  buildLiveWebSocketUrl,
+} from '../config/api';
 
 const ACCESS_TOKEN_KEY = 'stockai_access_token';
 const REFRESH_TOKEN_KEY = 'stockai_refresh_token';
 const USER_KEY = 'stockai_user';
-const PROD_API_ORIGIN = 'https://api.stockai-pro.in';
-const RENDER_FALLBACK_API_ORIGIN = 'https://stockai-pro.onrender.com';
-const API_ORIGIN_STORAGE_KEY = 'stockai_api_origin';
 const DEFAULT_TIMEOUT_MS = 12000;
 const AUTH_TIMEOUT_MS = 20000;
 const AUTH_LOGIN_ENDPOINT = '/auth/login';
-const CLOUDFLARE_ORIGIN_FAILURE_CODES = new Set([520, 521, 522, 523, 524, 525, 526]);
-
-const normalizeBaseUrl = (value) => String(value || '').replace(/\/+$/, '');
-const isHttpOrigin = (value) => /^https?:\/\/[^/]+$/i.test(normalizeBaseUrl(value));
-const isLocalHostName = (value) => /^(localhost|127\.0\.0\.1)$/i.test(String(value || '').trim());
-
-const readBrowserOrigin = () => {
-  if (typeof window === 'undefined') return '';
-  const origin = normalizeBaseUrl(window.location.origin || '');
-  const host = String(window.location.hostname || '').trim();
-  return isLocalHostName(host) && isHttpOrigin(origin) ? origin : '';
-};
-
-const readStoredApiOrigin = () => {
-  if (typeof window === 'undefined') return '';
-  try {
-    const stored = normalizeBaseUrl(localStorage.getItem(API_ORIGIN_STORAGE_KEY) || '');
-    return isHttpOrigin(stored) ? stored : '';
-  } catch (_) {
-    return '';
-  }
-};
-
-let preferredApiOrigin = readStoredApiOrigin() || readBrowserOrigin() || PROD_API_ORIGIN;
-
-const getApiOriginCandidates = () => {
-  const localBrowserOrigin = readBrowserOrigin();
-  const candidates = [
-    localBrowserOrigin,
-    preferredApiOrigin,
-    PROD_API_ORIGIN,
-    RENDER_FALLBACK_API_ORIGIN,
-  ]
-    .map(normalizeBaseUrl)
-    .filter((value, index, arr) => value && arr.indexOf(value) === index);
-
-  return candidates.length ? candidates : [PROD_API_ORIGIN];
-};
-
-const getPrimaryApiOrigin = () => getApiOriginCandidates()[0];
-const getApiBase = (origin = getPrimaryApiOrigin()) => `${normalizeBaseUrl(origin)}/api/v1`;
-
-const persistHealthyApiOrigin = (origin) => {
-  const normalized = normalizeBaseUrl(origin);
-  if (!isHttpOrigin(normalized) || preferredApiOrigin === normalized) return;
-
-  preferredApiOrigin = normalized;
-
-  if (typeof window !== 'undefined') {
-    try {
-      localStorage.setItem(API_ORIGIN_STORAGE_KEY, normalized);
-    } catch (_) {
-      // ignore storage failures
-    }
-  }
-};
-
-const isFailoverSafeRequest = (method, endpoint) => {
-  const normalizedMethod = String(method || 'GET').toUpperCase();
-  if (['GET', 'HEAD', 'OPTIONS'].includes(normalizedMethod)) return true;
-  if (endpoint === AUTH_LOGIN_ENDPOINT) return normalizedMethod === 'POST';
-  return false;
-};
-
-const isFailoverEligibleError = (error) => {
-  const status = Number(error?.status);
-  return status === 0 || CLOUDFLARE_ORIGIN_FAILURE_CODES.has(status);
-};
-
-// Pin all requests to the production API domain to prevent bad env overrides.
-const getRawBaseUrl = () => getPrimaryApiOrigin();
-const API_BASE = getApiBase();
+const API_BASE = API_V1_BASE;
 
 const normalizeEndpoint = (endpoint) => {
   const raw = String(endpoint || '');
@@ -110,21 +28,7 @@ const normalizeEndpoint = (endpoint) => {
   return path;
 };
 
-const buildApiUrl = (endpoint, apiBase = API_BASE) => {
-  if (endpoint === '/') return apiBase;
-  return `${apiBase}${endpoint}`;
-};
-
-const RAW_WS_URL = normalizeBaseUrl(getEnvVar('REACT_APP_WS_URL', 'VITE_WS_URL', ''));
-
-const resolveWsBase = () => {
-  if (RAW_WS_URL) {
-    return RAW_WS_URL;
-  }
-
-  const source = getRawBaseUrl() || PROD_API_ORIGIN;
-  return source.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
-};
+const buildApiUrl = (endpoint) => buildAbsoluteApiUrl(endpoint);
 
 const logApiFailure = ({ endpoint, method, url, status, message, error }) => {
   const details = {
@@ -313,25 +217,8 @@ export const clearStoredAuth = () => {
 };
 
 export const buildWebSocketUrl = (token) => {
-  const wsBase = resolveWsBase();
-  if (!token || !wsBase) return '';
-
-  let normalizedBase = wsBase;
-  if (!/^wss?:\/\//i.test(normalizedBase) && /^https?:\/\//i.test(normalizedBase)) {
-    normalizedBase = normalizedBase.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
-  }
-
-  if (!/^wss?:\/\//i.test(normalizedBase) && normalizedBase.startsWith('/')) {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    normalizedBase = `${protocol}//${window.location.host}${normalizedBase}`;
-  }
-
-  const withWsPath = /(\/ws|\/live)$/i.test(normalizedBase)
-    ? normalizedBase.replace(/\/live$/i, '/ws')
-    : `${normalizedBase}/ws`;
-
-  const sep = withWsPath.includes('?') ? '&' : '?';
-  return `${withWsPath}${sep}token=${encodeURIComponent(token)}`;
+  if (!token) return '';
+  return buildLiveWebSocketUrl(token);
 };
 
 /**
@@ -341,7 +228,6 @@ export const buildWebSocketUrl = (token) => {
  * @returns {Promise<any>} Response JSON data
  */
 async function apiFetch(endpoint, options = {}) {
-  const isDev = getEnvVar('NODE_ENV', 'MODE', '') !== 'production';
   const normalizedEndpoint = normalizeEndpoint(endpoint);
   const isAuthEndpoint = /^\/auth\//.test(normalizedEndpoint);
   const {
@@ -372,16 +258,13 @@ async function apiFetch(endpoint, options = {}) {
     console.log('LOGIN REQUEST METHOD: POST');
   }
 
-  const originCandidates = isFailoverSafeRequest(method, normalizedEndpoint)
-    ? getApiOriginCandidates()
-    : [getPrimaryApiOrigin()];
+  const originCandidates = [CONFIG_API_BASE];
 
   let lastError = null;
 
   for (let originIndex = 0; originIndex < originCandidates.length; originIndex += 1) {
     const requestOrigin = originCandidates[originIndex];
-    const requestBase = getApiBase(requestOrigin);
-    const url = buildApiUrl(normalizedEndpoint, requestBase);
+    const url = buildApiUrl(normalizedEndpoint);
 
     // Debug logging for API calls
     console.log('API CALL:', `${method} ${url}`, {
@@ -497,20 +380,9 @@ async function apiFetch(endpoint, options = {}) {
 
     try {
       const payload = await attempt(0);
-      persistHealthyApiOrigin(requestOrigin);
       return payload;
     } catch (error) {
       lastError = error;
-
-      const hasNextOrigin = originIndex < originCandidates.length - 1;
-      if (hasNextOrigin && isFailoverEligibleError(error)) {
-        const nextOrigin = originCandidates[originIndex + 1];
-        console.warn(
-          `[apiFetch] Origin ${requestOrigin} failed for ${normalizedEndpoint}; failing over to ${nextOrigin}`
-        );
-        continue;
-      }
-
       throw error;
     }
   }
@@ -711,4 +583,4 @@ export const getBundle = async (symbol, tf) => {
   return api.getBundle(symbol, tf);
 };
 
-export { getEnvVar, API_BASE };
+export { API_BASE };
