@@ -58,7 +58,6 @@ def _normalize_signal_payload(payload: dict, ltp: float) -> dict:
     # Enforce conservative threshold: below 60% is always HOLD.
     if confidence < 60:
         signal = "HOLD"
-        confidence = 0
 
     try:
         target = float(payload.get("target_price", 0.0) or 0.0)
@@ -71,10 +70,8 @@ def _normalize_signal_payload(payload: dict, ltp: float) -> dict:
 
     if signal == "BUY" and (target <= ltp or stop >= ltp):
         signal = "HOLD"
-        confidence = 0
     elif signal == "SELL" and (target >= ltp or stop <= ltp):
         signal = "HOLD"
-        confidence = 0
 
     if signal == "HOLD":
         stop = round(ltp * 0.996, 2)

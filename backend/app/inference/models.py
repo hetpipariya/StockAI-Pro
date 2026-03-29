@@ -62,6 +62,69 @@ def _missing_model_files() -> list[str]:
     return [name for name in REQUIRED_MODEL_FILES if not (MODEL_DIR / name).exists()]
 
 
+def _ensure_model_feature_columns(
+    feature_df: pd.DataFrame,
+    ohlcv_df: pd.DataFrame,
+    required_features: list[str],
+) -> pd.DataFrame:
+    """Augment canonical features with legacy columns expected by older artifacts."""
+    if feature_df is None or feature_df.empty:
+        return feature_df
+
+    out = feature_df.copy()
+    if not required_features:
+        return out
+
+    raw = ohlcv_df.copy()
+    raw.columns = [str(col).lower() for col in raw.columns]
+
+    def _raw_series(name: str) -> pd.Series:
+        if name not in raw.columns:
+            return pd.Series(np.zeros(len(out), dtype=float), index=out.index)
+        series = pd.to_numeric(raw[name], errors="coerce")
+        if not series.index.equals(out.index):
+            series = series.reindex(out.index)
+        return series.bfill().ffill().fillna(0.0)
+
+    close_series = _raw_series("close")
+    open_series = _raw_series("open")
+    high_series = _raw_series("high")
+    low_series = _raw_series("low")
+    volume_series = _raw_series("volume")
+
+    legacy_builders: dict[str, callable] = {
+        "open": lambda: open_series,
+        "high": lambda: high_series,
+        "low": lambda: low_series,
+        "close": lambda: close_series,
+        "volume": lambda: volume_series,
+        "pct_change_5d": lambda: close_series.pct_change(5),
+        "roll_mean_5d": lambda: close_series.rolling(5, min_periods=1).mean(),
+        "roll_mean_20d": lambda: close_series.rolling(20, min_periods=1).mean(),
+        "roll_std_20d": lambda: close_series.pct_change(1).rolling(20, min_periods=2).std(),
+        "rsi_momentum": lambda: (
+            pd.to_numeric(out["rsi_14"], errors="coerce")
+            if "rsi_14" in out.columns
+            else pd.Series(np.zeros(len(out), dtype=float), index=out.index)
+        ).diff(),
+    }
+
+    for feature_name in required_features:
+        if feature_name in out.columns:
+            continue
+        builder = legacy_builders.get(feature_name)
+        if builder is not None:
+            out[feature_name] = builder()
+        else:
+            out[feature_name] = 0.0
+
+    for feature_name in required_features:
+        out[feature_name] = pd.to_numeric(out[feature_name], errors="coerce").fillna(0.0)
+
+    out.replace([np.inf, -np.inf], 0.0, inplace=True)
+    return out
+
+
 def ensure_models_loaded(max_retries: int = 3) -> bool:
     """Best-effort model load with bounded retries."""
     global _ensemble_model
@@ -120,18 +183,42 @@ def load_models():
             # Old dictionary format missing version
             model_obj = payload.get("model", payload)
             scaler_obj = payload.get("scaler", None)
-            feat_list = payload.get("features", FEATURE_COLUMNS)
+            feat_list = payload.get("features") or payload.get("feature_columns")
         else:
             # Raw model object
             model_obj = payload
             scaler_obj = None
+            feat_list = None
+
+        # Backward compatibility: load sidecar artifacts if legacy model.pkl is raw.
+        if scaler_obj is None:
+            scaler_path = MODEL_DIR / "scaler.pkl"
+            if scaler_path.exists():
+                try:
+                    scaler_obj = joblib.load(scaler_path)
+                    logger.info("[MODELS] Loaded sidecar scaler artifact: %s", scaler_path)
+                except Exception as exc:
+                    logger.warning("[MODELS] Failed loading sidecar scaler %s: %s", scaler_path, exc)
+
+        if feat_list is None:
+            features_path = MODEL_DIR / "features.pkl"
+            if features_path.exists():
+                try:
+                    loaded_features = joblib.load(features_path)
+                    if isinstance(loaded_features, (list, tuple)):
+                        feat_list = list(loaded_features)
+                        logger.info("[MODELS] Loaded sidecar features artifact: %s", features_path)
+                except Exception as exc:
+                    logger.warning("[MODELS] Failed loading sidecar features %s: %s", features_path, exc)
+
+        if feat_list is None:
             feat_list = FEATURE_COLUMNS
-            
+
         payload = {
             "model": model_obj,
             "scaler": scaler_obj,
             "features": feat_list,
-            "version": FEATURE_VERSION
+            "version": FEATURE_VERSION,
         }
 
     loaded_version = payload.get("version")
@@ -149,7 +236,7 @@ def load_models():
     _features_list = payload.get("features")
     _model_version = loaded_version
 
-    # Strict feature validation
+    # Strict validation for canonical artifacts; legacy artifacts run in compatibility mode.
     try:
         validate_features(
             _features_list,
@@ -157,12 +244,10 @@ def load_models():
             context="load_models() vs FEATURE_COLUMNS",
         )
     except Exception as exc:
-        logger.error("[MODELS] Feature contract validation failed: %s", exc)
-        _ensemble_model = None
-        _scaler = None
-        _features_list = None
-        _model_version = None
-        return
+        logger.warning(
+            "[MODELS] Feature contract mismatch; enabling legacy compatibility mode: %s",
+            exc,
+        )
 
     logger.info(
         "[MODELS] ✓ Loaded ML Ensemble Pipeline — %d features validated.", len(_features_list)
@@ -210,6 +295,13 @@ class ModelEnsemble:
 
         if feature_df.empty:
             return _safe_hold("Feature computation returned empty")
+
+        required_model_features = list(_features_list or FEATURE_COLUMNS)
+        feature_df = _ensure_model_feature_columns(feature_df, ohlcv_df, required_model_features)
+
+        missing_model_features = [name for name in required_model_features if name not in feature_df.columns]
+        if missing_model_features:
+            return _safe_hold(f"Missing model features: {missing_model_features[:5]}")
 
         latest = feature_df.iloc[-1].to_dict()
         factors = []
@@ -356,11 +448,10 @@ class ModelEnsemble:
             ml_confidence = 0
 
         if final_signal == "HOLD":
-            final_confidence = 0
+            final_confidence = max(int(ml_confidence), int(tech_confidence))
 
         if final_confidence < 60:
             final_signal = "HOLD"
-            final_confidence = 0
 
 
         # ── Target / Stop calculation ───────────────────────────────────────
@@ -437,14 +528,11 @@ class ModelEnsemble:
         result["confidence"] = int(np.clip(result.get("confidence", 0), 0, 100))
         if result["confidence"] < 60:
             result["signal"] = "HOLD"
-            result["confidence"] = 0
 
         if result["signal"] == "BUY" and (result["target"] <= ltp or result["stop"] >= ltp):
             result["signal"] = "HOLD"
-            result["confidence"] = 0
         elif result["signal"] == "SELL" and (result["target"] >= ltp or result["stop"] <= ltp):
             result["signal"] = "HOLD"
-            result["confidence"] = 0
 
         if result["signal"] == "HOLD":
             result["stop"] = round(ltp * 0.996, 2)

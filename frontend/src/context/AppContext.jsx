@@ -75,7 +75,6 @@ export const AppProvider = ({ children }) => {
   const shouldReconnectRef = useRef(false);
   const manualCloseRef = useRef(false);
   const selectedSymbolRef = useRef(WATCHLIST_SYMBOLS[0]);
-  const previousSymbolRef = useRef(WATCHLIST_SYMBOLS[0]);
   const bundleRequestIdRef = useRef(0);
   const signalRequestIdRef = useRef(0);
 
@@ -146,6 +145,29 @@ export const AppProvider = ({ children }) => {
         currentPrice: ltp,
         prediction: ltp,
         timestamp: new Date().toISOString(),
+      };
+    });
+  }, []);
+
+  const updateWatchlistFromTick = useCallback((symbol, tick) => {
+    const normalizedSymbol = String(symbol || '').toUpperCase();
+    if (!normalizedSymbol) return;
+
+    const ltp = toNumber(tick?.ltp, null);
+    if (ltp == null) return;
+
+    setWatchlistPrices((prev) => {
+      const existing = prev[normalizedSymbol] || {};
+      const close = toNumber(existing.close, ltp);
+      return {
+        ...prev,
+        [normalizedSymbol]: {
+          ...existing,
+          price: ltp,
+          close,
+          change: close != null ? ltp - close : 0,
+          changePct: close ? ((ltp - close) / close) * 100 : 0,
+        },
       };
     });
   }, []);
@@ -307,9 +329,8 @@ export const AppProvider = ({ children }) => {
       reconnectBackoffRef.current = 1000;
       setWsStatus('open');
       setWsConnectionState('CONNECTED');
-      const symbol = selectedSymbolRef.current;
-      if (symbol) {
-        ws.send(JSON.stringify({ action: 'subscribe', symbols: [symbol] }));
+      if (WATCHLIST_SYMBOLS.length) {
+        ws.send(JSON.stringify({ action: 'subscribe', symbols: WATCHLIST_SYMBOLS }));
       }
     };
 
@@ -329,8 +350,11 @@ export const AppProvider = ({ children }) => {
 
       if (message.type === 'tick') {
         const symbol = String(message.symbol || '').toUpperCase();
-        if (symbol !== selectedSymbolRef.current) return;
-        updateBundleFromTick(message);
+        if (!symbol) return;
+        updateWatchlistFromTick(symbol, message);
+        if (symbol === selectedSymbolRef.current) {
+          updateBundleFromTick(message);
+        }
         return;
       }
 
@@ -369,7 +393,7 @@ export const AppProvider = ({ children }) => {
         // Ignore close errors.
       }
     };
-  }, [accessToken, isAuthenticated, updateBundleFromTick, updateBundleFromCandle]);
+  }, [accessToken, isAuthenticated, updateBundleFromTick, updateBundleFromCandle, updateWatchlistFromTick]);
 
   useEffect(() => {
     shouldReconnectRef.current = true;
@@ -381,22 +405,6 @@ export const AppProvider = ({ children }) => {
       clearSocket();
     };
   }, [clearSocket, connectSocket]);
-
-  useEffect(() => {
-    const ws = wsRef.current;
-    const nextSymbol = String(selectedSymbol || '').toUpperCase();
-    if (!ws || ws.readyState !== WebSocket.OPEN || !nextSymbol) {
-      previousSymbolRef.current = nextSymbol;
-      return;
-    }
-
-    const previous = previousSymbolRef.current;
-    if (previous && previous !== nextSymbol) {
-      ws.send(JSON.stringify({ action: 'unsubscribe', symbols: [previous] }));
-    }
-    ws.send(JSON.stringify({ action: 'subscribe', symbols: [nextSymbol] }));
-    previousSymbolRef.current = nextSymbol;
-  }, [selectedSymbol]);
 
   const selectSymbol = useCallback((symbol) => {
     const next = String(symbol || '').trim().toUpperCase();

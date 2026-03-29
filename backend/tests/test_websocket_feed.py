@@ -103,3 +103,44 @@ async def test_relay_allows_repeated_mock_ticks_without_dedup(monkeypatch):
     assert len(mock_messages) == 2
     assert all(msg["is_mock"] is True for msg in mock_messages)
     assert all(msg["mock_reason"] == "OFF_HOURS_SEEDED" for msg in mock_messages)
+
+
+def test_resolve_mock_base_price_corrects_paise_cached_value():
+    handler._last_known_prices["RELIANCE"] = 134810.0
+
+    price, seeded = handler._resolve_mock_base_price("RELIANCE")
+
+    assert seeded is False
+    assert price == 1348.1
+    assert handler._last_known_prices["RELIANCE"] == 1348.1
+
+
+@pytest.mark.anyio
+async def test_on_smartapi_tick_normalizes_reliance_paise(monkeypatch):
+    emitted: list[tuple[str, dict]] = []
+
+    async def _capture(symbol: str, payload: dict):
+        emitted.append((symbol, payload))
+
+    class _DummyCandleBuilder:
+        def process_tick(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(handler, "broadcast_tick", _capture)
+    monkeypatch.setattr(handler.tick_aggregator, "process_tick", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(handler, "_cached_candle_builder_15m", _DummyCandleBuilder())
+    monkeypatch.setattr(handler, "_schedule_async", lambda coro: asyncio.create_task(coro))
+
+    msg = {
+        "tradingsymbol": "RELIANCE-EQ",
+        "ltp": 134810,
+        "volume": 100,
+    }
+
+    handler._on_smartapi_tick(msg)
+    await asyncio.sleep(0)
+
+    assert handler._last_known_prices["RELIANCE"] == 1348.1
+    assert emitted
+    assert emitted[0][0] == "RELIANCE"
+    assert emitted[0][1]["ltp"] == 1348.1

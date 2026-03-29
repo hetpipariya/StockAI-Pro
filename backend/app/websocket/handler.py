@@ -56,6 +56,7 @@ _ws_reconnect_task = None
 _WS_BASE_BACKOFF_SECONDS = 1
 _WS_MAX_BACKOFF_SECONDS = 30
 _WS_MAX_RETRY_ATTEMPTS = 3  # Limit retries to prevent 429 rate limit errors
+_WATCHLIST_PRICE_MAX = 10000.0
 
 
 def _seed_price_for_symbol(symbol: str) -> float:
@@ -67,11 +68,49 @@ def _seed_price_for_symbol(symbol: str) -> float:
     return round(major + minor, 2)
 
 
+def _normalize_watchlist_price(symbol: str, raw_price: float, ref_price: float = 0.0) -> float:
+    """Normalize likely paise values into rupees and reject implausible spikes."""
+    if not math.isfinite(raw_price) or raw_price <= 0:
+        return 0.0
+
+    normalized = float(raw_price)
+    symbol_upper = str(symbol or "").strip().upper()
+
+    # Explicit production guard requested by incident analysis.
+    if symbol_upper == "RELIANCE" and normalized > _WATCHLIST_PRICE_MAX:
+        normalized = normalized / 100.0
+    elif symbol_upper in DEFAULT_WATCHLIST and normalized > _WATCHLIST_PRICE_MAX:
+        normalized = normalized / 100.0
+
+    if ref_price > 0:
+        if normalized > ref_price * 50:
+            normalized = normalized / 100.0
+        elif normalized > ref_price * 10:
+            logger.warning("[TICK] %s rejected outlier LTP=%s (ref=%s)", symbol_upper, normalized, ref_price)
+            return 0.0
+
+    if symbol_upper in DEFAULT_WATCHLIST and normalized > _WATCHLIST_PRICE_MAX:
+        logger.warning("[TICK] %s rejected implausible watchlist price=%s", symbol_upper, normalized)
+        return 0.0
+
+    return round(normalized, 2)
+
+
 def _resolve_mock_base_price(symbol: str) -> tuple[float, bool]:
     """Return (price, is_seeded) for mock emissions."""
     cached = float(_last_known_prices.get(symbol, 0.0) or 0.0)
     if cached > 0 and math.isfinite(cached):
-        return round(cached, 2), False
+        normalized_cached = _normalize_watchlist_price(symbol, cached)
+        if normalized_cached > 0:
+            if normalized_cached != round(cached, 2):
+                logger.warning(
+                    "[MOCK] Corrected cached price for %s from %s to %s",
+                    symbol,
+                    round(cached, 2),
+                    normalized_cached,
+                )
+            _last_known_prices[symbol] = normalized_cached
+            return normalized_cached, False
 
     seeded = _seed_price_for_symbol(symbol)
     _last_known_prices[symbol] = seeded
@@ -170,16 +209,11 @@ def _on_smartapi_tick(msg):
         if not symbol:
             symbol = str(msg.get("tradingsymbol", token)).replace("-EQ", "")
 
-        ltp = float(msg.get("ltp", msg.get("last_traded_price", msg.get("lastprice", 0))))
+        raw_ltp = float(msg.get("ltp", msg.get("last_traded_price", msg.get("lastprice", 0))))
         vol = int(msg.get("volume", msg.get("volume_trade_for_the_day", 0)) or 0)
-        if ltp <= 0 or not math.isfinite(ltp):
-            return
-
         ref_price = _last_known_prices.get(symbol)
-        if ref_price and ref_price > 0 and ltp > ref_price * 50:
-            ltp = ltp / 100.0
-        elif ref_price and ref_price > 0 and ltp > ref_price * 10:
-            logger.warning("[TICK] %s rejected outlier LTP=%s (ref=%s)", symbol, ltp, ref_price)
+        ltp = _normalize_watchlist_price(symbol, raw_ltp, float(ref_price or 0.0))
+        if ltp <= 0:
             return
 
         _last_known_prices[symbol] = ltp
@@ -189,15 +223,17 @@ def _on_smartapi_tick(msg):
         depth_buy = msg.get("depth", {}).get("buy", [])
         if depth_buy:
             bp = float(depth_buy[0].get("price", ltp))
-            if not math.isfinite(bp):
+            bp = _normalize_watchlist_price(symbol, bp, ltp)
+            if bp <= 0:
                 bp = ltp
-            best_bid = bp / 100.0 if bp > ltp * 50 else bp
+            best_bid = bp
         depth_sell = msg.get("depth", {}).get("sell", [])
         if depth_sell:
             ap = float(depth_sell[0].get("price", ltp))
-            if not math.isfinite(ap):
+            ap = _normalize_watchlist_price(symbol, ap, ltp)
+            if ap <= 0:
                 ap = ltp
-            best_ask = ap / 100.0 if ap > ltp * 50 else ap
+            best_ask = ap
 
         completed_candle = tick_aggregator.process_tick(symbol, ltp, vol)
 
