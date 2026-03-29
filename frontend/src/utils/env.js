@@ -8,7 +8,7 @@
 
 import {
   API_BASE as CONFIG_API_BASE,
-  API_V1_BASE,
+  API_URL,
   WS_URL,
   buildApiUrl,
   buildLiveWebSocketUrl,
@@ -22,7 +22,7 @@ export { WS_URL };
 
 // Re-export API URLs
 export const API_ORIGIN = CONFIG_API_BASE;
-export const API_BASE = API_V1_BASE;
+export const API_BASE = API_URL;
 
 // For backward compatibility - list of API origin candidates
 // In the new architecture, we only use one origin

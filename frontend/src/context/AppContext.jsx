@@ -18,6 +18,8 @@ const WATCHLIST_SYMBOLS = [
   'KOTAKBANK',
 ];
 
+const WS_MAX_RECONNECT_ATTEMPTS = 10;
+
 const normalizeTimeframe = (value) => {
   const raw = String(value || '').trim().toLowerCase();
   if (!raw) return '1m';
@@ -72,6 +74,7 @@ export const AppProvider = ({ children }) => {
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const reconnectBackoffRef = useRef(1000);
+  const reconnectAttemptsRef = useRef(0);
   const shouldReconnectRef = useRef(false);
   const manualCloseRef = useRef(false);
   const selectedSymbolRef = useRef(WATCHLIST_SYMBOLS[0]);
@@ -327,6 +330,7 @@ export const AppProvider = ({ children }) => {
 
     ws.onopen = () => {
       reconnectBackoffRef.current = 1000;
+      reconnectAttemptsRef.current = 0;
       setWsStatus('open');
       setWsConnectionState('CONNECTED');
       if (WATCHLIST_SYMBOLS.length) {
@@ -374,6 +378,13 @@ export const AppProvider = ({ children }) => {
 
       if (!shouldReconnectRef.current) {
         setWsStatus('closed');
+        return;
+      }
+
+      reconnectAttemptsRef.current += 1;
+      if (reconnectAttemptsRef.current > WS_MAX_RECONNECT_ATTEMPTS) {
+        setWsStatus('error');
+        setWsConnectionState('ERROR');
         return;
       }
 

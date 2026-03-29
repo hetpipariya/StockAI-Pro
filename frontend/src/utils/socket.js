@@ -11,7 +11,7 @@
  * - Tick message throttling
  */
 
-import { WS_URL } from '../config/api';
+import { buildLiveWebSocketUrl } from '../config/api';
 
 // Store for WebSocket managers (singleton per URL)
 const managers = new Map();
@@ -20,6 +20,7 @@ const managers = new Map();
 const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30000;
 const BACKOFF_MULTIPLIER = 1.5;
+const MAX_RECONNECT_ATTEMPTS = 10;
 
 // Reconnectable close codes (not permanent failures)
 const RECONNECTABLE_CLOSE_CODES = new Set([
@@ -49,6 +50,8 @@ class SocketManager {
     this.connectTimer = null;
     this.backoffMs = INITIAL_BACKOFF_MS;
     this.maxBackoffMs = MAX_BACKOFF_MS;
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = MAX_RECONNECT_ATTEMPTS;
     this.reconnectableCloseCodes = RECONNECTABLE_CLOSE_CODES;
     this.subscriptions = new Set();
     this.messageListeners = new Set();
@@ -114,11 +117,18 @@ class SocketManager {
    */
   scheduleReconnect() {
     if (!this.shouldReconnect) return;
+
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error('[SocketManager] Max reconnection attempts reached');
+      this.connectionState = 'ERROR';
+      return;
+    }
     
     clearTimeout(this.reconnectTimer);
     const delay = this.backoffMs;
+    this.reconnectAttempts += 1;
     
-    console.log(`[SocketManager] Scheduling reconnect in ${delay}ms`);
+    console.log(`[SocketManager] Scheduling reconnect in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
     this.connectionState = 'RECONNECTING';
     
     this.reconnectTimer = setTimeout(() => {
@@ -164,6 +174,7 @@ class SocketManager {
       
       console.log('[SocketManager] Connected successfully');
       this.backoffMs = INITIAL_BACKOFF_MS;
+      this.reconnectAttempts = 0;
       this.notifyConnection(true);
       
       // Send authentication if token is set
@@ -386,6 +397,7 @@ class SocketManager {
    */
   reconnect() {
     this.backoffMs = INITIAL_BACKOFF_MS;
+    this.reconnectAttempts = 0;
     
     if (this.ws) {
       const socket = this.ws;
@@ -404,10 +416,10 @@ class SocketManager {
 
 /**
  * Get or create a SocketManager for the given URL.
- * @param {string} [url] - WebSocket URL (defaults to configured WS_URL)
+ * @param {string} [url] - WebSocket URL (defaults to configured live URL)
  * @returns {SocketManager} Socket manager instance
  */
-export const getSocketManager = (url = WS_URL) => {
+export const getSocketManager = (url = buildLiveWebSocketUrl()) => {
   if (!url) {
     console.error('[SocketManager] No WebSocket URL provided');
     return null;
@@ -423,6 +435,6 @@ export const getSocketManager = (url = WS_URL) => {
  * Get the default socket manager using configured WS_URL.
  * @returns {SocketManager} Default socket manager instance
  */
-export const getDefaultSocketManager = () => getSocketManager(WS_URL);
+export const getDefaultSocketManager = () => getSocketManager(buildLiveWebSocketUrl());
 
 export default SocketManager;

@@ -1,8 +1,8 @@
-import { API_V1_BASE, buildApiUrl as buildAbsoluteApiUrl } from '../config/api'
+import { API_URL, buildApiUrl as buildAbsoluteApiUrl } from '../config/api'
 
 const DEFAULT_CACHE_TTL_MS = 3000
 const responseCache = new Map()
-const API_BASE = API_V1_BASE
+const API_BASE = API_URL
 
 const parseApiError = (data, status, statusText) => {
   if (Array.isArray(data?.detail)) {
