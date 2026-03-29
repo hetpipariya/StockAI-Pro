@@ -47,6 +47,8 @@ export const apiRequest = async (
   }, timeoutMs)
 
   try {
+    console.log('Calling API:', url)
+
     const mergedHeaders = {
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       ...headers,
@@ -76,9 +78,18 @@ export const apiRequest = async (
 
     return payload
   } catch (error) {
-    if (error?.name === 'AbortError') {
-      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`)
+    const isAbortError =
+      error?.name === 'AbortError' ||
+      /signal aborted without reason/i.test(String(error?.message || ''))
+
+    if (isAbortError) {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s. Please try again.`)
     }
+
+    if (error instanceof TypeError) {
+      throw new Error('Network error: Unable to reach StockAI API. Please check your internet connection.')
+    }
+
     throw error
   } finally {
     clearTimeout(timeoutId)

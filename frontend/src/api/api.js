@@ -21,16 +21,32 @@ const ACCESS_TOKEN_KEY = 'stockai_access_token';
 const REFRESH_TOKEN_KEY = 'stockai_refresh_token';
 const USER_KEY = 'stockai_user';
 const PROD_API_ORIGIN = 'https://api.stockai-pro.in';
+const PROD_API_BASE = `${PROD_API_ORIGIN}/api/v1`;
+const DEFAULT_TIMEOUT_MS = 12000;
+const AUTH_TIMEOUT_MS = 20000;
+const AUTH_LOGIN_ENDPOINT = '/auth/login';
 
 const normalizeBaseUrl = (value) => String(value || '').replace(/\/+$/, '');
 
-const RAW_BASE_URL = normalizeBaseUrl(
-  getEnvVar('REACT_APP_API_URL', 'VITE_API_URL', '') || PROD_API_ORIGIN
-);
+// Pin all requests to the production API domain to prevent bad env overrides.
+const RAW_BASE_URL = PROD_API_ORIGIN;
+const API_BASE = PROD_API_BASE;
 
-const API_BASE = RAW_BASE_URL.endsWith('/api/v1')
-  ? RAW_BASE_URL
-  : `${RAW_BASE_URL}/api/v1`;
+const normalizeEndpoint = (endpoint) => {
+  const raw = String(endpoint || '');
+  const path = raw.startsWith('/') ? raw : `/${raw}`;
+
+  if (path === '/api/v1') return '/';
+  if (path.startsWith('/api/v1/')) return path.slice('/api/v1'.length);
+  if (path.startsWith('/api/')) return path.slice('/api'.length);
+
+  return path;
+};
+
+const buildApiUrl = (endpoint) => {
+  if (endpoint === '/') return API_BASE;
+  return `${API_BASE}${endpoint}`;
+};
 
 const RAW_WS_URL = normalizeBaseUrl(getEnvVar('REACT_APP_WS_URL', 'VITE_WS_URL', ''));
 
@@ -144,6 +160,15 @@ const extractErrorMessage = (payload, fallback) => {
   );
 };
 
+const isAbortLikeError = (error) => {
+  const message = String(error?.message || '');
+  return (
+    error?.name === 'AbortError' ||
+    /signal aborted without reason/i.test(message) ||
+    /operation was aborted/i.test(message)
+  );
+};
+
 export const getStoredAccessToken = () => {
   try {
     return localStorage.getItem(ACCESS_TOKEN_KEY) || '';
@@ -233,26 +258,41 @@ export const buildWebSocketUrl = (token) => {
  */
 async function apiFetch(endpoint, options = {}) {
   const isDev = getEnvVar('NODE_ENV', 'MODE', '') !== 'production';
-  const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const normalizedEndpoint = normalizeEndpoint(endpoint);
   const isAuthEndpoint = /^\/auth\//.test(normalizedEndpoint);
-  const method = options.method || 'GET';
-  const url = normalizedEndpoint.startsWith('/api/')
-    ? `${RAW_BASE_URL}${normalizedEndpoint}`
-    : `${API_BASE}${normalizedEndpoint}`;
+  const {
+    timeoutMs: providedTimeoutMs,
+    signal: externalSignal,
+    ...fetchOptions
+  } = options;
+  const timeoutMs = Number.isFinite(providedTimeoutMs) && providedTimeoutMs > 0
+    ? providedTimeoutMs
+    : (isAuthEndpoint ? AUTH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
+  const method = fetchOptions.method || 'GET';
+  const url = buildApiUrl(normalizedEndpoint);
   
   const attempt = async (retryCount) => {
     const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 8000); // 8-second timeout
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        controller.abort();
+      } else {
+        externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+      }
+    }
 
     try {
       const token = getStoredAccessToken();
+      console.log('Calling API:', url);
       const response = await fetch(url, {
-        ...options,
+        ...fetchOptions,
         signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          ...options.headers,
+          ...fetchOptions.headers,
         },
       });
 
@@ -283,10 +323,12 @@ async function apiFetch(endpoint, options = {}) {
 
     } catch (error) {
       clearTimeout(id);
+
+      const isAbortError = isAbortLikeError(error);
       
       // Retry once on network failure (TypeError usually means network/CORS) or timeout (AbortError)
       // Do not retry on 4xx/5xx (which are thrown as objects above {status, message})
-      const isNetworkError = error.name === 'AbortError' || error instanceof TypeError;
+      const isNetworkError = isAbortError || error instanceof TypeError;
       if (isNetworkError && retryCount < 1 && !isAuthEndpoint) {
         if (isDev) console.warn(`[apiFetch] Network failure fetching ${endpoint}, retrying...`);
         return attempt(retryCount + 1);
@@ -299,7 +341,11 @@ async function apiFetch(endpoint, options = {}) {
         ? error
         : {
             status: 0,
-            message: error.message || 'Network Error',
+            message: isAbortError
+              ? `Request timed out after ${Math.round(timeoutMs / 1000)}s. Please try again.`
+              : (error instanceof TypeError
+                ? 'Network error: Unable to reach StockAI API. Please check your internet connection.'
+                : (error.message || 'Network error: Request failed.')),
             url,
             method,
             endpoint: normalizedEndpoint,
@@ -440,11 +486,23 @@ export const api = {
   },
 
   login: async ({ username, password }) => {
-    const payload = await apiFetch('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ username, password }),
-    });
-    return payload?.data || payload;
+    const normalizedUsername = String(username || '').trim();
+    try {
+      const payload = await apiFetch(AUTH_LOGIN_ENDPOINT, {
+        method: 'POST',
+        body: JSON.stringify({ username: normalizedUsername, password }),
+        timeoutMs: AUTH_TIMEOUT_MS,
+      });
+      return payload?.data || payload;
+    } catch (error) {
+      throw {
+        ...(error && typeof error === 'object' ? error : {}),
+        status: Number.isFinite(error?.status) ? error.status : 0,
+        message:
+          error?.message ||
+          'Login failed. Please verify your credentials and try again.',
+      };
+    }
   },
 
   refresh: async (refreshToken) => {

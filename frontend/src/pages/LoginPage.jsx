@@ -3,13 +3,12 @@ import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../components/ui/Toast';
 
-const withTimeout = (promise, ms = 12000, message = 'Login timed out. Please try again.') => {
-  let timerId;
-  const timeoutPromise = new Promise((_, reject) => {
-    timerId = setTimeout(() => reject(new Error(message)), ms);
-  });
-
-  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timerId));
+const getLoginErrorMessage = (error) => {
+  if (!error) return 'Login failed. Please try again.';
+  if (typeof error === 'string' && error.trim()) return error;
+  if (typeof error?.message === 'string' && error.message.trim()) return error.message;
+  if (typeof error?.detail === 'string' && error.detail.trim()) return error.detail;
+  return 'Unable to sign in right now. Please check your connection and try again.';
 };
 
 export default function LoginPage() {
@@ -34,11 +33,12 @@ export default function LoginPage() {
 
     setSubmitting(true);
     try {
-      await withTimeout(login({ username: username.trim(), password }));
+      await login({ username: username.trim(), password });
       showToast('Login successful', 'success');
       navigate('/', { replace: true });
     } catch (error) {
-      showToast(error?.message || 'Login failed', 'error');
+      console.error('Login error:', error);
+      showToast(getLoginErrorMessage(error), 'error');
     } finally {
       setSubmitting(false);
     }
