@@ -21,16 +21,72 @@ const ACCESS_TOKEN_KEY = 'stockai_access_token';
 const REFRESH_TOKEN_KEY = 'stockai_refresh_token';
 const USER_KEY = 'stockai_user';
 const PROD_API_ORIGIN = 'https://api.stockai-pro.in';
-const PROD_API_BASE = `${PROD_API_ORIGIN}/api/v1`;
+const RENDER_FALLBACK_API_ORIGIN = 'https://stockai-pro.onrender.com';
+const API_ORIGIN_STORAGE_KEY = 'stockai_api_origin';
 const DEFAULT_TIMEOUT_MS = 12000;
 const AUTH_TIMEOUT_MS = 20000;
 const AUTH_LOGIN_ENDPOINT = '/auth/login';
+const CLOUDFLARE_ORIGIN_FAILURE_CODES = new Set([520, 521, 522, 523, 524, 525, 526]);
 
 const normalizeBaseUrl = (value) => String(value || '').replace(/\/+$/, '');
+const isHttpOrigin = (value) => /^https?:\/\/[^/]+$/i.test(normalizeBaseUrl(value));
+
+const readStoredApiOrigin = () => {
+  if (typeof window === 'undefined') return '';
+  try {
+    const stored = normalizeBaseUrl(localStorage.getItem(API_ORIGIN_STORAGE_KEY) || '');
+    return isHttpOrigin(stored) ? stored : '';
+  } catch (_) {
+    return '';
+  }
+};
+
+let preferredApiOrigin = readStoredApiOrigin() || PROD_API_ORIGIN;
+
+const getApiOriginCandidates = () => {
+  const candidates = [
+    preferredApiOrigin,
+    PROD_API_ORIGIN,
+    RENDER_FALLBACK_API_ORIGIN,
+  ]
+    .map(normalizeBaseUrl)
+    .filter((value, index, arr) => value && arr.indexOf(value) === index);
+
+  return candidates.length ? candidates : [PROD_API_ORIGIN];
+};
+
+const getPrimaryApiOrigin = () => getApiOriginCandidates()[0];
+const getApiBase = (origin = getPrimaryApiOrigin()) => `${normalizeBaseUrl(origin)}/api/v1`;
+
+const persistHealthyApiOrigin = (origin) => {
+  const normalized = normalizeBaseUrl(origin);
+  if (!isHttpOrigin(normalized) || preferredApiOrigin === normalized) return;
+
+  preferredApiOrigin = normalized;
+
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem(API_ORIGIN_STORAGE_KEY, normalized);
+    } catch (_) {
+      // ignore storage failures
+    }
+  }
+};
+
+const isFailoverSafeRequest = (method, endpoint) => {
+  const normalizedMethod = String(method || 'GET').toUpperCase();
+  if (['GET', 'HEAD', 'OPTIONS'].includes(normalizedMethod)) return true;
+  return endpoint === AUTH_LOGIN_ENDPOINT;
+};
+
+const isFailoverEligibleError = (error) => {
+  const status = Number(error?.status);
+  return status === 0 || CLOUDFLARE_ORIGIN_FAILURE_CODES.has(status);
+};
 
 // Pin all requests to the production API domain to prevent bad env overrides.
-const RAW_BASE_URL = PROD_API_ORIGIN;
-const API_BASE = PROD_API_BASE;
+const getRawBaseUrl = () => getPrimaryApiOrigin();
+const API_BASE = getApiBase();
 
 const normalizeEndpoint = (endpoint) => {
   const raw = String(endpoint || '');
@@ -43,9 +99,9 @@ const normalizeEndpoint = (endpoint) => {
   return path;
 };
 
-const buildApiUrl = (endpoint) => {
-  if (endpoint === '/') return API_BASE;
-  return `${API_BASE}${endpoint}`;
+const buildApiUrl = (endpoint, apiBase = API_BASE) => {
+  if (endpoint === '/') return apiBase;
+  return `${apiBase}${endpoint}`;
 };
 
 const RAW_WS_URL = normalizeBaseUrl(getEnvVar('REACT_APP_WS_URL', 'VITE_WS_URL', ''));
@@ -55,7 +111,7 @@ const resolveWsBase = () => {
     return RAW_WS_URL;
   }
 
-  const source = RAW_BASE_URL || PROD_API_ORIGIN;
+  const source = getRawBaseUrl() || PROD_API_ORIGIN;
   return source.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
 };
 
@@ -268,114 +324,156 @@ async function apiFetch(endpoint, options = {}) {
   const timeoutMs = Number.isFinite(providedTimeoutMs) && providedTimeoutMs > 0
     ? providedTimeoutMs
     : (isAuthEndpoint ? AUTH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
-  const method = fetchOptions.method || 'GET';
-  const url = buildApiUrl(normalizedEndpoint);
-  
-  // Debug logging for API calls
-  console.log('API CALL:', `${method} ${url}`, { endpoint: normalizedEndpoint, isAuthEndpoint });
-  
-  const attempt = async (retryCount) => {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeoutMs);
+  const method = String(fetchOptions.method || 'GET').toUpperCase();
+  const originCandidates = isFailoverSafeRequest(method, normalizedEndpoint)
+    ? getApiOriginCandidates()
+    : [getPrimaryApiOrigin()];
 
-    if (externalSignal) {
-      if (externalSignal.aborted) {
-        controller.abort();
-      } else {
-        externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
-      }
-    }
+  let lastError = null;
 
-    try {
-      const token = getStoredAccessToken();
-      console.log('Calling API:', url);
-      const response = await fetch(url, {
-        ...fetchOptions,
-        signal: controller.signal,
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          ...fetchOptions.headers,
-        },
-      });
+  for (let originIndex = 0; originIndex < originCandidates.length; originIndex += 1) {
+    const requestOrigin = originCandidates[originIndex];
+    const requestBase = getApiBase(requestOrigin);
+    const url = buildApiUrl(normalizedEndpoint, requestBase);
 
-      clearTimeout(id);
+    // Debug logging for API calls
+    console.log('API CALL:', `${method} ${url}`, {
+      endpoint: normalizedEndpoint,
+      isAuthEndpoint,
+      requestOrigin,
+      originAttempt: originIndex + 1,
+      totalOrigins: originCandidates.length,
+    });
 
-      if (!response.ok) {
-        let message = `API Error: ${response.statusText}`;
-        try {
-          const errorData = await response.json();
-          message = extractErrorMessage(errorData, message);
-        } catch (_) {}
-        
-        throw { status: response.status, message, url, method, endpoint: normalizedEndpoint };
+    const attempt = async (retryCount) => {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), timeoutMs);
+
+      if (externalSignal) {
+        if (externalSignal.aborted) {
+          controller.abort();
+        } else {
+          externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+        }
       }
 
-      const payload = await response.json();
-      if (payload && typeof payload === 'object' && payload.success === false) {
-        throw {
-          status: payload.code || 400,
-          message: extractErrorMessage(payload, 'Request failed'),
-          url,
+      try {
+        const token = getStoredAccessToken();
+        console.log('Calling API:', url);
+        const response = await fetch(url, {
+          ...fetchOptions,
           method,
-          endpoint: normalizedEndpoint,
-        };
-      }
+          signal: controller.signal,
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            ...fetchOptions.headers,
+          },
+        });
 
-      return payload;
+        clearTimeout(id);
 
-    } catch (error) {
-      clearTimeout(id);
+        if (!response.ok) {
+          let message = `API Error: ${response.statusText}`;
+          try {
+            const errorData = await response.json();
+            message = extractErrorMessage(errorData, message);
+          } catch (_) {}
 
-      const isAbortError = isAbortLikeError(error);
-      
-      // Enhanced debug logging for troubleshooting
-      console.error('[API ERROR]:', {
-        endpoint: normalizedEndpoint,
-        url,
-        errorName: error?.name,
-        errorMessage: error?.message,
-        isAbortError,
-        isTypeError: error instanceof TypeError,
-      });
-      
-      // Retry once on network failure (TypeError usually means network/CORS) or timeout (AbortError)
-      // Do not retry on 4xx/5xx (which are thrown as objects above {status, message})
-      const isNetworkError = isAbortError || error instanceof TypeError;
-      if (isNetworkError && retryCount < 1 && !isAuthEndpoint) {
-        console.warn(`[apiFetch] Network failure fetching ${endpoint}, retrying...`);
-        return attempt(retryCount + 1);
-      }
-      
-      // Normalize error output with improved messaging
-      const normalizedError = error.status
-        ? error
-        : {
-            status: 0,
-            message: isAbortError
-              ? `Request timed out after ${Math.round(timeoutMs / 1000)}s. Please check your connection and try again.`
-              : (error instanceof TypeError
-                ? 'Network error: Unable to reach StockAI API. Please check your internet connection.'
-                : (error?.message || 'Network/API error occurred. Please try again.')),
+          throw { status: response.status, message, url, method, endpoint: normalizedEndpoint };
+        }
+
+        const payload = await response.json();
+        if (payload && typeof payload === 'object' && payload.success === false) {
+          throw {
+            status: payload.code || 400,
+            message: extractErrorMessage(payload, 'Request failed'),
             url,
             method,
             endpoint: normalizedEndpoint,
           };
+        }
 
-      logApiFailure({
-        endpoint: normalizedEndpoint,
-        method,
-        url,
-        status: normalizedError.status,
-        message: normalizedError.message,
-        error,
-      });
+        return payload;
 
-      throw normalizedError;
+      } catch (error) {
+        clearTimeout(id);
+
+        const isAbortError = isAbortLikeError(error);
+
+        // Enhanced debug logging for troubleshooting
+        console.error('[API ERROR]:', {
+          endpoint: normalizedEndpoint,
+          url,
+          errorName: error?.name,
+          errorMessage: error?.message,
+          isAbortError,
+          isTypeError: error instanceof TypeError,
+          requestOrigin,
+        });
+
+        // Retry once on network failure (TypeError usually means network/CORS) or timeout (AbortError)
+        // Do not retry on 4xx/5xx (which are thrown as objects above {status, message})
+        const isNetworkError = isAbortError || error instanceof TypeError;
+        if (isNetworkError && retryCount < 1 && !isAuthEndpoint) {
+          console.warn(`[apiFetch] Network failure fetching ${endpoint}, retrying...`);
+          return attempt(retryCount + 1);
+        }
+
+        // Normalize error output with improved messaging
+        const normalizedError = error.status
+          ? error
+          : {
+              status: 0,
+              message: isAbortError
+                ? `Request timed out after ${Math.round(timeoutMs / 1000)}s. Please check your connection and try again.`
+                : (error instanceof TypeError
+                  ? 'Network error: Unable to reach StockAI API. Please check your internet connection.'
+                  : (error?.message || 'Network/API error occurred. Please try again.')),
+              url,
+              method,
+              endpoint: normalizedEndpoint,
+            };
+
+        logApiFailure({
+          endpoint: normalizedEndpoint,
+          method,
+          url,
+          status: normalizedError.status,
+          message: normalizedError.message,
+          error,
+        });
+
+        throw normalizedError;
+      }
+    };
+
+    try {
+      const payload = await attempt(0);
+      persistHealthyApiOrigin(requestOrigin);
+      return payload;
+    } catch (error) {
+      lastError = error;
+
+      const hasNextOrigin = originIndex < originCandidates.length - 1;
+      if (hasNextOrigin && isFailoverEligibleError(error)) {
+        const nextOrigin = originCandidates[originIndex + 1];
+        console.warn(
+          `[apiFetch] Origin ${requestOrigin} failed for ${normalizedEndpoint}; failing over to ${nextOrigin}`
+        );
+        continue;
+      }
+
+      throw error;
     }
-  };
+  }
 
-  return attempt(0);
+  throw lastError || {
+    status: 0,
+    message: 'Network/API error occurred. Please try again.',
+    endpoint: normalizedEndpoint,
+    method,
+  };
 }
 
 export const api = {
