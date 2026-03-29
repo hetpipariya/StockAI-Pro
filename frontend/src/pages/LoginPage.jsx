@@ -24,8 +24,10 @@ export default function LoginPage() {
     return <Navigate to="/" replace />;
   }
 
-  const onSubmit = async (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault();
+    event.stopPropagation();
+
     if (!username.trim() || !password) {
       showToast('Username and password are required', 'warning');
       return;
@@ -47,7 +49,8 @@ export default function LoginPage() {
   return (
     <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: 'var(--bg-app)', padding: '24px' }}>
       <form
-        onSubmit={onSubmit}
+        method="post"
+        onSubmit={handleSubmit}
         style={{
           width: 'min(420px, 100%)',
           background: 'var(--bg-panel)',

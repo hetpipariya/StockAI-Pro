@@ -76,7 +76,8 @@ const persistHealthyApiOrigin = (origin) => {
 const isFailoverSafeRequest = (method, endpoint) => {
   const normalizedMethod = String(method || 'GET').toUpperCase();
   if (['GET', 'HEAD', 'OPTIONS'].includes(normalizedMethod)) return true;
-  return endpoint === AUTH_LOGIN_ENDPOINT;
+  if (endpoint === AUTH_LOGIN_ENDPOINT) return normalizedMethod === 'POST';
+  return false;
 };
 
 const isFailoverEligibleError = (error) => {
@@ -325,6 +326,25 @@ async function apiFetch(endpoint, options = {}) {
     ? providedTimeoutMs
     : (isAuthEndpoint ? AUTH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
   const method = String(fetchOptions.method || 'GET').toUpperCase();
+
+  if (normalizedEndpoint === AUTH_LOGIN_ENDPOINT && method !== 'POST') {
+    const message = `Invalid HTTP method for login: ${method}. Expected POST.`;
+    console.error('[AUTH LOGIN] blocked non-POST request', {
+      endpoint: normalizedEndpoint,
+      method,
+    });
+    throw {
+      status: 0,
+      message,
+      endpoint: normalizedEndpoint,
+      method,
+    };
+  }
+
+  if (normalizedEndpoint === AUTH_LOGIN_ENDPOINT) {
+    console.log('LOGIN REQUEST METHOD: POST');
+  }
+
   const originCandidates = isFailoverSafeRequest(method, normalizedEndpoint)
     ? getApiOriginCandidates()
     : [getPrimaryApiOrigin()];
