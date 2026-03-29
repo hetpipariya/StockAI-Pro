@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useWebsocket } from './useWebsocket'
-import { INDICATOR_CATALOG } from '../components/ChartToolbar/ChartToolbar'
 import { WS_URL } from '../utils/env'
 import { apiGetWithRetry } from '../utils/api'
 
@@ -10,8 +9,8 @@ export const toFiniteNumber = (value) => {
   return Number.isFinite(num) ? num : null
 }
 
-const MAX_CANDLES = 200
-const HISTORY_LIMIT = 200
+const MAX_CANDLES = 100
+const HISTORY_LIMIT = 100
 const WS_BATCH_MS = 32
 
 const useDebouncedValue = (value, delayMs) => {
@@ -169,17 +168,6 @@ export function useTradingEngine() {
     () => [...new Set(indicators)].sort().join(','),
     [indicators]
   )
-  const parsedIndicatorKeys = useMemo(() => {
-    if (!indicatorKey) return ''
-    return indicatorKey
-      .split(',')
-      .flatMap((id) => {
-        const cat = INDICATOR_CATALOG.find((item) => item.id === id)
-        return cat ? cat.keys : [id]
-      })
-      .join(',')
-  }, [indicatorKey])
-
   const ws = useWebsocket(WS_URL)
   const { latestMessage, isConnected, isReconnecting, subscribe, unsubscribe, isSubscribed } = ws
 
@@ -191,56 +179,29 @@ export function useTradingEngine() {
 
   const fetchBundle = useCallback(async ({ reqId, targetSymbol, targetTimeframe, targetIndicatorKey, signal }) => {
     const tf = targetTimeframe === '1d' ? '1d' : targetTimeframe
-    const [historyRaw, snapshotRaw, predictionRaw, statusRaw, indicatorsRaw] = await Promise.all([
-      apiGetWithRetry('/market/history', {
-        signal,
-        params: { symbol: targetSymbol, interval: tf, limit: HISTORY_LIMIT },
-        retries: 1,
-        cacheTtlMs: 3000,
-      }),
-      apiGetWithRetry('/market/snapshot', {
-        signal,
-        params: { symbol: targetSymbol },
-        retries: 1,
-        cacheTtlMs: 2000,
-      }),
-      apiGetWithRetry('/predict', {
-        signal,
-        params: { symbol: targetSymbol, horizon: '15m' },
-        retries: 1,
-        cacheTtlMs: 3000,
-      }),
-      apiGetWithRetry('/market/status', {
-        signal,
-        retries: 1,
-        cacheTtlMs: 2000,
-      }),
-      parsedIndicatorKeys
-        ? apiGetWithRetry('/indicators', {
-            signal,
-            params: { symbol: targetSymbol, interval: tf, indicators: parsedIndicatorKeys },
-            retries: 1,
-            cacheTtlMs: 3000,
-          })
-        : Promise.resolve(null),
-    ])
+    const bundleRaw = await apiGetWithRetry(`/bundle/${encodeURIComponent(targetSymbol)}`, {
+      signal,
+      params: { interval: tf, limit: HISTORY_LIMIT, horizon: '15m' },
+      retries: 2,
+      retryDelayMs: 700,
+      cacheTtlMs: 30_000,
+    })
 
     if (signal.aborted || reqId !== requestIdRef.current) return
     if (symbolRef.current !== targetSymbol || timeframeRef.current !== targetTimeframe || indicatorKeyRef.current !== targetIndicatorKey) {
       return
     }
 
-    const historyRows = Array.isArray(historyRaw?.data?.data)
-      ? historyRaw.data.data.filter((candle) => isPlainObject(candle))
+    const bundleData = isPlainObject(bundleRaw?.data) ? bundleRaw.data : null
+    const historyRows = Array.isArray(bundleData?.history?.candles)
+      ? bundleData.history.candles.filter((candle) => isPlainObject(candle))
       : []
     const cleanedHistory = validateAndCleanOHLCV(historyRows, targetTimeframe)
 
-    const nextSnapshot = isPlainObject(snapshotRaw?.data) ? snapshotRaw.data : null
-    const nextPrediction = isPlainObject(predictionRaw?.data) ? predictionRaw.data : null
-    const nextStatus = isPlainObject(statusRaw?.data) ? statusRaw.data : null
-    const nextIndicators = Array.isArray(indicatorsRaw?.data?.data)
-      ? indicatorsRaw.data.data.filter((row) => isPlainObject(row))
-      : []
+    const nextSnapshot = isPlainObject(bundleData?.snapshot) ? bundleData.snapshot : null
+    const nextPrediction = isPlainObject(bundleData?.prediction) ? bundleData.prediction : null
+    const nextStatus = isPlainObject(bundleData?.status) ? bundleData.status : null
+    const nextIndicators = isPlainObject(bundleData?.indicators) ? [bundleData.indicators] : []
 
     historyCacheRef.current.set(timeframeKey(targetSymbol, targetTimeframe, targetIndicatorKey), cleanedHistory)
 
@@ -261,7 +222,7 @@ export function useTradingEngine() {
       }
       previousPredictionRef.current = nextPrediction
     }
-  }, [parsedIndicatorKeys])
+  }, [])
 
   const runLatestFetch = useCallback(async ({ targetSymbol, targetTimeframe, targetIndicatorKey }) => {
     if (activeFetchAbortRef.current) {

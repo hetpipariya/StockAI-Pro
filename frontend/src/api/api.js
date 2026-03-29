@@ -155,6 +155,11 @@ const isAbortLikeError = (error) => {
   );
 };
 
+const isGatewayTimeoutLike = (status) => {
+  const code = Number(status || 0);
+  return code === 502 || code === 503 || code === 504 || (code >= 520 && code <= 526);
+};
+
 export const getStoredAccessToken = () => {
   try {
     return localStorage.getItem(ACCESS_TOKEN_KEY) || '';
@@ -318,6 +323,7 @@ async function apiFetch(endpoint, options = {}) {
 
       const isAbortError = isAbortLikeError(error);
       const isNetworkError = isAbortError || error instanceof TypeError;
+      const isGatewayError = isGatewayTimeoutLike(error?.status);
 
       console.error('[API ERROR]:', {
         endpoint: normalizedEndpoint,
@@ -328,7 +334,7 @@ async function apiFetch(endpoint, options = {}) {
         isTypeError: error instanceof TypeError,
       });
 
-      if (isNetworkError && retryCount < 1 && !isAuthEndpoint) {
+      if ((isNetworkError || isGatewayError) && retryCount < 2 && !isAuthEndpoint) {
         console.warn(`[apiFetch] Network failure fetching ${endpoint}, retrying...`);
         return attempt(retryCount + 1);
       }
@@ -364,89 +370,31 @@ async function apiFetch(endpoint, options = {}) {
 }
 
 export const api = {
-  getBundleRaw: async (symbol, interval = '1m', limit = 200, horizon = '15m') => {
+  getBundleRaw: async (symbol, interval = '1m', limit = 100, horizon = '15m') => {
     const qs = new URLSearchParams({
       interval,
       limit: String(limit),
       horizon,
     }).toString();
-    return apiFetch(`/bundle/${encodeURIComponent(symbol)}?${qs}`);
+    return apiFetch(`/bundle/${encodeURIComponent(symbol)}?${qs}`, {
+      timeoutMs: 15000,
+    });
   },
 
-  getBundle: async (symbol, interval = '1m', limit = 200, horizon = '15m') => {
+  getBundle: async (symbol, interval = '1m', limit = 100, horizon = '15m') => {
     const normalizedSymbol = String(symbol || '').trim().toUpperCase();
     const normalizedInterval = String(interval || '1m').trim();
 
-    try {
-      const payload = await api.getBundleRaw(normalizedSymbol, normalizedInterval, limit, horizon);
-      const resolved = unwrapData(payload);
-      if (resolved && (resolved.snapshot || resolved.history || resolved.prediction)) {
-        return resolved;
-      }
-    } catch (error) {
-      // If direct bundle route fails for any reason, fall back to composing
-      // from individual market/predict/indicator endpoints.
+    const payload = await api.getBundleRaw(normalizedSymbol, normalizedInterval, limit, horizon);
+    const resolved = unwrapData(payload);
+    if (resolved && (resolved.snapshot || resolved.history || resolved.prediction)) {
+      return resolved;
     }
 
-    const calls = await Promise.allSettled([
-      apiFetch(`/market/snapshot?symbol=${encodeURIComponent(normalizedSymbol)}`),
-      apiFetch(
-        `/market/history?symbol=${encodeURIComponent(normalizedSymbol)}&interval=${encodeURIComponent(normalizedInterval)}&limit=${encodeURIComponent(String(limit))}`
-      ),
-      apiFetch(
-        `/signal?symbol=${encodeURIComponent(normalizedSymbol)}&timeframe=${encodeURIComponent(normalizedInterval)}&horizon=${encodeURIComponent(horizon)}`
-      ),
-      apiFetch(
-        `/predict?symbol=${encodeURIComponent(normalizedSymbol)}&timeframe=${encodeURIComponent(normalizedInterval)}&horizon=${encodeURIComponent(horizon)}`
-      ),
-      apiFetch(
-        `/indicators?symbol=${encodeURIComponent(normalizedSymbol)}&timeframe=${encodeURIComponent(normalizedInterval)}`
-      ),
-    ]);
-
-    const [snapshotResult, historyResult, signalResult, predictResult, indicatorsResult] = calls;
-
-    const snapshot = snapshotResult.status === 'fulfilled' ? unwrapData(snapshotResult.value) : null;
-    const historyRows = historyResult.status === 'fulfilled' ? normalizeHistoryRows(historyResult.value) : [];
-    const signalData = signalResult.status === 'fulfilled' ? unwrapData(signalResult.value) : null;
-    const predictData = predictResult.status === 'fulfilled' ? unwrapData(predictResult.value) : null;
-    const indicatorsData = indicatorsResult.status === 'fulfilled' ? unwrapData(indicatorsResult.value) : null;
-
-    const prediction = signalData || predictData || null;
-    const predictionIndicators = prediction && typeof prediction.indicators === 'object' ? prediction.indicators : {};
-    const normalizedPredictionIndicators = Object.entries(predictionIndicators || {}).reduce((acc, [key, value]) => {
-      const num = toFiniteNumber(value, null);
-      if (num != null) acc[key] = num;
-      return acc;
-    }, {});
-
-    const indicatorsFromEndpoint = buildIndicatorsFromRows(
-      Array.isArray(indicatorsData?.data)
-        ? indicatorsData.data
-        : Array.isArray(indicatorsData)
-          ? indicatorsData
-          : []
-    );
-
-    if (!snapshot && historyRows.length === 0 && !prediction) {
-      const firstError = calls.find((entry) => entry.status === 'rejected');
-      if (firstError && firstError.reason) throw firstError.reason;
-      throw { status: 0, message: 'Failed to load market bundle', url: `${API_BASE}/market/*` };
-    }
-
-    return {
-      symbol: normalizedSymbol,
-      snapshot: snapshot || { symbol: normalizedSymbol },
-      history: {
-        interval: normalizedInterval,
-        candles: historyRows,
-      },
-      prediction,
-      indicators:
-        Object.keys(normalizedPredictionIndicators).length > 0
-          ? normalizedPredictionIndicators
-          : indicatorsFromEndpoint,
-      source: 'composed-fallback',
+    throw {
+      status: 0,
+      message: 'Failed to load market bundle',
+      url: `${API_BASE}/bundle/${normalizedSymbol}`,
     };
   },
 
@@ -549,6 +497,30 @@ export const api = {
  */
 export const getBundle = async (symbol, tf) => {
   return api.getBundle(symbol, tf);
+};
+
+let keepAliveTimer = null;
+
+export const startApiKeepAlive = (intervalMs = 240000) => {
+  if (typeof window === 'undefined') return;
+  if (keepAliveTimer) return;
+
+  const run = async () => {
+    try {
+      await apiFetch('/health', { method: 'GET', timeoutMs: 6000 });
+    } catch (_) {
+      // Keep-alive should be silent; failures are handled by normal request paths.
+    }
+  };
+
+  keepAliveTimer = window.setInterval(run, Math.max(60000, Number(intervalMs) || 240000));
+  void run();
+};
+
+export const stopApiKeepAlive = () => {
+  if (!keepAliveTimer || typeof window === 'undefined') return;
+  window.clearInterval(keepAliveTimer);
+  keepAliveTimer = null;
 };
 
 export { API_BASE };

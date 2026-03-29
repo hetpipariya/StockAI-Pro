@@ -173,7 +173,7 @@ async def get_snapshot(symbol: str = Query(..., description="e.g. RELIANCE")):
 async def get_history(
     symbol: str = Query(...),
     interval: str = Query("1m", pattern="^(1m|3m|5m|15m|30m|1h|1d)$"),
-    limit: int = Query(500, ge=1, le=1000),
+    limit: int = Query(100, ge=1, le=1000),
 ):
     """
     OHLCV candle history — DB-first with SmartAPI gap-fill.

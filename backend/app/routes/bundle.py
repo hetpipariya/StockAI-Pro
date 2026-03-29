@@ -29,7 +29,7 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 async def get_bundle(
     symbol: str,
     interval: str = Query("1m", pattern="^(1m|3m|5m|15m|30m|1h|1d)$"),
-    limit: int = Query(200, ge=50, le=500),
+    limit: int = Query(100, ge=50, le=300),
     horizon: str = Query("15m"),
 ):
     """Single-shot data bundle: snapshot + candles + indicators + prediction."""
@@ -41,10 +41,17 @@ async def get_bundle(
     if cached:
         return {"status": "success", "data": cached, "message": "Bundle from cache"}
 
-    snapshot_resp, history_resp = await asyncio.gather(
-        get_snapshot(symbol=normalized_symbol),
-        get_history(symbol=normalized_symbol, interval=interval, limit=limit),
-    )
+    try:
+        snapshot_resp, history_resp = await asyncio.wait_for(
+            asyncio.gather(
+                get_snapshot(symbol=normalized_symbol),
+                get_history(symbol=normalized_symbol, interval=interval, limit=limit),
+            ),
+            timeout=6.0,
+        )
+    except asyncio.TimeoutError as exc:
+        logger.warning("[BUNDLE] Upstream timeout symbol=%s interval=%s", normalized_symbol, interval)
+        raise HTTPException(status_code=504, detail="Bundle upstream timeout") from exc
 
     snapshot = snapshot_resp.get("data", {}) if isinstance(snapshot_resp, dict) else {}
     history_payload = history_resp.get("data", {}) if isinstance(history_resp, dict) else {}
@@ -59,14 +66,23 @@ async def get_bundle(
     if ltp <= 0:
         raise HTTPException(status_code=422, detail="Invalid market price for prediction")
 
-    prediction = predict_symbol(
-        symbol=normalized_symbol,
-        timeframe=horizon,
-        latest_ltp=ltp,
-        ohlcv=candles,
-    )
-
-    indicators_df = IndicatorEngine.compute_all(candles)
+    try:
+        prediction, indicators_df = await asyncio.wait_for(
+            asyncio.gather(
+                asyncio.to_thread(
+                    predict_symbol,
+                    symbol=normalized_symbol,
+                    timeframe=horizon,
+                    latest_ltp=ltp,
+                    ohlcv=candles,
+                ),
+                asyncio.to_thread(IndicatorEngine.compute_all, candles),
+            ),
+            timeout=6.0,
+        )
+    except asyncio.TimeoutError as exc:
+        logger.warning("[BUNDLE] Compute timeout symbol=%s horizon=%s", normalized_symbol, horizon)
+        raise HTTPException(status_code=504, detail="Bundle compute timeout") from exc
     latest_indicators: dict[str, Any] = {}
     if not indicators_df.empty:
         latest = indicators_df.iloc[-1].to_dict()
@@ -98,7 +114,7 @@ async def get_bundle(
         "latency_ms": round((time.perf_counter() - started_at) * 1000.0, 2),
     }
 
-    await set_cache(cache_key, payload, ttl=config.CACHE_TTL_BUNDLE_SECONDS)
+    await set_cache(cache_key, payload, ttl=max(30, config.CACHE_TTL_BUNDLE_SECONDS))
     logger.info("[BUNDLE] symbol=%s interval=%s latency_ms=%.2f", normalized_symbol, interval, payload["latency_ms"])
 
     return {"status": "success", "data": payload, "message": "Bundle generated"}
