@@ -30,6 +30,14 @@ const CLOUDFLARE_ORIGIN_FAILURE_CODES = new Set([520, 521, 522, 523, 524, 525, 5
 
 const normalizeBaseUrl = (value) => String(value || '').replace(/\/+$/, '');
 const isHttpOrigin = (value) => /^https?:\/\/[^/]+$/i.test(normalizeBaseUrl(value));
+const isLocalHostName = (value) => /^(localhost|127\.0\.0\.1)$/i.test(String(value || '').trim());
+
+const readBrowserOrigin = () => {
+  if (typeof window === 'undefined') return '';
+  const origin = normalizeBaseUrl(window.location.origin || '');
+  const host = String(window.location.hostname || '').trim();
+  return isLocalHostName(host) && isHttpOrigin(origin) ? origin : '';
+};
 
 const readStoredApiOrigin = () => {
   if (typeof window === 'undefined') return '';
@@ -41,10 +49,12 @@ const readStoredApiOrigin = () => {
   }
 };
 
-let preferredApiOrigin = readStoredApiOrigin() || PROD_API_ORIGIN;
+let preferredApiOrigin = readStoredApiOrigin() || readBrowserOrigin() || PROD_API_ORIGIN;
 
 const getApiOriginCandidates = () => {
+  const localBrowserOrigin = readBrowserOrigin();
   const candidates = [
+    localBrowserOrigin,
     preferredApiOrigin,
     PROD_API_ORIGIN,
     RENDER_FALLBACK_API_ORIGIN,
