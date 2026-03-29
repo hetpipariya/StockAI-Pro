@@ -4,6 +4,7 @@
  */
 import {
   API_BASE as CONFIG_API_BASE,
+  API_FALLBACK_BASE,
   API_V1_BASE,
   buildApiUrl as buildAbsoluteApiUrl,
   buildLiveWebSocketUrl,
@@ -16,6 +17,7 @@ const DEFAULT_TIMEOUT_MS = 12000;
 const AUTH_TIMEOUT_MS = 20000;
 const AUTH_LOGIN_ENDPOINT = '/auth/login';
 const API_BASE = API_V1_BASE;
+const IS_PROD = Boolean(import.meta.env.PROD);
 
 const normalizeEndpoint = (endpoint) => {
   const raw = String(endpoint || '');
@@ -28,7 +30,23 @@ const normalizeEndpoint = (endpoint) => {
   return path;
 };
 
-const buildApiUrl = (endpoint) => buildAbsoluteApiUrl(endpoint);
+const buildApiUrl = (endpoint, apiBase = CONFIG_API_BASE) => {
+  if (apiBase === CONFIG_API_BASE) {
+    return buildAbsoluteApiUrl(endpoint);
+  }
+
+  const normalizedEndpoint = normalizeEndpoint(endpoint);
+  const base = String(apiBase || '').replace(/\/$/, '');
+  if (!base) {
+    return buildAbsoluteApiUrl(endpoint);
+  }
+
+  if (!normalizedEndpoint || normalizedEndpoint === '/') {
+    return `${base}/api/v1`;
+  }
+
+  return `${base}/api/v1${normalizedEndpoint}`;
+};
 
 const logApiFailure = ({ endpoint, method, url, status, message, error }) => {
   const details = {
@@ -258,13 +276,17 @@ async function apiFetch(endpoint, options = {}) {
     console.log('LOGIN REQUEST METHOD: POST');
   }
 
+  const fallbackOrigin = String(API_FALLBACK_BASE || '').trim().replace(/\/$/, '');
   const originCandidates = [CONFIG_API_BASE];
+  if (IS_PROD && fallbackOrigin && fallbackOrigin !== CONFIG_API_BASE) {
+    originCandidates.push(fallbackOrigin);
+  }
 
   let lastError = null;
 
   for (let originIndex = 0; originIndex < originCandidates.length; originIndex += 1) {
     const requestOrigin = originCandidates[originIndex];
-    const url = buildApiUrl(normalizedEndpoint);
+    const url = buildApiUrl(normalizedEndpoint, requestOrigin);
 
     // Debug logging for API calls
     console.log('API CALL:', `${method} ${url}`, {
@@ -383,6 +405,21 @@ async function apiFetch(endpoint, options = {}) {
       return payload;
     } catch (error) {
       lastError = error;
+      const status = Number(error?.status || 0);
+      const isTransportFailure = status === 0;
+      const isEdge52x = status >= 520 && status <= 526;
+      const canTryNextOrigin = originIndex < originCandidates.length - 1;
+
+      if (canTryNextOrigin && (isTransportFailure || isEdge52x)) {
+        console.warn('[apiFetch] Primary origin failed, trying fallback origin', {
+          failedOrigin: requestOrigin,
+          nextOrigin: originCandidates[originIndex + 1],
+          status,
+          endpoint: normalizedEndpoint,
+        });
+        continue;
+      }
+
       throw error;
     }
   }

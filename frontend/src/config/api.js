@@ -17,6 +17,7 @@ const IS_DEV = Boolean(import.meta.env.DEV);
 
 // Production backend URLs
 const PROD_API_BASE = 'https://api.stockai-pro.in';
+const PROD_API_FALLBACK_BASE = 'https://stockai-pro.onrender.com';
 const PROD_WS_URL = 'wss://api.stockai-pro.in/live';
 
 // Development backend URLs
@@ -67,15 +68,34 @@ const resolveWsUrl = () => {
     );
     return IS_PROD ? PROD_WS_URL : DEV_WS_URL;
   }
-  
-  // Use provided absolute URL or default
-  return rawWsUrl || (IS_PROD ? PROD_WS_URL : DEV_WS_URL);
+
+  const candidateUrl = rawWsUrl || (IS_PROD ? PROD_WS_URL : DEV_WS_URL);
+  try {
+    const parsed = new URL(candidateUrl);
+    const normalizedPath = String(parsed.pathname || '').trim();
+
+    // If env only provides a host (for example wss://host), force the live endpoint.
+    if (!normalizedPath || normalizedPath === '/') {
+      parsed.pathname = '/live';
+      return parsed.toString().replace(/\/$/, '');
+    }
+
+    return parsed.toString().replace(/\/$/, '');
+  } catch (_) {
+    console.warn('[API Config] Invalid WebSocket URL detected, using default:', candidateUrl);
+    return IS_PROD ? PROD_WS_URL : DEV_WS_URL;
+  }
 };
 
 // Export resolved URLs
 export const API_BASE = resolveApiBase();
 export const API_V1_BASE = `${API_BASE}/api/v1`;
 export const WS_URL = resolveWsUrl();
+export const API_FALLBACK_BASE = (
+  import.meta.env.VITE_API_FALLBACK_URL ||
+  (IS_PROD ? PROD_API_FALLBACK_BASE : '')
+)
+  .replace(/\/$/, '');
 
 // Log configuration in development for debugging
 if (IS_DEV) {
@@ -184,7 +204,7 @@ export const isBackendReservedPath = (path) => {
  * Useful for connectivity testing.
  * @returns {string} Health check URL
  */
-export const getHealthCheckUrl = () => `${API_BASE}/api/health`;
+export const getHealthCheckUrl = () => `${API_BASE}/health`;
 
 /**
  * Configuration object for external use.
@@ -192,6 +212,7 @@ export const getHealthCheckUrl = () => `${API_BASE}/api/health`;
 export const apiConfig = {
   apiBase: API_BASE,
   apiV1Base: API_V1_BASE,
+  apiFallbackBase: API_FALLBACK_BASE,
   wsUrl: WS_URL,
   isProd: IS_PROD,
   isDev: IS_DEV,
