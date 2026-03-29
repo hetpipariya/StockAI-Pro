@@ -58,6 +58,26 @@ _WS_MAX_BACKOFF_SECONDS = 30
 _WS_MAX_RETRY_ATTEMPTS = 3  # Limit retries to prevent 429 rate limit errors
 
 
+def _seed_price_for_symbol(symbol: str) -> float:
+    """Generate a deterministic fallback price for symbols with no cached ticks."""
+    normalized = str(symbol or "UNKNOWN").strip().upper()
+    score = sum((idx + 1) * ord(ch) for idx, ch in enumerate(normalized))
+    major = 100 + (score % 2400)
+    minor = (score % 100) / 100.0
+    return round(major + minor, 2)
+
+
+def _resolve_mock_base_price(symbol: str) -> tuple[float, bool]:
+    """Return (price, is_seeded) for mock emissions."""
+    cached = float(_last_known_prices.get(symbol, 0.0) or 0.0)
+    if cached > 0 and math.isfinite(cached):
+        return round(cached, 2), False
+
+    seeded = _seed_price_for_symbol(symbol)
+    _last_known_prices[symbol] = seeded
+    return seeded, True
+
+
 def set_event_loop(loop: asyncio.AbstractEventLoop) -> None:
     global _event_loop
     _event_loop = loop
@@ -291,37 +311,37 @@ async def mock_ws_data_job():
 
     if not is_market_open():
         for symbol in DEFAULT_WATCHLIST[:10]:
-            base_price = _last_known_prices.get(symbol, 0.0)
-            if base_price > 0:
-                tick_data = {
-                    "ltp": base_price,
-                    "volume": 0,
-                    "bid": base_price,
-                    "ask": base_price,
-                    "signal": "HOLD",
-                    "is_mock": True,
-                    "unavailable": True,
-                    "data_source": "MOCK",
-                }
-                await broadcast_tick(symbol, tick_data)
+            base_price, seeded = _resolve_mock_base_price(symbol)
+            tick_data = {
+                "ltp": base_price,
+                "volume": 0,
+                "bid": base_price,
+                "ask": base_price,
+                "signal": "HOLD",
+                "is_mock": True,
+                "unavailable": True,
+                "mock_reason": "OFF_HOURS_SEEDED" if seeded else "OFF_HOURS_STALE",
+                "data_source": "MOCK",
+            }
+            await broadcast_tick(symbol, tick_data)
         return
 
     if idle_time > 10:
         logger.warning("WARNING: Using mock data - SmartAPI connection idle for %.1fs", idle_time)
         for symbol in DEFAULT_WATCHLIST[:10]:
-            base_price = _last_known_prices.get(symbol, 0.0)
-            if base_price > 0:
-                tick_data = {
-                    "ltp": base_price,
-                    "volume": 0,
-                    "bid": base_price,
-                    "ask": base_price,
-                    "signal": "HOLD",
-                    "is_mock": True,
-                    "unavailable": False,
-                    "data_source": "MOCK",
-                }
-                await broadcast_tick(symbol, tick_data)
+            base_price, seeded = _resolve_mock_base_price(symbol)
+            tick_data = {
+                "ltp": base_price,
+                "volume": 0,
+                "bid": base_price,
+                "ask": base_price,
+                "signal": "HOLD",
+                "is_mock": True,
+                "unavailable": seeded,
+                "mock_reason": "IDLE_FEED_SEEDED" if seeded else "IDLE_FEED_STALE",
+                "data_source": "MOCK",
+            }
+            await broadcast_tick(symbol, tick_data)
 
 
 async def websocket_live(websocket: WebSocket, token: Optional[str] = Query(default=None)):

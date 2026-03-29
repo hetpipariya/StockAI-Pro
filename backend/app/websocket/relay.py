@@ -153,13 +153,15 @@ async def broadcast_tick(symbol: str, tick: dict):
     """Broadcast a raw tick — throttled + deduplicated, then forwarded to SocketManager."""
     now = datetime.utcnow().timestamp()
     key = f"tick:{symbol}"
+    is_mock = bool(tick.get("is_mock", False))
 
     # DEDUPLICATE: Only broadcast if price or volume actually changed
-    last_tick = _last_tick.get(symbol)
-    if last_tick:
-        if (last_tick.get("ltp") == tick.get("ltp") and
-                last_tick.get("volume") == tick.get("volume")):
-            return
+    if not is_mock:
+        last_tick = _last_tick.get(symbol)
+        if last_tick:
+            if (last_tick.get("ltp") == tick.get("ltp") and
+                    last_tick.get("volume") == tick.get("volume")):
+                return
 
     # THROTTLE: Check timing
     if key in _last_push and (now - _last_push[key]) * 1000 < THROTTLE_MS:
@@ -189,6 +191,7 @@ async def broadcast_tick(symbol: str, tick: dict):
         "data_source": tick.get("data_source", "UNKNOWN"),
         "is_mock": bool(tick.get("is_mock", False)),
         "unavailable": bool(tick.get("unavailable", False)),
+        "mock_reason": tick.get("mock_reason", ""),
     }
 
     await socket_manager.broadcast_tick(symbol, msg)
