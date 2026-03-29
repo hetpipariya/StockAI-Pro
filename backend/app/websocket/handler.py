@@ -55,6 +55,7 @@ _ws_reconnect_task = None
 
 _WS_BASE_BACKOFF_SECONDS = 1
 _WS_MAX_BACKOFF_SECONDS = 30
+_WS_MAX_RETRY_ATTEMPTS = 3  # Limit retries to prevent 429 rate limit errors
 
 
 def set_event_loop(loop: asyncio.AbstractEventLoop) -> None:
@@ -250,8 +251,15 @@ async def _retry_ws_connect(symbols_list: list[str]):
 
     while not _smartapi_ws_started:
         _ws_reconnect_attempt += 1
+        
+        # Limit max retries to prevent 429 rate limit errors
+        if _ws_reconnect_attempt > _WS_MAX_RETRY_ATTEMPTS:
+            logger.error("[WS] Max retry attempts (%d) reached. Stopping reconnect.", _WS_MAX_RETRY_ATTEMPTS)
+            _set_ws_state("FAILED")
+            return
+        
         wait_s = min(_WS_BASE_BACKOFF_SECONDS * (2 ** (_ws_reconnect_attempt - 1)), _WS_MAX_BACKOFF_SECONDS)
-        logger.warning("[WS] Reconnect attempt %d in %.1fs", _ws_reconnect_attempt, wait_s)
+        logger.warning("[WS] Reconnect attempt %d/%d in %.1fs", _ws_reconnect_attempt, _WS_MAX_RETRY_ATTEMPTS, wait_s)
         await asyncio.sleep(wait_s)
         start_smartapi_ws(symbols_list)
         if _smartapi_ws_started:

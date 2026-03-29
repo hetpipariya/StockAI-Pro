@@ -157,6 +157,7 @@ def configure_cors(app: FastAPI) -> list[str]:
         "https://stockai-pro.in",
         "https://www.stockai-pro.in",
         "https://stockai-pro.pages.dev",
+        "*",  # DEBUG: Allow all origins for Cloudflare/mobile troubleshooting
         _FRONTEND_URL,
         "http://localhost:5173",
         "http://127.0.0.1:5173",
@@ -176,6 +177,7 @@ def configure_cors(app: FastAPI) -> list[str]:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["*"],
     )
     return allowed_origins
 

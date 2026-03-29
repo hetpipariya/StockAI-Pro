@@ -271,6 +271,9 @@ async function apiFetch(endpoint, options = {}) {
   const method = fetchOptions.method || 'GET';
   const url = buildApiUrl(normalizedEndpoint);
   
+  // Debug logging for API calls
+  console.log('API CALL:', `${method} ${url}`, { endpoint: normalizedEndpoint, isAuthEndpoint });
+  
   const attempt = async (retryCount) => {
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -326,26 +329,34 @@ async function apiFetch(endpoint, options = {}) {
 
       const isAbortError = isAbortLikeError(error);
       
+      // Enhanced debug logging for troubleshooting
+      console.error('[API ERROR]:', {
+        endpoint: normalizedEndpoint,
+        url,
+        errorName: error?.name,
+        errorMessage: error?.message,
+        isAbortError,
+        isTypeError: error instanceof TypeError,
+      });
+      
       // Retry once on network failure (TypeError usually means network/CORS) or timeout (AbortError)
       // Do not retry on 4xx/5xx (which are thrown as objects above {status, message})
       const isNetworkError = isAbortError || error instanceof TypeError;
       if (isNetworkError && retryCount < 1 && !isAuthEndpoint) {
-        if (isDev) console.warn(`[apiFetch] Network failure fetching ${endpoint}, retrying...`);
+        console.warn(`[apiFetch] Network failure fetching ${endpoint}, retrying...`);
         return attempt(retryCount + 1);
       }
       
-      if (isDev) console.error(`[apiFetch] Error fetching ${endpoint}:`, error);
-      
-      // Normalize error output
+      // Normalize error output with improved messaging
       const normalizedError = error.status
         ? error
         : {
             status: 0,
             message: isAbortError
-              ? `Request timed out after ${Math.round(timeoutMs / 1000)}s. Please try again.`
+              ? `Request timed out after ${Math.round(timeoutMs / 1000)}s. Please check your connection and try again.`
               : (error instanceof TypeError
                 ? 'Network error: Unable to reach StockAI API. Please check your internet connection.'
-                : (error.message || 'Network error: Request failed.')),
+                : (error?.message || 'Network/API error occurred. Please try again.')),
             url,
             method,
             endpoint: normalizedEndpoint,

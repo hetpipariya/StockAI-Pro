@@ -80,17 +80,24 @@ export const apiRequest = async (
   } catch (error) {
     const isAbortError =
       error?.name === 'AbortError' ||
-      /signal aborted without reason/i.test(String(error?.message || ''))
+      /signal aborted without reason/i.test(String(error?.message || '')) ||
+      /operation was aborted/i.test(String(error?.message || ''))
 
     if (isAbortError) {
-      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s. Please try again.`)
+      console.error('[API] Request aborted:', error?.message || 'Unknown abort reason')
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s. Please check your connection and try again.`)
     }
 
     if (error instanceof TypeError) {
+      console.error('[API] Network error:', error?.message || 'TypeError')
       throw new Error('Network error: Unable to reach StockAI API. Please check your internet connection.')
     }
 
-    throw error
+    // Re-throw with better error message if available
+    if (error?.message) {
+      throw error
+    }
+    throw new Error(error?.message || 'Network/API error occurred. Please try again.')
   } finally {
     clearTimeout(timeoutId)
   }
