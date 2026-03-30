@@ -35,5 +35,8 @@ COPY models/ ./models/
 # Set model path for the application
 ENV MODEL_PATH=/app/models
 
+# Container-level health probe used by Docker/Render-style runtimes.
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -fsS "http://localhost:${PORT:-8000}/api/health" || exit 1
+
 # Run alembic migrations (PostgreSQL only) and start uvicorn
 CMD ["sh", "-c", "set -e; echo '[DOCKER] Model files:'; ls -la /app/models/*.pkl 2>/dev/null || echo 'WARNING: No model files found'; if python -c \"from app.config import DATABASE_URL; exit(0 if DATABASE_URL.startswith('sqlite') else 1)\"; then echo '[STARTUP] SQLite - skipping migrations'; else echo '[STARTUP] PostgreSQL - running migrations'; alembic upgrade head; fi; exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]

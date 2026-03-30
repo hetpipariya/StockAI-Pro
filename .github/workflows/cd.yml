@@ -1,0 +1,342 @@
+name: CD
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Optional commit SHA to deploy. Defaults to the current workflow SHA.
+        required: false
+        type: string
+
+concurrency:
+  group: cd-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Resolve Deploy Target
+    runs-on: ubuntu-latest
+    outputs:
+      should_deploy: ${{ steps.resolve.outputs.should_deploy }}
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+    steps:
+      - id: resolve
+        name: Check CI result and resolve commit
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            if [ "${{ github.event.workflow_run.conclusion }}" != "success" ]; then
+              echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+              echo "commit_sha=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+            echo "commit_sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          MANUAL_SHA="${{ github.event.inputs.commit_sha }}"
+          if [ -n "$MANUAL_SHA" ]; then
+            echo "commit_sha=$MANUAL_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "commit_sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+
+  validate-cd-secrets:
+    name: Validate CD Secrets
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.should_deploy == 'true'
+    env:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_PROJECT_NAME: ${{ secrets.CLOUDFLARE_PROJECT_NAME }}
+    steps:
+      - name: Check required secrets
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for key in RENDER_API_KEY RENDER_SERVICE_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_PROJECT_NAME; do
+            if [ -z "${!key:-}" ]; then
+              echo "Missing required GitHub secret: $key"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "CD aborted due to missing secrets. Configure required secrets and rerun."
+            exit 1
+          fi
+
+  deploy-backend-render:
+    name: Deploy Backend (Render)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [preflight, validate-cd-secrets]
+    if: needs.preflight.outputs.should_deploy == 'true'
+    env:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+      DEPLOY_COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+      BACKEND_HEALTH_URL: ${{ vars.BACKEND_HEALTH_URL }}
+    steps:
+      - name: Trigger Render deploy for CI commit
+        id: trigger
+        run: |
+          set -euo pipefail
+
+          API_BASE="https://api.render.com/v1"
+          AUTH_HEADER="Authorization: Bearer ${RENDER_API_KEY}"
+
+          DEPLOYS_JSON="$(curl -fsSL \
+            --url "${API_BASE}/services/${RENDER_SERVICE_ID}/deploys?limit=20" \
+            --header "accept: application/json" \
+            --header "${AUTH_HEADER}")"
+
+          PREVIOUS_LIVE_DEPLOY_ID="$(echo "${DEPLOYS_JSON}" | jq -r '[.[] | .deploy | select(.status == "live")][0].id // ""')"
+          echo "previous_live_deploy_id=${PREVIOUS_LIVE_DEPLOY_ID}" >> "$GITHUB_OUTPUT"
+
+          PAYLOAD="$(jq -n --arg commitId "${DEPLOY_COMMIT_SHA}" '{clearCache:"do_not_clear", commitId:$commitId}')"
+          DEPLOY_JSON="$(curl -fsSL \
+            --request POST \
+            --url "${API_BASE}/services/${RENDER_SERVICE_ID}/deploys" \
+            --header "accept: application/json" \
+            --header "content-type: application/json" \
+            --header "${AUTH_HEADER}" \
+            --data "${PAYLOAD}")"
+
+          DEPLOY_ID="$(echo "${DEPLOY_JSON}" | jq -r '.id // ""')"
+          if [ -z "${DEPLOY_ID}" ]; then
+            echo "Could not read deploy id from Render response"
+            echo "${DEPLOY_JSON}"
+            exit 1
+          fi
+
+          echo "deploy_id=${DEPLOY_ID}" >> "$GITHUB_OUTPUT"
+          echo "Triggered Render deploy: ${DEPLOY_ID}"
+
+      - name: Wait for Render deployment
+        id: wait
+        run: |
+          set -euo pipefail
+
+          API_BASE="https://api.render.com/v1"
+          AUTH_HEADER="Authorization: Bearer ${RENDER_API_KEY}"
+          DEPLOY_ID="${{ steps.trigger.outputs.deploy_id }}"
+
+          for attempt in $(seq 1 80); do
+            STATUS="$(curl -fsSL \
+              --url "${API_BASE}/services/${RENDER_SERVICE_ID}/deploys/${DEPLOY_ID}" \
+              --header "accept: application/json" \
+              --header "${AUTH_HEADER}" | jq -r '.status // "unknown"')"
+
+            echo "Render deploy status (${attempt}/80): ${STATUS}"
+
+            case "${STATUS}" in
+              live)
+                exit 0
+                ;;
+              build_failed|update_failed|pre_deploy_failed|canceled|deactivated)
+                echo "Render deploy failed with terminal status: ${STATUS}"
+                exit 1
+                ;;
+            esac
+
+            sleep 15
+          done
+
+          echo "Timed out waiting for Render deploy to become live"
+          exit 1
+
+      - name: Verify backend health endpoint
+        id: backend_health
+        run: |
+          set -euo pipefail
+
+          HEALTH_URL="${BACKEND_HEALTH_URL:-https://api.stockai-pro.in/api/health}"
+          echo "Using backend health URL: ${HEALTH_URL}"
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 10 "${HEALTH_URL}" >/dev/null; then
+              echo "Backend health check passed"
+              exit 0
+            fi
+            echo "Backend health check retry ${attempt}/30"
+            sleep 10
+          done
+
+          echo "Backend health check failed after deployment"
+          exit 1
+
+      - name: Roll back Render deploy on failure
+        if: failure() && steps.trigger.outputs.previous_live_deploy_id != ''
+        run: |
+          set -euo pipefail
+
+          API_BASE="https://api.render.com/v1"
+          AUTH_HEADER="Authorization: Bearer ${RENDER_API_KEY}"
+          PREVIOUS_DEPLOY_ID="${{ steps.trigger.outputs.previous_live_deploy_id }}"
+
+          echo "Rolling back Render service to deploy: ${PREVIOUS_DEPLOY_ID}"
+          PAYLOAD="$(jq -n --arg deployId "${PREVIOUS_DEPLOY_ID}" '{deployId:$deployId}')"
+
+          curl -fsSL \
+            --request POST \
+            --url "${API_BASE}/services/${RENDER_SERVICE_ID}/rollback" \
+            --header "accept: application/json" \
+            --header "content-type: application/json" \
+            --header "${AUTH_HEADER}" \
+            --data "${PAYLOAD}" >/dev/null
+
+          echo "Rollback request submitted to Render"
+
+  deploy-frontend-cloudflare:
+    name: Deploy Frontend (Cloudflare Pages)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [preflight, validate-cd-secrets, deploy-backend-render]
+    if: needs.preflight.outputs.should_deploy == 'true'
+    env:
+      DEPLOY_COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_PROJECT_NAME: ${{ secrets.CLOUDFLARE_PROJECT_NAME }}
+      VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL != '' && vars.VITE_API_BASE_URL || 'https://api.stockai-pro.in' }}
+      VITE_WS_URL: ${{ vars.VITE_WS_URL != '' && vars.VITE_WS_URL || 'wss://api.stockai-pro.in/live' }}
+      FRONTEND_PROD_URL: ${{ vars.FRONTEND_PROD_URL }}
+    steps:
+      - name: Checkout deployment commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+          fetch-depth: 2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend assets
+        working-directory: frontend
+        run: npm run build
+
+      - name: Install Wrangler CLI
+        run: npm install --global wrangler@4
+
+      - name: Deploy preview build
+        id: deploy_preview
+        run: |
+          set -euo pipefail
+
+          PREVIEW_BRANCH="preprod-${GITHUB_RUN_ID}"
+          set +e
+          OUTPUT="$(wrangler pages deploy frontend/dist \
+            --project-name "${CLOUDFLARE_PROJECT_NAME}" \
+            --branch "${PREVIEW_BRANCH}" \
+            --commit-hash "${DEPLOY_COMMIT_SHA}" \
+            --commit-message "preprod ${DEPLOY_COMMIT_SHA}" 2>&1)"
+          EXIT_CODE=$?
+          set -e
+
+          echo "${OUTPUT}"
+          if [ ${EXIT_CODE} -ne 0 ]; then
+            exit ${EXIT_CODE}
+          fi
+
+          PREVIEW_URL="$(echo "${OUTPUT}" | grep -Eo 'https://[a-zA-Z0-9.-]+\.pages\.dev' | head -n 1 || true)"
+          if [ -z "${PREVIEW_URL}" ]; then
+            echo "Failed to parse preview URL from Wrangler output"
+            exit 1
+          fi
+
+          echo "preview_url=${PREVIEW_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify preview deployment health
+        id: verify_preview
+        run: |
+          set -euo pipefail
+
+          PREVIEW_URL="${{ steps.deploy_preview.outputs.preview_url }}"
+          for attempt in $(seq 1 20); do
+            if curl -fsS --max-time 10 "${PREVIEW_URL}" >/dev/null; then
+              echo "Preview deployment is healthy"
+              exit 0
+            fi
+            echo "Preview health retry ${attempt}/20"
+            sleep 10
+          done
+
+          echo "Preview deployment health check failed"
+          exit 1
+
+      - name: Deploy production build
+        id: deploy_production
+        run: |
+          set -euo pipefail
+
+          wrangler pages deploy frontend/dist \
+            --project-name "${CLOUDFLARE_PROJECT_NAME}" \
+            --branch main \
+            --commit-hash "${DEPLOY_COMMIT_SHA}" \
+            --commit-message "prod ${DEPLOY_COMMIT_SHA}"
+
+      - name: Verify production deployment health
+        id: verify_production
+        run: |
+          set -euo pipefail
+
+          PROD_URL="${FRONTEND_PROD_URL:-https://stockai-pro.in}"
+          for attempt in $(seq 1 20); do
+            if curl -fsS --max-time 10 "${PROD_URL}" >/dev/null; then
+              echo "Production deployment is healthy"
+              exit 0
+            fi
+            echo "Production health retry ${attempt}/20"
+            sleep 10
+          done
+
+          echo "Production health check failed"
+          exit 1
+
+      - name: Roll back Cloudflare production to previous commit
+        if: failure() && (steps.deploy_production.outcome == 'failure' || steps.verify_production.outcome == 'failure')
+        run: |
+          set -euo pipefail
+
+          PREVIOUS_SHA="$(git rev-list --parents -n 1 "${DEPLOY_COMMIT_SHA}" | awk '{print $2}')"
+          if [ -z "${PREVIOUS_SHA}" ]; then
+            echo "Could not resolve previous commit SHA for rollback"
+            exit 0
+          fi
+
+          echo "Rolling back frontend to commit: ${PREVIOUS_SHA}"
+          git checkout "${PREVIOUS_SHA}"
+
+          (cd frontend && npm ci)
+          (cd frontend && npm run build)
+
+          wrangler pages deploy frontend/dist \
+            --project-name "${CLOUDFLARE_PROJECT_NAME}" \
+            --branch main \
+            --commit-hash "${PREVIOUS_SHA}" \
+            --commit-message "rollback ${PREVIOUS_SHA}"
