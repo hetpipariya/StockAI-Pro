@@ -1,26 +1,26 @@
-﻿"""
+"""
 Real prediction engine — Machine Learning Ensemble + Technical Scoring
 
 Uses feature_engineering.py as the single source of truth for features.
 """
+
+import json
 import logging
+import os
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import joblib
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional
-from pathlib import Path
-import joblib
-import time
 
-from app.inference.feature_engineering import (
-    FEATURE_COLUMNS,
-    compute_features,
-    validate_features,
-    get_feature_summary,
-    FEATURE_VERSION,
-)
-import json
-import os
-from datetime import datetime
+from app.inference.feature_engineering import (FEATURE_COLUMNS,
+                                               FEATURE_VERSION,
+                                               compute_features,
+                                               get_feature_summary,
+                                               validate_features)
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +48,12 @@ if MODEL_DIR is None:
     MODEL_DIR = _p2 / "models"
 
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
-logger.info("[MODELS] Using model directory: %s (exists=%s, has_model=%s)",
-            MODEL_DIR, MODEL_DIR.exists(), (MODEL_DIR / "model.pkl").exists())
+logger.info(
+    "[MODELS] Using model directory: %s (exists=%s, has_model=%s)",
+    MODEL_DIR,
+    MODEL_DIR.exists(),
+    (MODEL_DIR / "model.pkl").exists(),
+)
 
 _ensemble_model = None
 _scaler = None
@@ -101,7 +105,9 @@ def _ensure_model_feature_columns(
         "pct_change_5d": lambda: close_series.pct_change(5),
         "roll_mean_5d": lambda: close_series.rolling(5, min_periods=1).mean(),
         "roll_mean_20d": lambda: close_series.rolling(20, min_periods=1).mean(),
-        "roll_std_20d": lambda: close_series.pct_change(1).rolling(20, min_periods=2).std(),
+        "roll_std_20d": lambda: close_series.pct_change(1)
+        .rolling(20, min_periods=2)
+        .std(),
         "rsi_momentum": lambda: (
             pd.to_numeric(out["rsi_14"], errors="coerce")
             if "rsi_14" in out.columns
@@ -119,7 +125,9 @@ def _ensure_model_feature_columns(
             out[feature_name] = 0.0
 
     for feature_name in required_features:
-        out[feature_name] = pd.to_numeric(out[feature_name], errors="coerce").fillna(0.0)
+        out[feature_name] = pd.to_numeric(out[feature_name], errors="coerce").fillna(
+            0.0
+        )
 
     out.replace([np.inf, -np.inf], 0.0, inplace=True)
     return out
@@ -127,7 +135,6 @@ def _ensure_model_feature_columns(
 
 def ensure_models_loaded(max_retries: int = 3) -> bool:
     """Best-effort model load with bounded retries."""
-    global _ensemble_model
     if _ensemble_model is not None:
         return True
 
@@ -137,7 +144,9 @@ def ensure_models_loaded(max_retries: int = 3) -> bool:
             if _ensemble_model is not None:
                 return True
         except Exception as exc:
-            logger.warning("[MODELS] Load attempt %d/%d failed: %s", attempt, max_retries, exc)
+            logger.warning(
+                "[MODELS] Load attempt %d/%d failed: %s", attempt, max_retries, exc
+            )
         if attempt < max_retries:
             time.sleep(min(0.25 * attempt, 1.0))
     return _ensemble_model is not None
@@ -154,13 +163,16 @@ def load_models():
     missing_files = _missing_model_files()
     if missing_files:
         logger.warning(
-            "[MODELS] Missing model artifacts in %s: %s. Prediction endpoints will use HOLD-safe fallback until artifacts are restored.",
+            "[MODELS] Missing model artifacts in %s: %s. Prediction endpoints will "
+            "use HOLD-safe fallback until artifacts are restored.",
             MODEL_DIR,
             ", ".join(missing_files),
         )
 
     if not model_path.exists():
-        logger.error("[MODELS] model.pkl missing in %s — falling back to safe hold.", MODEL_DIR)
+        logger.error(
+            "[MODELS] model.pkl missing in %s — falling back to safe hold.", MODEL_DIR
+        )
         _ensemble_model = None
         _scaler = None
         _features_list = None
@@ -178,7 +190,9 @@ def load_models():
         return
 
     if not isinstance(payload, dict) or "version" not in payload:
-        logger.info("[MODELS] Legacy model payload detected. Wrapping into modern dictionary format.")
+        logger.info(
+            "[MODELS] Legacy model payload detected. Wrapping into modern dictionary format."
+        )
         if isinstance(payload, dict):
             # Old dictionary format missing version
             model_obj = payload.get("model", payload)
@@ -196,9 +210,15 @@ def load_models():
             if scaler_path.exists():
                 try:
                     scaler_obj = joblib.load(scaler_path)
-                    logger.info("[MODELS] Loaded sidecar scaler artifact: %s", scaler_path)
+                    logger.info(
+                        "[MODELS] Loaded sidecar scaler artifact: %s", scaler_path
+                    )
                 except Exception as exc:
-                    logger.warning("[MODELS] Failed loading sidecar scaler %s: %s", scaler_path, exc)
+                    logger.warning(
+                        "[MODELS] Failed loading sidecar scaler %s: %s",
+                        scaler_path,
+                        exc,
+                    )
 
         if feat_list is None:
             features_path = MODEL_DIR / "features.pkl"
@@ -207,9 +227,16 @@ def load_models():
                     loaded_features = joblib.load(features_path)
                     if isinstance(loaded_features, (list, tuple)):
                         feat_list = list(loaded_features)
-                        logger.info("[MODELS] Loaded sidecar features artifact: %s", features_path)
+                        logger.info(
+                            "[MODELS] Loaded sidecar features artifact: %s",
+                            features_path,
+                        )
                 except Exception as exc:
-                    logger.warning("[MODELS] Failed loading sidecar features %s: %s", features_path, exc)
+                    logger.warning(
+                        "[MODELS] Failed loading sidecar features %s: %s",
+                        features_path,
+                        exc,
+                    )
 
         if feat_list is None:
             feat_list = FEATURE_COLUMNS
@@ -250,11 +277,13 @@ def load_models():
         )
 
     logger.info(
-        "[MODELS] ✓ Loaded ML Ensemble Pipeline — %d features validated.", len(_features_list)
+        "[MODELS] ✓ Loaded ML Ensemble Pipeline — %d features validated.",
+        len(_features_list),
     )
 
 
 # ─── Ensemble Predictor ────────────────────────────────────────────────────
+
 
 class ModelEnsemble:
     """Production ensemble: weighted combination of technical, momentum, ML."""
@@ -280,12 +309,12 @@ class ModelEnsemble:
                 "regime": "Unknown",
                 "factors": [reason],
                 "explanation": f"Signal quality low: {reason}",
-                "reason": reason
+                "reason": reason,
             }
 
         if ohlcv_df is None or len(ohlcv_df) < 50:
             return _safe_hold("Insufficient data (< 50 candles)")
-            
+
         if not _ensemble_model:
             logger.warning("[PREDICT] Model unavailable. Returning safe fallback.")
             return _safe_hold("Model unavailable")
@@ -297,9 +326,13 @@ class ModelEnsemble:
             return _safe_hold("Feature computation returned empty")
 
         required_model_features = list(_features_list or FEATURE_COLUMNS)
-        feature_df = _ensure_model_feature_columns(feature_df, ohlcv_df, required_model_features)
+        feature_df = _ensure_model_feature_columns(
+            feature_df, ohlcv_df, required_model_features
+        )
 
-        missing_model_features = [name for name in required_model_features if name not in feature_df.columns]
+        missing_model_features = [
+            name for name in required_model_features if name not in feature_df.columns
+        ]
         if missing_model_features:
             return _safe_hold(f"Missing model features: {missing_model_features[:5]}")
 
@@ -368,8 +401,16 @@ class ModelEnsemble:
                 debug_info["ml_status"] = "No model loaded — falling back to safe hold"
 
         # ── Human‑readable heuristic factors ────────────────────────────────
-        raw_close = pd.to_numeric(ohlcv_df.get("close"), errors="coerce") if "close" in ohlcv_df.columns else None
-        c = float(raw_close.iloc[-1]) if raw_close is not None and len(raw_close) else float(ltp)
+        raw_close = (
+            pd.to_numeric(ohlcv_df.get("close"), errors="coerce")
+            if "close" in ohlcv_df.columns
+            else None
+        )
+        c = (
+            float(raw_close.iloc[-1])
+            if raw_close is not None and len(raw_close)
+            else float(ltp)
+        )
         ema20 = float(latest.get("ema_20", c) or c)
         rsi14 = float(latest.get("rsi_14", 50) or 50)
         macd = float(latest.get("macd", 0) or 0)
@@ -438,8 +479,14 @@ class ModelEnsemble:
                 final_confidence = tech_confidence
             else:
                 # Concession
-                final_signal = ml_signal if (ml_signal == tech_signal and ml_signal != "HOLD") else "HOLD"
-                final_confidence = max(ml_confidence, tech_confidence) if final_signal != "HOLD" else 0
+                final_signal = (
+                    ml_signal
+                    if (ml_signal == tech_signal and ml_signal != "HOLD")
+                    else "HOLD"
+                )
+                final_confidence = (
+                    max(ml_confidence, tech_confidence) if final_signal != "HOLD" else 0
+                )
         else:
             # Fallback when ML model is absent
             final_signal = tech_signal
@@ -453,12 +500,24 @@ class ModelEnsemble:
         if final_confidence < 60:
             final_signal = "HOLD"
 
-
         # ── Target / Stop calculation ───────────────────────────────────────
         # Use the feature DataFrame which was computed by compute_features()
-        raw_high = pd.to_numeric(ohlcv_df.get("high"), errors="coerce") if "high" in ohlcv_df.columns else None
-        raw_low = pd.to_numeric(ohlcv_df.get("low"), errors="coerce") if "low" in ohlcv_df.columns else None
-        if raw_high is not None and raw_low is not None and len(raw_high) and len(raw_low):
+        raw_high = (
+            pd.to_numeric(ohlcv_df.get("high"), errors="coerce")
+            if "high" in ohlcv_df.columns
+            else None
+        )
+        raw_low = (
+            pd.to_numeric(ohlcv_df.get("low"), errors="coerce")
+            if "low" in ohlcv_df.columns
+            else None
+        )
+        if (
+            raw_high is not None
+            and raw_low is not None
+            and len(raw_high)
+            and len(raw_low)
+        ):
             atr_proxy = float((raw_high.tail(14) - raw_low.tail(14)).mean())
         else:
             atr_proxy = 0.0
@@ -466,9 +525,7 @@ class ModelEnsemble:
             atr_proxy = c * 0.015
 
         confidence_boost = 0.5 + (final_confidence / 100.0) * 1.5
-        move_ratio = float(
-            np.clip((atr_proxy / c) * confidence_boost, 0.003, 0.04)
-        )
+        move_ratio = float(np.clip((atr_proxy / c) * confidence_boost, 0.003, 0.04))
 
         if final_signal == "BUY":
             predicted = round(ltp * (1 + move_ratio * 0.8), 2)
@@ -496,10 +553,14 @@ class ModelEnsemble:
             regime = "Ranging"
 
         explanation = (
-            f"Ensemble Prediction: {final_signal} with {final_confidence}% confidence (ML: {ml_confidence}%, Tech: {tech_confidence}%)."
+            f"Ensemble Prediction: {final_signal} with {final_confidence}% "
+            f"confidence (ML: {ml_confidence}%, Tech: {tech_confidence}%)."
         )
         if not _ensemble_model:
-            explanation = f"Warning: ML model missing. Using Technical Fallback ({tech_signal} @ {tech_confidence}%)."
+            explanation = (
+                "Warning: ML model missing. Using Technical Fallback "
+                f"({tech_signal} @ {tech_confidence}%)."
+            )
 
         result = {
             "prediction": predicted,
@@ -529,9 +590,13 @@ class ModelEnsemble:
         if result["confidence"] < 60:
             result["signal"] = "HOLD"
 
-        if result["signal"] == "BUY" and (result["target"] <= ltp or result["stop"] >= ltp):
+        if result["signal"] == "BUY" and (
+            result["target"] <= ltp or result["stop"] >= ltp
+        ):
             result["signal"] = "HOLD"
-        elif result["signal"] == "SELL" and (result["target"] >= ltp or result["stop"] <= ltp):
+        elif result["signal"] == "SELL" and (
+            result["target"] >= ltp or result["stop"] <= ltp
+        ):
             result["signal"] = "HOLD"
 
         if result["signal"] == "HOLD":
@@ -545,10 +610,15 @@ class ModelEnsemble:
             "signal": result["signal"],
             "confidence": result["confidence"],
             "feature_version": FEATURE_VERSION,
-            "model_version": _model_version or "unknown"
+            "model_version": _model_version or "unknown",
         }
         logger.info(json.dumps(log_payload))
 
-        logger.debug("[PREDICT] Signal computed: %s %s conf=%s", symbol, result["signal"], result["confidence"])
+        logger.debug(
+            "[PREDICT] Signal computed: %s %s conf=%s",
+            symbol,
+            result["signal"],
+            result["confidence"],
+        )
 
         return result

@@ -1,8 +1,9 @@
+import logging
 import os
 import secrets
-import logging
 from pathlib import Path
 from urllib.parse import urlparse
+
 from dotenv import load_dotenv
 
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -48,15 +49,15 @@ if _env == "production":
             "Production requires a strong secret (≥32 chars).\n"
             "Generate one now:\n"
             '  python -c "import secrets; print(secrets.token_urlsafe(64))"\n'
-            "Then set it in your .env file as JWT_SECRET=<generated_value>\n"
-            + "=" * 60
+            "Then set it in your .env file as JWT_SECRET=<generated_value>\n" + "=" * 60
         )
 else:
     # Development: warn but allow weak key
     if not _jwt or _jwt in _KNOWN_INSECURE_KEYS or len(_jwt) < 32:
         _jwt = secrets.token_urlsafe(48)
         _cfg_logger.warning(
-            "[DEV ONLY] JWT_SECRET missing/insecure. Generated ephemeral secret for this process; set JWT_SECRET in .env for stable sessions."
+            "[DEV ONLY] JWT_SECRET missing/insecure. Generated ephemeral secret "
+            "for this process; set JWT_SECRET in .env for stable sessions."
         )
 
 JWT_SECRET: str = _jwt
@@ -114,8 +115,13 @@ def _resolve_database_url() -> str:
     raw = _sanitize_database_url(os.getenv("DATABASE_URL", ""))
 
     # Guard against malformed multiline env values to avoid parsing surprises.
-    if any(marker in os.getenv("DATABASE_URL", "") for marker in ("\n", "\r", "`n", "`r", "JWT_SECRET=")):
-        _cfg_logger.warning("[DB] DATABASE_URL contained malformed content; sanitized before use")
+    if any(
+        marker in os.getenv("DATABASE_URL", "")
+        for marker in ("\n", "\r", "`n", "`r", "JWT_SECRET=")
+    ):
+        _cfg_logger.warning(
+            "[DB] DATABASE_URL contained malformed content; sanitized before use"
+        )
 
     if not raw:
         if _env == "production":
@@ -135,7 +141,9 @@ def _resolve_database_url() -> str:
     # SQLite URLs — ensure the aiosqlite driver is present
     if raw.startswith("sqlite"):
         if _env == "production":
-            raise RuntimeError("FATAL: SQLite is not allowed in production. Use PostgreSQL.")
+            raise RuntimeError(
+                "FATAL: SQLite is not allowed in production. Use PostgreSQL."
+            )
         if "+aiosqlite" not in raw:
             raw = raw.replace("sqlite://", "sqlite+aiosqlite://", 1)
         _cfg_logger.info("[DB] Using SQLite: %s", raw)
@@ -159,7 +167,9 @@ def _resolve_database_url() -> str:
             return _SQLITE_FALLBACK
     except Exception as exc:
         if _env == "production":
-            raise RuntimeError(f"FATAL: Could not parse DATABASE_URL in production: {exc}") from exc
+            raise RuntimeError(
+                f"FATAL: Could not parse DATABASE_URL in production: {exc}"
+            ) from exc
         _cfg_logger.warning(
             "[DB] Could not parse DATABASE_URL (%s) — falling back to SQLite", exc
         )

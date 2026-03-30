@@ -15,7 +15,9 @@ async def test_kill_switch_isolated_per_user(client, signup_user):
     headers_1 = {"Authorization": f"Bearer {user_1['tokens']['access_token']}"}
     headers_2 = {"Authorization": f"Bearer {user_2['tokens']['access_token']}"}
 
-    disable = await client.post("/api/v1/trading/kill-switch?enable=false", headers=headers_1)
+    disable = await client.post(
+        "/api/v1/trading/kill-switch?enable=false", headers=headers_1
+    )
     assert disable.status_code == 200
     assert disable.json()["user_halted"] is True
 
@@ -29,7 +31,9 @@ async def test_kill_switch_isolated_per_user(client, signup_user):
 
 
 @pytest.mark.anyio
-async def test_positions_orders_and_logs_are_filtered_by_user(client, signup_user, db_session):
+async def test_positions_orders_and_logs_are_filtered_by_user(
+    client, signup_user, db_session
+):
     user_1 = await signup_user("scope1")
     user_2 = await signup_user("scope2")
 
@@ -139,8 +143,8 @@ async def test_positions_orders_and_logs_are_filtered_by_user(client, signup_use
     u2_logs = await client.get("/api/v1/trading/logs", headers=headers_2)
     assert u1_logs.status_code == 200
     assert u2_logs.status_code == 200
-    assert [l["symbol"] for l in u1_logs.json()["logs"]] == ["ALPHA"]
-    assert [l["symbol"] for l in u2_logs.json()["logs"]] == ["BETA"]
+    assert [log_entry["symbol"] for log_entry in u1_logs.json()["logs"]] == ["ALPHA"]
+    assert [log_entry["symbol"] for log_entry in u2_logs.json()["logs"]] == ["BETA"]
 
 
 @pytest.mark.anyio
@@ -162,7 +166,16 @@ async def test_execute_trade_requires_symbol_query_with_auth(client, signup_user
     [
         ("GET", "/api/v1/auth/me", None),
         ("POST", "/api/v1/auth/logout", None),
-        ("POST", "/api/v1/backtest", {"symbol": "RELIANCE", "start_date": "2026-01-01", "end_date": "2026-01-05", "capital": 100000}),
+        (
+            "POST",
+            "/api/v1/backtest",
+            {
+                "symbol": "RELIANCE",
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-05",
+                "capital": 100000,
+            },
+        ),
         ("GET", "/api/v1/trading/status", None),
         ("GET", "/api/v1/trading/risk", None),
         ("GET", "/api/v1/trading/safety", None),
@@ -175,7 +188,9 @@ async def test_execute_trade_requires_symbol_query_with_auth(client, signup_user
         ("POST", "/api/v1/trading/confirm/ORDER-TEST", None),
     ],
 )
-async def test_protected_endpoints_require_authentication(client, method, path, payload):
+async def test_protected_endpoints_require_authentication(
+    client, method, path, payload
+):
     if method == "GET":
         response = await client.get(path)
     else:
@@ -184,4 +199,6 @@ async def test_protected_endpoints_require_authentication(client, method, path, 
     assert response.status_code == 401
     body = response.json()
     assert body["status"] == "error"
-    assert "authenticated" in body["message"].lower() or "token" in body["message"].lower()
+    assert (
+        "authenticated" in body["message"].lower() or "token" in body["message"].lower()
+    )

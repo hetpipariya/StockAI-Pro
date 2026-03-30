@@ -1,8 +1,8 @@
 """Thin FastAPI assembly layer for StockAI Pro backend."""
+
 from __future__ import annotations
 
 import logging
-import math
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -12,18 +12,13 @@ from fastapi.middleware.gzip import GZipMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.config import DATABASE_URL
-from app.middleware import add_exception_handlers, add_production_middleware, configure_cors
-from app.routes import auth, backtest, bundle, indicators, market, news, predict, sentiment, symbols, trading
+from app.middleware import (add_exception_handlers, add_production_middleware,
+                            configure_cors)
+from app.routes import (auth, backtest, bundle, indicators, market, news,
+                        predict, sentiment, symbols, trading)
 from app.services.db import check_db_connection
-from app.services.instrument_master import get_instrument_count
-from app.services.market_state import is_market_open
-from app.websocket.handler import (
-    get_last_tick_age_seconds,
-    get_ws_connector,
-    get_ws_state,
-    is_ws_streaming,
-    setup_websocket_routes,
-)
+from app.websocket.handler import (get_last_tick_age_seconds, get_ws_state,
+                                   is_ws_streaming, setup_websocket_routes)
 from app.websocket.relay import get_client_count
 
 _bootstrap_logger = logging.getLogger(__name__)
@@ -34,14 +29,17 @@ except ModuleNotFoundError:
     try:
         from .lifespan import lifespan  # type: ignore[no-redef]
     except Exception as exc:
+        lifespan_import_error = str(exc)
+
         @asynccontextmanager
         async def lifespan(app: FastAPI):  # type: ignore[no-redef]
             _bootstrap_logger.warning(
                 "[STARTUP] Lifespan module unavailable (%s). Running minimal lifecycle fallback.",
-                exc,
+                lifespan_import_error,
             )
             yield
             _bootstrap_logger.info("[SHUTDOWN] Minimal lifecycle fallback complete")
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,7 +52,7 @@ _DB_BACKEND = "SQLite" if DATABASE_URL.startswith("sqlite") else "PostgreSQL"
 try:
     _parsed = urlparse(DATABASE_URL)
     if _parsed.hostname:
-        clean_path = (_parsed.path or "")
+        clean_path = _parsed.path or ""
         for sep in ("\n", "\r", "`n", "`r"):
             clean_path = clean_path.split(sep)[0]
         for marker in ("JWT_SECRET=", "APP_ENV=", "ENV=", "REDIS_URL="):
@@ -89,7 +87,11 @@ setup_websocket_routes(app)
 
 
 def _list_api_routes() -> list[str]:
-    paths = {route.path for route in app.routes if getattr(route, "path", "").startswith("/api")}
+    paths = {
+        route.path
+        for route in app.routes
+        if getattr(route, "path", "").startswith("/api")
+    }
     return sorted(paths)
 
 
@@ -129,7 +131,7 @@ async def health():
 @app.get("/ping")
 async def ping():
     """Ultra-lightweight health check for Cloudflare and load balancers.
-    
+
     This endpoint returns immediately with minimal overhead.
     Use this for keep-alive and timeout detection.
     """
@@ -143,14 +145,16 @@ async def detailed_health():
     ws_state = get_ws_state()
     ws_streaming = is_ws_streaming()
     last_tick_age = get_last_tick_age_seconds()
-    
+
     return {
         "status": "ok" if db_ok else "degraded",
         "database": "connected" if db_ok else "unreachable",
         "websocket": {
             "state": ws_state,
             "streaming": ws_streaming,
-            "last_tick_age_seconds": last_tick_age if last_tick_age != float("inf") else None,
+            "last_tick_age_seconds": (
+                last_tick_age if last_tick_age != float("inf") else None
+            ),
         },
         "clients": get_client_count(),
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
@@ -181,7 +185,10 @@ async def predict_alias(symbol: str):
             "stopLoss": 0.0,
             "regime": "Unknown",
             "explanation": f"HOLD fallback: {exc}",
-            "timestamp": datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "timestamp": datetime.now(tz=timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
         }
 
 

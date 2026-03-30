@@ -94,7 +94,12 @@ logger.info("[QUANT] Using model directory: %s", MODELS_DIR)
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _coerce_price(value: Any, fallback: float = 0.0) -> float:
@@ -185,7 +190,9 @@ def _compute_features(df: pd.DataFrame) -> pd.DataFrame:
     out["roll_std_20d"] = out["pct_change_1d"].rolling(20).std()
     out["roll_mean_5d"] = out["close"].rolling(5).mean()
     out["roll_mean_20d"] = out["close"].rolling(20).mean()
-    out["trend_strength"] = (out["close"] - out["ema_20"]) / out["ema_20"].replace(0, np.nan)
+    out["trend_strength"] = (out["close"] - out["ema_20"]) / out["ema_20"].replace(
+        0, np.nan
+    )
     out["rsi_momentum"] = out["rsi_14"].diff()
 
     out.replace([np.inf, -np.inf], np.nan, inplace=True)
@@ -361,12 +368,16 @@ def _decode_market_type(encoded_value: int, mapping: Dict[str, Any]) -> int:
     return int(encoded_value)
 
 
-def _confidence_probability(model: Any, scaled_row: np.ndarray, encoded_value: int) -> float:
+def _confidence_probability(
+    model: Any, scaled_row: np.ndarray, encoded_value: int
+) -> float:
     if hasattr(model, "predict_proba"):
         probabilities = model.predict_proba(scaled_row)[0]
         classes = getattr(model, "classes_", np.arange(len(probabilities)))
         class_to_index = {int(value): idx for idx, value in enumerate(classes)}
-        selected_index = class_to_index.get(encoded_value, int(np.argmax(probabilities)))
+        selected_index = class_to_index.get(
+            encoded_value, int(np.argmax(probabilities))
+        )
         confidence = float(probabilities[selected_index])
     else:
         confidence = 0.0
@@ -393,7 +404,9 @@ def _regime_label(market_type: int) -> str:
     return "Range-bound"
 
 
-def _build_trade_levels(current_price: float, signal: str, confidence_prob: float) -> Tuple[float, float]:
+def _build_trade_levels(
+    current_price: float, signal: str, confidence_prob: float
+) -> Tuple[float, float]:
     safe_price = max(0.0, float(current_price))
     if safe_price <= 0:
         return 0.0, 0.0
@@ -411,7 +424,9 @@ def _build_trade_levels(current_price: float, signal: str, confidence_prob: floa
     return safe_price * 1.004, safe_price * 0.996
 
 
-def _build_explanation(features: pd.Series, signal: str, confidence_pct: int, regime: str) -> str:
+def _build_explanation(
+    features: pd.Series, signal: str, confidence_pct: int, regime: str
+) -> str:
     rsi = _coerce_price(features.get("rsi"), np.nan)
     macd = _coerce_price(features.get("macd"), np.nan)
     ema_20 = _coerce_price(features.get("ema_20"), np.nan)
@@ -438,10 +453,15 @@ def _build_explanation(features: pd.Series, signal: str, confidence_pct: int, re
     elif signal == "SELL":
         direction = "downside"
 
-    return f"{regime} regime with {rsi_text}, {macd_text}, {ema_text}. Model sees {direction} bias ({confidence_pct}% confidence)."
+    return (
+        f"{regime} regime with {rsi_text}, {macd_text}, {ema_text}. "
+        f"Model sees {direction} bias ({confidence_pct}% confidence)."
+    )
 
 
-def _hold_fallback(symbol: str, reason: str = "Prediction unavailable", current_price: float = 0.0) -> Dict[str, Any]:
+def _hold_fallback(
+    symbol: str, reason: str = "Prediction unavailable", current_price: float = 0.0
+) -> Dict[str, Any]:
     target, stop = _build_trade_levels(current_price, "HOLD", 0.0)
     return {
         "symbol": symbol,
@@ -464,7 +484,9 @@ def _normalize_feature_key(value: str) -> str:
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
 
 
-def _align_feature_columns(features: pd.DataFrame, feature_columns: List[str]) -> pd.DataFrame:
+def _align_feature_columns(
+    features: pd.DataFrame, feature_columns: List[str]
+) -> pd.DataFrame:
     """Build a compatibility frame that always matches model feature columns.
 
     Missing features are backfilled with 0.0 to avoid runtime crashes when
@@ -506,11 +528,15 @@ def predict_signal(symbol: str) -> Dict[str, Any]:
         df = _fetch_recent_15m(normalized_symbol)
         features = _compute_features(df)
         if features.empty:
-            raise ValueError(f"Feature generation produced empty frame for {normalized_symbol}")
+            raise ValueError(
+                f"Feature generation produced empty frame for {normalized_symbol}"
+            )
 
         aligned_features = _align_feature_columns(features, feature_columns)
         latest_features = aligned_features.iloc[-1]
-        latest_vector = latest_features[feature_columns].astype(float).values.reshape(1, -1)
+        latest_vector = (
+            latest_features[feature_columns].astype(float).values.reshape(1, -1)
+        )
         if not np.isfinite(latest_vector).all():
             raise ValueError("Live feature vector contains non-finite values")
 
@@ -524,12 +550,18 @@ def predict_signal(symbol: str) -> Dict[str, Any]:
         if confidence_prob < MIN_SIGNAL_CONFIDENCE:
             signal = "HOLD"
 
-        current_price = _coerce_price(latest_features.get("close"), _coerce_price(df["close"].iloc[-1], 0.0))
-        target_price, stop_loss = _build_trade_levels(current_price, signal, confidence_prob)
+        current_price = _coerce_price(
+            latest_features.get("close"), _coerce_price(df["close"].iloc[-1], 0.0)
+        )
+        target_price, stop_loss = _build_trade_levels(
+            current_price, signal, confidence_prob
+        )
 
         confidence_pct = int(round(confidence_prob * 100.0))
         regime = _regime_label(market_type)
-        explanation = _build_explanation(latest_features, signal, confidence_pct, regime)
+        explanation = _build_explanation(
+            latest_features, signal, confidence_pct, regime
+        )
 
         model_path = _ARTIFACT_PATH or LEGACY_MODEL_PATH
         model_version = _parse_model_version(model_path)

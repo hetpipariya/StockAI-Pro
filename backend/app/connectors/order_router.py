@@ -4,17 +4,19 @@ PAPER mode logs trades to SQLite without touching real money.
 LIVE mode routes orders through SmartAPI (Angel One).
 All state transitions are logged via the trade_logger audit trail.
 """
+
 from __future__ import annotations
 
 import logging
-import uuid
 import time
+import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
-from dataclasses import dataclass
 
 from app import config
-from app.services.db import get_sync_db_session, OrderModel, PositionModel, OrderStateLog
+from app.services.db import (OrderModel, OrderStateLog, PositionModel,
+                             get_sync_db_session)
 from app.trading.trade_logger import log_trade
 
 logger = logging.getLogger(__name__)
@@ -29,8 +31,8 @@ class OrderResult:
     price: float
     stop_loss: float
     target: float
-    status: str       # "FILLED", "REJECTED", "PENDING_CONFIRMATION", "FAILED", "PARTIAL"
-    mode: str          # "PAPER" or "LIVE"
+    status: str  # "FILLED", "REJECTED", "PENDING_CONFIRMATION", "FAILED", "PARTIAL"
+    mode: str  # "PAPER" or "LIVE"
     timestamp: str
     error: Optional[str] = None
     reason: Optional[str] = None
@@ -46,17 +48,23 @@ class OrderRouter:
     def __init__(self, mode: str = "PAPER"):
         """mode: 'PAPER' or 'LIVE'"""
         self.mode = mode.upper()
-        
+
         # Override mode if safety flags prevent LIVE trading
         if self.mode == "LIVE":
             if not config.TRADING_ENABLED:
-                logger.warning("[SAFETY] TRADING_ENABLED is False or missing. Forcing PAPER mode.")
+                logger.warning(
+                    "[SAFETY] TRADING_ENABLED is False or missing. Forcing PAPER mode."
+                )
                 self.mode = "PAPER"
             elif config.TRADING_MODE != "LIVE":
-                logger.warning(f"[SAFETY] TRADING_MODE env is {config.TRADING_MODE}, not LIVE. Forcing PAPER.")
+                logger.warning(
+                    f"[SAFETY] TRADING_MODE env is {config.TRADING_MODE}, not LIVE. Forcing PAPER."
+                )
                 self.mode = "PAPER"
             elif not config.LIVE_CONFIRMED:
-                logger.warning("[SAFETY] LIVE_CONFIRMED is False. LIVE mode requires explicit confirmation. Forcing PAPER.")
+                logger.warning(
+                    "[SAFETY] LIVE_CONFIRMED is False. LIVE mode requires explicit confirmation. Forcing PAPER."
+                )
                 self.mode = "PAPER"
 
         logger.info(f"[ORDER] Router initialized in {self.mode} mode")
@@ -77,10 +85,10 @@ class OrderRouter:
         target: float,
         user_id: Optional[int] = None,
         reason: str = "",
-        confidence: int = 0
+        confidence: int = 0,
     ) -> OrderResult:
         """
-        Stage 1: A trade signal is validated. 
+        Stage 1: A trade signal is validated.
         Create order in PENDING_CONFIRMATION state in the database.
         Idempotency: prevent exact duplicates in the last 15 minutes.
         """
@@ -88,26 +96,49 @@ class OrderRouter:
         if not config.TRADING_ENABLED:
             logger.warning(f"[SAFETY] Kill-switch active — blocking order for {symbol}")
             log_trade(
-                "REJECTED", order_id="N/A", symbol=symbol, direction=direction,
-                quantity=quantity, price=price, stop_loss=stop_loss, target=target,
-                confidence=confidence, reason=reason, mode=self.mode,
-                status="REJECTED", error="Kill-switch active (TRADING_ENABLED=false)",
+                "REJECTED",
+                order_id="N/A",
+                symbol=symbol,
+                direction=direction,
+                quantity=quantity,
+                price=price,
+                stop_loss=stop_loss,
+                target=target,
+                confidence=confidence,
+                reason=reason,
+                mode=self.mode,
+                status="REJECTED",
+                error="Kill-switch active (TRADING_ENABLED=false)",
                 user_id=user_id,
             )
             return OrderResult(
-                order_id="BLOCKED", symbol=symbol, direction=direction,
-                quantity=quantity, price=price, stop_loss=stop_loss, target=target,
-                status="REJECTED", mode=self.mode,
+                order_id="BLOCKED",
+                symbol=symbol,
+                direction=direction,
+                quantity=quantity,
+                price=price,
+                stop_loss=stop_loss,
+                target=target,
+                status="REJECTED",
+                mode=self.mode,
                 timestamp=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                 error="Kill-switch active (TRADING_ENABLED=false)",
             )
 
         if user_id is None:
-            logger.warning("[ORDER] Missing user_id; rejecting order placement for %s", symbol)
+            logger.warning(
+                "[ORDER] Missing user_id; rejecting order placement for %s", symbol
+            )
             return OrderResult(
-                order_id="BLOCKED", symbol=symbol, direction=direction,
-                quantity=quantity, price=price, stop_loss=stop_loss, target=target,
-                status="REJECTED", mode=self.mode,
+                order_id="BLOCKED",
+                symbol=symbol,
+                direction=direction,
+                quantity=quantity,
+                price=price,
+                stop_loss=stop_loss,
+                target=target,
+                status="REJECTED",
+                mode=self.mode,
                 timestamp=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                 error="Missing user_id",
             )
@@ -117,33 +148,61 @@ class OrderRouter:
 
         try:
             # Idempotency Check
-            recent_duplicate = session.query(OrderModel).filter(
-                OrderModel.user_id == user_id,
-                OrderModel.symbol == symbol,
-                OrderModel.transaction_type == direction,
-                OrderModel.status.in_(["PENDING_CONFIRMATION", "CONFIRMED", "PENDING_EXECUTION", "FILLED"])
-            ).order_by(OrderModel.timestamp.desc()).first()
+            recent_duplicate = (
+                session.query(OrderModel)
+                .filter(
+                    OrderModel.user_id == user_id,
+                    OrderModel.symbol == symbol,
+                    OrderModel.transaction_type == direction,
+                    OrderModel.status.in_(
+                        [
+                            "PENDING_CONFIRMATION",
+                            "CONFIRMED",
+                            "PENDING_EXECUTION",
+                            "FILLED",
+                        ]
+                    ),
+                )
+                .order_by(OrderModel.timestamp.desc())
+                .first()
+            )
 
             if recent_duplicate:
-                time_diff = (datetime.utcnow() - recent_duplicate.timestamp).total_seconds()
-                if time_diff < 900: # 15 minutes
-                    logger.warning(f"[ORDER] Idempotency block: Exact {direction} order for {symbol} placed {time_diff:.0f}s ago. Skipping.")
+                time_diff = (
+                    datetime.utcnow() - recent_duplicate.timestamp
+                ).total_seconds()
+                if time_diff < 900:  # 15 minutes
+                    logger.warning(
+                        f"[ORDER] Idempotency block: Exact {direction} order for {symbol} placed {
+                            time_diff:.0f}s ago. Skipping.")
                     log_trade(
-                        "REJECTED", order_id=recent_duplicate.order_id, symbol=symbol,
-                        direction=direction, quantity=quantity, price=price,
-                        mode=self.mode, status="REJECTED",
+                        "REJECTED",
+                        order_id=recent_duplicate.order_id,
+                        symbol=symbol,
+                        direction=direction,
+                        quantity=quantity,
+                        price=price,
+                        mode=self.mode,
+                        status="REJECTED",
                         error="Duplicate order block (Idempotency)",
                         user_id=user_id,
                     )
                     return OrderResult(
-                        order_id=recent_duplicate.order_id, symbol=symbol, direction=direction,
-                        quantity=quantity, price=price, stop_loss=stop_loss, target=target,
-                        status="REJECTED", mode=self.mode, timestamp=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        error="Duplicate order block (Idempotency)"
+                        order_id=recent_duplicate.order_id,
+                        symbol=symbol,
+                        direction=direction,
+                        quantity=quantity,
+                        price=price,
+                        stop_loss=stop_loss,
+                        target=target,
+                        status="REJECTED",
+                        mode=self.mode,
+                        timestamp=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                        error="Duplicate order block (Idempotency)",
                     )
 
             order_id = f"{self.mode}-{uuid.uuid4().hex[:8].upper()}"
-            
+
             new_order = OrderModel(
                 user_id=user_id,
                 order_id=order_id,
@@ -156,35 +215,55 @@ class OrderRouter:
                 status="PENDING_CONFIRMATION",
                 mode=self.mode,
                 reason=reason,
-                confidence=confidence
+                confidence=confidence,
             )
             session.add(new_order)
             self._log_state(session, order_id, "PENDING_CONFIRMATION")
             session.commit()
 
-            logger.info(f"[{self.mode}] Staged {direction} {quantity}x {symbol} @ ₹{price:.2f} | ID={order_id}. Awaiting Confirmation.")
-            
+            logger.info(
+                f"[{self.mode}] Staged {direction} {quantity}x {symbol} @ ₹{price:.2f} "
+                f"| ID={order_id}. Awaiting Confirmation."
+            )
+
             # Audit log
             log_trade(
-                "PLACED", order_id=order_id, symbol=symbol, direction=direction,
-                quantity=quantity, price=price, stop_loss=stop_loss, target=target,
-                confidence=confidence, reason=reason, mode=self.mode,
+                "PLACED",
+                order_id=order_id,
+                symbol=symbol,
+                direction=direction,
+                quantity=quantity,
+                price=price,
+                stop_loss=stop_loss,
+                target=target,
+                confidence=confidence,
+                reason=reason,
+                mode=self.mode,
                 status="PENDING_CONFIRMATION",
                 user_id=user_id,
             )
 
             return OrderResult(
-                order_id=order_id, symbol=symbol, direction=direction,
-                quantity=quantity, price=price, stop_loss=stop_loss, target=target,
-                status="PENDING_CONFIRMATION", mode=self.mode,
+                order_id=order_id,
+                symbol=symbol,
+                direction=direction,
+                quantity=quantity,
+                price=price,
+                stop_loss=stop_loss,
+                target=target,
+                status="PENDING_CONFIRMATION",
+                mode=self.mode,
                 timestamp=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                reason=reason, confidence=confidence
+                reason=reason,
+                confidence=confidence,
             )
 
         finally:
             session.close()
 
-    def confirm_and_execute(self, order_id: str, user_id: Optional[int] = None) -> Optional[OrderResult]:
+    def confirm_and_execute(
+        self, order_id: str, user_id: Optional[int] = None
+    ) -> Optional[OrderResult]:
         """
         Stage 2: External API triggers execution of a PENDING_CONFIRMATION order.
         Moves state machine and routes to correct executor.
@@ -197,27 +276,42 @@ class OrderRouter:
                 logger.error("[ORDER] Missing user_id; cannot confirm %s", order_id)
                 return None
 
-            order = session.query(OrderModel).filter_by(order_id=order_id, user_id=user_id).first()
+            order = (
+                session.query(OrderModel)
+                .filter_by(order_id=order_id, user_id=user_id)
+                .first()
+            )
             if not order:
                 logger.error(f"[ORDER] Cannot confirm missing order {order_id}")
                 return None
-            
+
             if order.status != "PENDING_CONFIRMATION":
-                logger.error(f"[ORDER] Order {order_id} is in state {order.status}, cannot confirm.")
+                logger.error(
+                    f"[ORDER] Order {order_id} is in state {order.status}, cannot confirm."
+                )
                 return None
 
             # Validate Mode matches safety rules dynamically
             execute_mode = order.mode
-            if execute_mode == "LIVE" and (not config.TRADING_ENABLED or config.TRADING_MODE != "LIVE"):
-                logger.error(f"[SAFETY] Execution blocked for LIVE order {order_id} due to env change.")
+            if execute_mode == "LIVE" and (
+                not config.TRADING_ENABLED or config.TRADING_MODE != "LIVE"
+            ):
+                logger.error(
+                    f"[SAFETY] Execution blocked for LIVE order {order_id} due to env change."
+                )
                 order.status = "REJECTED"
                 order.error = "Safety Block triggered during execution"
                 self._log_state(session, order_id, "REJECTED")
                 session.commit()
                 log_trade(
-                    "REJECTED", order_id=order_id, symbol=order.symbol,
-                    direction=order.transaction_type, quantity=order.quantity,
-                    price=order.price, mode=execute_mode, status="REJECTED",
+                    "REJECTED",
+                    order_id=order_id,
+                    symbol=order.symbol,
+                    direction=order.transaction_type,
+                    quantity=order.quantity,
+                    price=order.price,
+                    mode=execute_mode,
+                    status="REJECTED",
                     error="Safety Block triggered during execution",
                     user_id=order.user_id,
                 )
@@ -228,14 +322,19 @@ class OrderRouter:
             session.commit()
 
             log_trade(
-                "CONFIRMED", order_id=order_id, symbol=order.symbol,
-                direction=order.transaction_type, quantity=order.quantity,
-                price=order.price, mode=execute_mode, status="CONFIRMED",
+                "CONFIRMED",
+                order_id=order_id,
+                symbol=order.symbol,
+                direction=order.transaction_type,
+                quantity=order.quantity,
+                price=order.price,
+                mode=execute_mode,
+                status="CONFIRMED",
                 user_id=order.user_id,
             )
 
             logger.info(f"[{execute_mode}] Executing confirmed order {order_id}")
-            
+
             if execute_mode == "PAPER":
                 result = self._execute_paper(session, order)
             else:
@@ -250,20 +349,27 @@ class OrderRouter:
         """Instantly fill the PAPER order and create a Position."""
         order.status = "PENDING_EXECUTION"
         self._log_state(session, order.order_id, "PENDING_EXECUTION")
-        
+
         # Simulate instant fill
         order.status = "FILLED"
         order.filled_quantity = order.quantity
         self._log_state(session, order.order_id, "FILLED")
-        
+
         self._sync_position(session, order)
         session.commit()
 
         log_trade(
-            "FILLED", order_id=order.order_id, symbol=order.symbol,
-            direction=order.transaction_type, quantity=order.quantity,
-            price=order.price, stop_loss=order.stop_loss, target=order.target,
-            confidence=order.confidence, reason=order.reason, mode=order.mode,
+            "FILLED",
+            order_id=order.order_id,
+            symbol=order.symbol,
+            direction=order.transaction_type,
+            quantity=order.quantity,
+            price=order.price,
+            stop_loss=order.stop_loss,
+            target=order.target,
+            confidence=order.confidence,
+            reason=order.reason,
+            mode=order.mode,
             status="FILLED",
             user_id=order.user_id,
         )
@@ -290,9 +396,13 @@ class OrderRouter:
                 self._log_state(session, order.order_id, "REJECTED")
                 session.commit()
                 log_trade(
-                    "REJECTED", order_id=order.order_id, symbol=order.symbol,
-                    direction=order.transaction_type, mode=order.mode,
-                    status="REJECTED", error=order.error,
+                    "REJECTED",
+                    order_id=order.order_id,
+                    symbol=order.symbol,
+                    direction=order.transaction_type,
+                    mode=order.mode,
+                    status="REJECTED",
+                    error=order.error,
                     user_id=order.user_id,
                 )
                 return self._order_to_result(order)
@@ -317,29 +427,43 @@ class OrderRouter:
                 try:
                     resp = connector.place_order(order_payload)
                     if resp and isinstance(resp, dict) and resp.get("status"):
-                        break # Success
+                        break  # Success
                     else:
-                        last_err = resp.get("message", "Unknown SmartAPI error") if resp else "Empty response"
-                        logger.warning(f"[LIVE] Order placement attempt {attempt} failed: {last_err}")
+                        last_err = (
+                            resp.get("message", "Unknown SmartAPI error")
+                            if resp
+                            else "Empty response"
+                        )
+                        logger.warning(
+                            f"[LIVE] Order placement attempt {attempt} failed: {last_err}"
+                        )
                 except Exception as e:
                     last_err = str(e)
-                    logger.warning(f"[LIVE] Order placement attempt {attempt} exception: {e}")
-                
-                if attempt < 3: # Backoff
-                    time.sleep(2 ** attempt)
+                    logger.warning(
+                        f"[LIVE] Order placement attempt {attempt} exception: {e}"
+                    )
+
+                if attempt < 3:  # Backoff
+                    time.sleep(2**attempt)
 
             if resp and isinstance(resp, dict) and resp.get("status"):
-                broker_order_id = str(resp.get("data", {}).get("orderid", ""))
                 order.status = "FILLED"
                 order.filled_quantity = order.quantity
                 self._log_state(session, order.order_id, "FILLED")
                 self._sync_position(session, order)
                 log_trade(
-                    "FILLED", order_id=order.order_id, symbol=order.symbol,
-                    direction=order.transaction_type, quantity=order.quantity,
-                    price=order.price, stop_loss=order.stop_loss, target=order.target,
-                    confidence=order.confidence, reason=order.reason,
-                    mode=order.mode, status="FILLED",
+                    "FILLED",
+                    order_id=order.order_id,
+                    symbol=order.symbol,
+                    direction=order.transaction_type,
+                    quantity=order.quantity,
+                    price=order.price,
+                    stop_loss=order.stop_loss,
+                    target=order.target,
+                    confidence=order.confidence,
+                    reason=order.reason,
+                    mode=order.mode,
+                    status="FILLED",
                     user_id=order.user_id,
                 )
             else:
@@ -347,9 +471,13 @@ class OrderRouter:
                 order.error = last_err or "Exhausted all retries"
                 self._log_state(session, order.order_id, "FAILED")
                 log_trade(
-                    "FAILED", order_id=order.order_id, symbol=order.symbol,
-                    direction=order.transaction_type, mode=order.mode,
-                    status="FAILED", error=order.error,
+                    "FAILED",
+                    order_id=order.order_id,
+                    symbol=order.symbol,
+                    direction=order.transaction_type,
+                    mode=order.mode,
+                    status="FAILED",
+                    error=order.error,
                     user_id=order.user_id,
                 )
 
@@ -363,16 +491,24 @@ class OrderRouter:
             self._log_state(session, order.order_id, "FAILED")
             session.commit()
             log_trade(
-                "FAILED", order_id=order.order_id, symbol=order.symbol,
-                direction=order.transaction_type, mode=order.mode,
-                status="FAILED", error=str(e),
+                "FAILED",
+                order_id=order.order_id,
+                symbol=order.symbol,
+                direction=order.transaction_type,
+                mode=order.mode,
+                status="FAILED",
+                error=str(e),
                 user_id=order.user_id,
             )
             return self._order_to_result(order)
 
     def _sync_position(self, session, order: OrderModel):
         """Update or insert an open position into the database."""
-        pos = session.query(PositionModel).filter_by(user_id=order.user_id, symbol=order.symbol).first()
+        pos = (
+            session.query(PositionModel)
+            .filter_by(user_id=order.user_id, symbol=order.symbol)
+            .first()
+        )
         if pos:
             # Simple averaging/override logic for safety. In strict systems, calculate WAEP.
             if pos.direction == order.transaction_type:
@@ -391,13 +527,16 @@ class OrderRouter:
                 quantity=order.quantity,
                 entry_price=order.price,
                 stop_loss=order.stop_loss,
-                target=order.target
+                target=order.target,
             )
             session.add(pos)
-        logger.info(f"[DB-SYNC] Synced position for {order.symbol} (Qty={pos.quantity})")
+        logger.info(
+            f"[DB-SYNC] Synced position for {order.symbol} (Qty={pos.quantity})"
+        )
 
-
-    def close_position(self, symbol: str, exit_price: float, user_id: Optional[int] = None) -> Optional[float]:
+    def close_position(
+        self, symbol: str, exit_price: float, user_id: Optional[int] = None
+    ) -> Optional[float]:
         """Close an open position from DB and calculate realized PnL."""
         if user_id is None:
             logger.warning("[ORDER] Missing user_id; cannot close %s", symbol)
@@ -406,7 +545,11 @@ class OrderRouter:
         db_gen = get_sync_db_session()
         session = next(db_gen)
         try:
-            pos = session.query(PositionModel).filter_by(user_id=user_id, symbol=symbol).first()
+            pos = (
+                session.query(PositionModel)
+                .filter_by(user_id=user_id, symbol=symbol)
+                .first()
+            )
             if not pos:
                 return None
 
@@ -418,14 +561,21 @@ class OrderRouter:
             # Remove position from active DB
             session.delete(pos)
             session.commit()
-            
-            logger.info(f"[ORDER] Closed {symbol}: Entry=₹{pos.entry_price:.2f} Exit=₹{exit_price:.2f} PnL=₹{pnl:,.2f}")
+
+            logger.info(
+                f"[ORDER] Closed {symbol}: Entry=₹{pos.entry_price:.2f} Exit=₹{exit_price:.2f} PnL=₹{pnl:,.2f}"
+            )
 
             # Audit log
             log_trade(
-                "EXIT", order_id=f"EXIT-{symbol}", symbol=symbol,
-                direction=pos.direction, quantity=pos.quantity,
-                price=exit_price, mode=self.mode, status="CLOSED",
+                "EXIT",
+                order_id=f"EXIT-{symbol}",
+                symbol=symbol,
+                direction=pos.direction,
+                quantity=pos.quantity,
+                price=exit_price,
+                mode=self.mode,
+                status="CLOSED",
                 pnl=round(pnl, 2),
                 user_id=pos.user_id,
             )
@@ -434,14 +584,17 @@ class OrderRouter:
         finally:
             session.close()
 
-
     def has_position(self, symbol: str, user_id: Optional[int] = None) -> bool:
         if user_id is None:
             return False
         db_gen = get_sync_db_session()
         session = next(db_gen)
         try:
-            pos = session.query(PositionModel).filter_by(user_id=user_id, symbol=symbol).first()
+            pos = (
+                session.query(PositionModel)
+                .filter_by(user_id=user_id, symbol=symbol)
+                .first()
+            )
             return pos is not None and pos.quantity > 0
         finally:
             session.close()
@@ -452,7 +605,11 @@ class OrderRouter:
         db_gen = get_sync_db_session()
         session = next(db_gen)
         try:
-            return session.query(PositionModel).filter_by(user_id=user_id, symbol=symbol).first()
+            return (
+                session.query(PositionModel)
+                .filter_by(user_id=user_id, symbol=symbol)
+                .first()
+            )
         finally:
             session.close()
 
@@ -462,15 +619,27 @@ class OrderRouter:
         db_gen = get_sync_db_session()
         session = next(db_gen)
         try:
-            orders = session.query(OrderModel).filter(
-                OrderModel.user_id == user_id
-            ).order_by(OrderModel.timestamp.desc()).limit(20).all()
+            orders = (
+                session.query(OrderModel)
+                .filter(OrderModel.user_id == user_id)
+                .order_by(OrderModel.timestamp.desc())
+                .limit(20)
+                .all()
+            )
             return [
                 {
-                    "order_id": o.order_id, "symbol": o.symbol, "direction": o.transaction_type,
-                    "quantity": o.quantity, "price": o.price, "status": o.status, "mode": o.mode,
-                    "timestamp": str(o.timestamp), "error": o.error, "reason": o.reason
-                } for o in orders
+                    "order_id": o.order_id,
+                    "symbol": o.symbol,
+                    "direction": o.transaction_type,
+                    "quantity": o.quantity,
+                    "price": o.price,
+                    "status": o.status,
+                    "mode": o.mode,
+                    "timestamp": str(o.timestamp),
+                    "error": o.error,
+                    "reason": o.reason,
+                }
+                for o in orders
             ]
         finally:
             session.close()
@@ -481,12 +650,20 @@ class OrderRouter:
         db_gen = get_sync_db_session()
         session = next(db_gen)
         try:
-            positions = session.query(PositionModel).filter(
-                PositionModel.user_id == user_id
-            ).all()
+            positions = (
+                session.query(PositionModel)
+                .filter(PositionModel.user_id == user_id)
+                .all()
+            )
             return [
-                {"symbol": p.symbol, "direction": p.direction, "entry": p.entry_price, "qty": p.quantity,
-                 "sl": p.stop_loss, "target": p.target}
+                {
+                    "symbol": p.symbol,
+                    "direction": p.direction,
+                    "entry": p.entry_price,
+                    "qty": p.quantity,
+                    "sl": p.stop_loss,
+                    "target": p.target,
+                }
                 for p in positions
             ]
         finally:
@@ -498,7 +675,12 @@ class OrderRouter:
         Returns a sync report for logging and monitoring.
         Only meaningful in LIVE mode.
         """
-        report = {"status": "skipped", "mismatches": [], "db_count": 0, "broker_count": 0}
+        report = {
+            "status": "skipped",
+            "mismatches": [],
+            "db_count": 0,
+            "broker_count": 0,
+        }
 
         if self.mode != "LIVE":
             return report
@@ -510,6 +692,7 @@ class OrderRouter:
 
         try:
             from app.connectors.smartapi_connector import SmartAPIConnector
+
             connector = SmartAPIConnector()
             connector._ensure_login()
 
@@ -531,16 +714,22 @@ class OrderRouter:
             for sym in db_syms - broker_syms:
                 mismatch = {"symbol": sym, "issue": "IN_DB_NOT_BROKER"}
                 report["mismatches"].append(mismatch)
-                logger.warning(f"[SYNC] Position mismatch: {sym} in DB but not at broker")
+                logger.warning(
+                    f"[SYNC] Position mismatch: {sym} in DB but not at broker"
+                )
 
             # Positions at broker but not in DB
             for sym in broker_syms - db_syms:
                 mismatch = {"symbol": sym, "issue": "IN_BROKER_NOT_DB"}
                 report["mismatches"].append(mismatch)
-                logger.warning(f"[SYNC] Position mismatch: {sym} at broker but not in DB")
+                logger.warning(
+                    f"[SYNC] Position mismatch: {sym} at broker but not in DB"
+                )
 
             if not report["mismatches"]:
-                logger.info(f"[SYNC] ✓ Positions in sync ({len(db_positions)} positions)")
+                logger.info(
+                    f"[SYNC] ✓ Positions in sync ({len(db_positions)} positions)"
+                )
 
         except Exception as e:
             logger.error(f"[SYNC] Broker sync failed: {e}")
@@ -551,8 +740,17 @@ class OrderRouter:
 
     def _order_to_result(self, o: OrderModel) -> OrderResult:
         return OrderResult(
-            order_id=o.order_id, symbol=o.symbol, direction=o.transaction_type,
-            quantity=o.quantity, price=o.price, stop_loss=o.stop_loss, target=o.target,
-            status=o.status, mode=o.mode, timestamp=str(o.timestamp), error=o.error,
-            reason=o.reason, confidence=o.confidence
+            order_id=o.order_id,
+            symbol=o.symbol,
+            direction=o.transaction_type,
+            quantity=o.quantity,
+            price=o.price,
+            stop_loss=o.stop_loss,
+            target=o.target,
+            status=o.status,
+            mode=o.mode,
+            timestamp=str(o.timestamp),
+            error=o.error,
+            reason=o.reason,
+            confidence=o.confidence,
         )

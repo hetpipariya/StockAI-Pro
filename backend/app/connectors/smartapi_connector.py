@@ -3,16 +3,17 @@ SmartAPI (AngelOne) connector — production-ready singleton.
 Login, historical data, WebSocket, orders.
 Credentials from .env; never hardcode.
 """
+
 from __future__ import annotations
 
-import os
-import time
-import threading
-import logging
 import asyncio
-from datetime import datetime, timedelta
-from typing import Callable, Optional, Any
+import logging
+import os
+import threading
+import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Any, Callable, Optional
 
 from dotenv import load_dotenv
 
@@ -119,11 +120,13 @@ class SmartAPIConnector:
 
     def _get_totp(self) -> str:
         import pyotp
+
         return pyotp.TOTP(self.totp_secret or "").now()
 
     def _sync_get_session(self):
         """Try to load cached session from Redis/memory (sync wrapper)."""
         from app.services.redis_client import get_session_token
+
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -137,6 +140,7 @@ class SmartAPIConnector:
 
     def _sync_store_session(self, token_data):
         from app.services.redis_client import store_session_token
+
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -151,6 +155,7 @@ class SmartAPIConnector:
 
     def _sync_clear_session(self):
         from app.services.redis_client import clear_session
+
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
@@ -177,7 +182,9 @@ class SmartAPIConnector:
         from SmartApi import SmartConnect
 
         if not all([self.api_key, self.client_id, self.client_pwd, self.totp_secret]):
-            logger.error("[SMARTAPI] Missing credentials in .env — check SMARTAPI_API_KEY, CLIENT_ID, CLIENT_PWD, TOTP_SECRET")
+            logger.error(
+                "[SMARTAPI] Missing credentials in .env — check SMARTAPI_API_KEY, CLIENT_ID, CLIENT_PWD, TOTP_SECRET"
+            )
             raise ValueError("Missing SmartAPI credentials")
 
         # Try cached session from Redis (unless forced re-login)
@@ -190,7 +197,11 @@ class SmartAPIConnector:
                 self._refresh_token = session.get("refreshToken")
                 self._login_time = time.monotonic()
                 logger.info("[SMARTAPI] Session restored from cache")
-                return {"status": True, "authToken": self._auth_token, "feedToken": self._feed_token}
+                return {
+                    "status": True,
+                    "authToken": self._auth_token,
+                    "feedToken": self._feed_token,
+                }
 
         # Fresh login with retry (3 attempts)
         self._obj = SmartConnect(self.api_key)
@@ -199,15 +210,19 @@ class SmartAPIConnector:
         for attempt in range(1, 4):
             try:
                 totp = self._get_totp()
-                logger.info(f"[SMARTAPI] Login attempt {attempt}/3 for client {self.client_id}")
+                logger.info(
+                    f"[SMARTAPI] Login attempt {attempt}/3 for client {self.client_id}"
+                )
                 data = self._obj.generateSession(self.client_id, self.client_pwd, totp)
 
                 if not data or not data.get("status"):
-                    msg = data.get("message", "Unknown error") if data else "No response"
+                    msg = (
+                        data.get("message", "Unknown error") if data else "No response"
+                    )
                     logger.warning(f"[SMARTAPI] Login attempt {attempt} failed: {msg}")
                     last_err = msg
                     if attempt < 3:
-                        time.sleep(2 ** attempt)  # 2s, 4s backoff
+                        time.sleep(2**attempt)  # 2s, 4s backoff
                     continue
 
                 d = data["data"]
@@ -219,19 +234,25 @@ class SmartAPIConnector:
                 self._login_time = time.monotonic()
 
                 # Cache session
-                self._sync_store_session({
+                self._sync_store_session(
+                    {
+                        "authToken": self._auth_token,
+                        "feedToken": self._feed_token,
+                        "refreshToken": self._refresh_token,
+                    }
+                )
+                logger.info("[SMARTAPI] ✓ Login successful — tokens acquired")
+                return {
+                    "status": True,
                     "authToken": self._auth_token,
                     "feedToken": self._feed_token,
-                    "refreshToken": self._refresh_token,
-                })
-                logger.info("[SMARTAPI] ✓ Login successful — tokens acquired")
-                return {"status": True, "authToken": self._auth_token, "feedToken": self._feed_token}
+                }
 
             except Exception as e:
                 last_err = str(e)
                 logger.warning(f"[SMARTAPI] Login attempt {attempt} exception: {e}")
                 if attempt < 3:
-                    time.sleep(2 ** attempt)
+                    time.sleep(2**attempt)
 
         raise RuntimeError(f"[SMARTAPI] Login failed after 3 attempts: {last_err}")
 
@@ -254,11 +275,13 @@ class SmartAPIConnector:
                     if hasattr(self._obj, "getfeedToken"):
                         self._feed_token = self._obj.getfeedToken()
                     self._login_time = time.monotonic()
-                    self._sync_store_session({
-                        "authToken": self._auth_token,
-                        "feedToken": self._feed_token,
-                        "refreshToken": self._refresh_token,
-                    })
+                    self._sync_store_session(
+                        {
+                            "authToken": self._auth_token,
+                            "feedToken": self._feed_token,
+                            "refreshToken": self._refresh_token,
+                        }
+                    )
                     logger.info("[SMARTAPI] Token refreshed")
                     return
             except Exception as e:
@@ -277,8 +300,14 @@ class SmartAPIConnector:
         msg = resp.get("message", "")
         error_code = resp.get("errorcode", "")
 
-        if error_code in ("AG8001", "AG8003") or "Invalid Token" in msg or "token" in msg.lower():
-            logger.warning(f"[SMARTAPI] {context}: token expired ({error_code}), refreshing session")
+        if (
+            error_code in ("AG8001", "AG8003")
+            or "Invalid Token" in msg
+            or "token" in msg.lower()
+        ):
+            logger.warning(
+                f"[SMARTAPI] {context}: token expired ({error_code}), refreshing session"
+            )
             self._refresh_session()
             return True
 
@@ -312,7 +341,13 @@ class SmartAPIConnector:
             to_date = datetime.now()
         if not from_date:
             # Use 7 days for intraday to guarantee hitting trading days (weekends/holidays)
-            if interval_api in ("ONE_MINUTE", "THREE_MINUTE", "FIVE_MINUTE", "FIFTEEN_MINUTE", "THIRTY_MINUTE"):
+            if interval_api in (
+                "ONE_MINUTE",
+                "THREE_MINUTE",
+                "FIVE_MINUTE",
+                "FIFTEEN_MINUTE",
+                "THIRTY_MINUTE",
+            ):
                 from_date = to_date - timedelta(days=7)
             else:
                 from_date = to_date - timedelta(days=30)
@@ -320,7 +355,13 @@ class SmartAPIConnector:
             from_date = to_date - timedelta(days=2)
 
         # Clamp date range to SmartAPI limits
-        if interval_api in ("ONE_MINUTE", "THREE_MINUTE", "FIVE_MINUTE", "FIFTEEN_MINUTE", "THIRTY_MINUTE"):
+        if interval_api in (
+            "ONE_MINUTE",
+            "THREE_MINUTE",
+            "FIVE_MINUTE",
+            "FIFTEEN_MINUTE",
+            "THIRTY_MINUTE",
+        ):
             max_days = 60
         elif interval_api == "ONE_HOUR":
             max_days = 730
@@ -342,7 +383,9 @@ class SmartAPIConnector:
             "todate": td,
         }
 
-        logger.info(f"[SMARTAPI] getCandleData: token={symbol_token}, interval={interval_api}, {fd} → {td}")
+        logger.info(
+            f"[SMARTAPI] getCandleData: token={symbol_token}, interval={interval_api}, {fd} → {td}"
+        )
 
         for attempt in range(3):
             try:
@@ -352,7 +395,9 @@ class SmartAPIConnector:
                 elapsed = (time.monotonic() - t0) * 1000
                 logger.info(f"[SMARTAPI] getCandleData took {elapsed:.0f}ms")
             except Exception as e:
-                logger.warning(f"[SMARTAPI] getCandleData error (attempt {attempt + 1}): {e}")
+                logger.warning(
+                    f"[SMARTAPI] getCandleData error (attempt {attempt + 1}): {e}"
+                )
                 if attempt < 2:
                     self._refresh_session()
                     time.sleep(1)
@@ -360,7 +405,9 @@ class SmartAPIConnector:
                 return []
 
             if not resp:
-                logger.warning(f"[SMARTAPI] getCandleData returned None or empty (attempt {attempt + 1})")
+                logger.warning(
+                    f"[SMARTAPI] getCandleData returned None or empty (attempt {attempt + 1})"
+                )
                 if attempt < 2:
                     time.sleep(1)
                     continue
@@ -370,7 +417,9 @@ class SmartAPIConnector:
                 if self._handle_api_error(resp, "getCandleData") and attempt < 2:
                     continue
                 if not resp.get("status"):
-                    logger.error(f"[SMARTAPI] getCandleData error: {resp.get('message', 'Unknown')}")
+                    logger.error(
+                        f"[SMARTAPI] getCandleData error: {resp.get('message', 'Unknown')}"
+                    )
                     if attempt < 2:
                         time.sleep(1)
                         continue
@@ -383,10 +432,14 @@ class SmartAPIConnector:
                 return []
 
             if data and len(data) > 0:
-                logger.info(f"[SMARTAPI] Got {len(data)} candles (Requested Limit: {limit})")
+                logger.info(
+                    f"[SMARTAPI] Got {len(data)} candles (Requested Limit: {limit})"
+                )
                 return data[-limit:]
             else:
-                logger.warning(f"[SMARTAPI] Empty candle data returned from valid response (attempt {attempt + 1})")
+                logger.warning(
+                    f"[SMARTAPI] Empty candle data returned from valid response (attempt {attempt + 1})"
+                )
                 if attempt < 2:
                     time.sleep(1.5)
                     continue
@@ -396,7 +449,9 @@ class SmartAPIConnector:
 
     # ─── LTP Snapshot ───
 
-    def get_ltp(self, symbol_token: str, exchange: str = "NSE", tradingsymbol: str = "") -> Optional[dict]:
+    def get_ltp(
+        self, symbol_token: str, exchange: str = "NSE", tradingsymbol: str = ""
+    ) -> Optional[dict]:
         """Get latest price snapshot. tradingsymbol e.g. RELIANCE-EQ."""
         self._ensure_login()
         ts = tradingsymbol or f"{symbol_token}-EQ"
@@ -412,7 +467,13 @@ class SmartAPIConnector:
                         resp = self._obj.ltpData(exchange, ts, token_str)
                     except TypeError:
                         # Old SDK signature: ltpData({"exchange": ..., ...})
-                        resp = self._obj.ltpData({"exchange": exchange, "tradingsymbol": ts, "symboltoken": token_str})
+                        resp = self._obj.ltpData(
+                            {
+                                "exchange": exchange,
+                                "tradingsymbol": ts,
+                                "symboltoken": token_str,
+                            }
+                        )
                     if resp and isinstance(resp, dict):
                         if resp.get("status") and resp.get("data"):
                             logger.info("[SMARTAPI] LTP via ltpData OK")
@@ -420,7 +481,9 @@ class SmartAPIConnector:
                         if attempt == 0 and self._handle_api_error(resp, "ltpData"):
                             continue
                 except Exception as e:
-                    logger.warning(f"[SMARTAPI] ltpData failed (attempt {attempt+1}): {e}")
+                    logger.warning(
+                        f"[SMARTAPI] ltpData failed (attempt {attempt + 1}): {e}"
+                    )
                     if attempt == 0:
                         self._refresh_session()
                 break  # Don't retry if we got a non-retryable response
@@ -435,7 +498,9 @@ class SmartAPIConnector:
                     try:
                         resp = self._obj.getMarketData("LTP", exchange_tokens)
                     except TypeError:
-                        resp = self._obj.getMarketData({"mode": "LTP", "exchangeTokens": exchange_tokens})
+                        resp = self._obj.getMarketData(
+                            {"mode": "LTP", "exchangeTokens": exchange_tokens}
+                        )
                     if resp and isinstance(resp, dict):
                         if resp.get("status") and resp.get("data"):
                             logger.info("[SMARTAPI] LTP via getMarketData OK")
@@ -448,16 +513,25 @@ class SmartAPIConnector:
                                     "open": float(item.get("open", 0)),
                                     "high": float(item.get("high", 0)),
                                     "low": float(item.get("low", 0)),
-                                    "close": float(item.get("close", item.get("ltp", 0))),
-                                    "volume": int(item.get("volume", item.get("tradeVolume", 0)) or 0),
+                                    "close": float(
+                                        item.get("close", item.get("ltp", 0))
+                                    ),
+                                    "volume": int(
+                                        item.get("volume", item.get("tradeVolume", 0))
+                                        or 0
+                                    ),
                                 }
                             # If data is directly the LTP dict (old format)
                             if "ltp" in resp["data"]:
                                 return resp["data"]
-                        if attempt == 0 and self._handle_api_error(resp, "getMarketData"):
+                        if attempt == 0 and self._handle_api_error(
+                            resp, "getMarketData"
+                        ):
                             continue
                 except Exception as e:
-                    logger.warning(f"[SMARTAPI] getMarketData failed (attempt {attempt+1}): {e}")
+                    logger.warning(
+                        f"[SMARTAPI] getMarketData failed (attempt {attempt + 1}): {e}"
+                    )
                     if attempt == 0:
                         self._refresh_session()
                 break
@@ -472,8 +546,10 @@ class SmartAPIConnector:
                 last = rows[-1]
                 if isinstance(last, (list, tuple)) and len(last) >= 5:
                     return {
-                        "ltp": float(last[4]), "open": float(last[1]),
-                        "high": float(last[2]), "low": float(last[3]),
+                        "ltp": float(last[4]),
+                        "open": float(last[1]),
+                        "high": float(last[2]),
+                        "low": float(last[3]),
                         "close": float(last[4]),
                         "volume": int(last[5]) if len(last) > 5 else 0,
                     }
@@ -516,13 +592,13 @@ class SmartAPIConnector:
 
         def _create_and_run():
             """WebSocket connection loop with full error isolation.
-            
+
             This runs in a daemon thread and must NEVER crash the main process.
             All exceptions are caught and logged, with automatic reconnection.
             """
             consecutive_errors = 0
             max_consecutive_errors = 5
-            
+
             while self._ws_should_reconnect:
                 try:
                     # Ensure we have valid credentials before connecting
@@ -534,7 +610,7 @@ class SmartAPIConnector:
                             logger.error(f"[WS] Login failed: {login_err}")
                             time.sleep(5)
                             continue
-                    
+
                     sws = SmartWebSocketV2(
                         self._auth_token,
                         self.api_key,
@@ -552,7 +628,9 @@ class SmartAPIConnector:
                     def _on_open(wsapp):
                         """Handle WebSocket open event."""
                         try:
-                            logger.info(f"[WS] ✓ Connected — subscribing {len(token_list)} groups")
+                            logger.info(
+                                f"[WS] ✓ Connected — subscribing {len(token_list)} groups"
+                            )
                             self._ws_reconnect_delay = 1.0  # Reset backoff
                             sws.subscribe(correlation_id, mode, token_list)
                         except Exception as e:
@@ -560,14 +638,16 @@ class SmartAPIConnector:
 
                     def _on_error(wsapp, *args):
                         """Handle WebSocket error event.
-                        
+
                         Using *args ensures compatibility with all SmartAPI versions.
                         """
                         try:
                             error = args[0] if args else "Unknown error"
                             logger.error(f"[WS] Error: {error}")
                             if "AG800" in str(error) or "Invalid Token" in str(error):
-                                logger.error("[WS] Force clearing session due to Token Error")
+                                logger.error(
+                                    "[WS] Force clearing session due to Token Error"
+                                )
                                 self._sync_clear_session()
                                 try:
                                     self.login(force=True)
@@ -578,7 +658,7 @@ class SmartAPIConnector:
 
                     def _on_close(wsapp, *args):
                         """Handle WebSocket close event.
-                        
+
                         SmartAPI SmartWebSocketV2 may call this with varying signatures.
                         Using *args ensures compatibility with all versions.
                         """
@@ -586,16 +666,20 @@ class SmartAPIConnector:
                             # Extract close_status_code and close_msg from args if present
                             close_status_code = args[0] if len(args) > 0 else None
                             close_msg = args[1] if len(args) > 1 else None
-                            
+
                             logger.info(
                                 "[WS] Connection closed: code=%s message=%s",
                                 close_status_code,
                                 close_msg,
                             )
                             if self._ws_should_reconnect:
-                                logger.info(f"[WS] Reconnecting in {self._ws_reconnect_delay:.1f}s")
+                                logger.info(
+                                    f"[WS] Reconnecting in {self._ws_reconnect_delay:.1f}s"
+                                )
                                 time.sleep(self._ws_reconnect_delay)
-                                self._ws_reconnect_delay = min(self._ws_reconnect_delay * 1.5, 30.0)
+                                self._ws_reconnect_delay = min(
+                                    self._ws_reconnect_delay * 1.5, 30.0
+                                )
                                 # Refresh session before reconnect
                                 try:
                                     self._refresh_session()
@@ -613,18 +697,26 @@ class SmartAPIConnector:
 
                 except Exception as e:
                     consecutive_errors += 1
-                    logger.error(f"[WS] Connection failed (attempt {consecutive_errors}/{max_consecutive_errors}): {e}")
-                    
+                    logger.error(
+                        f"[WS] Connection failed (attempt {consecutive_errors}/{max_consecutive_errors}): {e}"
+                    )
+
                     # Circuit breaker: if too many consecutive errors, back off significantly
                     if consecutive_errors >= max_consecutive_errors:
-                        logger.error(f"[WS] Too many consecutive errors, backing off for 60s")
+                        logger.error(
+                            "[WS] Too many consecutive errors, backing off for 60s"
+                        )
                         time.sleep(60)
                         consecutive_errors = 0
                     elif self._ws_should_reconnect:
                         time.sleep(self._ws_reconnect_delay)
-                        self._ws_reconnect_delay = min(self._ws_reconnect_delay * 1.5, 30.0)
+                        self._ws_reconnect_delay = min(
+                            self._ws_reconnect_delay * 1.5, 30.0
+                        )
 
-        self._ws_thread = threading.Thread(target=_create_and_run, daemon=True, name="SmartAPI-WS")
+        self._ws_thread = threading.Thread(
+            target=_create_and_run, daemon=True, name="SmartAPI-WS"
+        )
         self._ws_thread.start()
         logger.info("[WS] WebSocket thread started")
 
@@ -648,7 +740,7 @@ class SmartAPIConnector:
         try:
             resp = self._obj.placeOrderFullResponse(order_payload)
             return resp
-        except Exception as e:
+        except Exception:
             self._refresh_session()
             _rate_limit()
             resp = self._obj.placeOrderFullResponse(order_payload)

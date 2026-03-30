@@ -3,11 +3,12 @@ Risk Manager — enforces position sizing, daily loss limits, and trade frequenc
 Mirrors the exact backtest math: 1% equity risk per trade, ATR-based stops.
 Persists daily state to DB for crash recovery.
 """
+
 from __future__ import annotations
 
 import logging
-from datetime import datetime, date
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import date
 from typing import Optional
 
 from app import config
@@ -18,14 +19,15 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TradeRisk:
     """Calculated risk parameters for a single trade."""
+
     symbol: str
-    direction: str          # "BUY" or "SELL"
+    direction: str  # "BUY" or "SELL"
     entry_price: float
     stop_price: float
     target_price: float
-    position_size: int      # Number of shares
-    risk_amount: float      # Capital at risk (₹)
-    reward_amount: float    # Potential reward (₹)
+    position_size: int  # Number of shares
+    risk_amount: float  # Capital at risk (₹)
+    reward_amount: float  # Potential reward (₹)
     atr: float
 
 
@@ -54,15 +56,39 @@ class RiskManager:
         min_account_balance: float = None,
     ):
         # Pull from config if not explicitly passed
-        self.starting_capital = starting_capital if starting_capital is not None else config.STARTING_CAPITAL
+        self.starting_capital = (
+            starting_capital
+            if starting_capital is not None
+            else config.STARTING_CAPITAL
+        )
         self.capital = self.starting_capital
-        self.risk_per_trade = risk_per_trade_pct if risk_per_trade_pct is not None else config.MAX_RISK_PER_TRADE_PCT
+        self.risk_per_trade = (
+            risk_per_trade_pct
+            if risk_per_trade_pct is not None
+            else config.MAX_RISK_PER_TRADE_PCT
+        )
         self.rr_ratio = reward_risk_ratio
         self.atr_mult = atr_stop_multiplier
-        self.daily_loss_limit = daily_loss_limit_pct if daily_loss_limit_pct is not None else config.DAILY_LOSS_LIMIT_PCT
-        self.max_positions = max_concurrent_positions if max_concurrent_positions is not None else config.MAX_CONCURRENT_POSITIONS
-        self.max_daily_trades = max_trades_per_day if max_trades_per_day is not None else config.MAX_TRADES_PER_DAY
-        self.min_balance = min_account_balance if min_account_balance is not None else config.MIN_ACCOUNT_BALANCE
+        self.daily_loss_limit = (
+            daily_loss_limit_pct
+            if daily_loss_limit_pct is not None
+            else config.DAILY_LOSS_LIMIT_PCT
+        )
+        self.max_positions = (
+            max_concurrent_positions
+            if max_concurrent_positions is not None
+            else config.MAX_CONCURRENT_POSITIONS
+        )
+        self.max_daily_trades = (
+            max_trades_per_day
+            if max_trades_per_day is not None
+            else config.MAX_TRADES_PER_DAY
+        )
+        self.min_balance = (
+            min_account_balance
+            if min_account_balance is not None
+            else config.MIN_ACCOUNT_BALANCE
+        )
 
         # Daily tracking
         self._today: Optional[date] = None
@@ -70,7 +96,7 @@ class RiskManager:
         self._trades_today: int = 0
         self._open_positions: int = 0
         self._halted: bool = False
-        
+
         self._check_new_day()
 
     def _check_new_day(self):
@@ -113,19 +139,29 @@ class RiskManager:
         # Minimum account balance floor
         if self.capital <= self.min_balance:
             self._halted = True
-            logger.warning(f"[RISK] HALTED — Capital ₹{self.capital:,.2f} below minimum ₹{self.min_balance:,.2f}")
-            return False, f"HALTED: Capital below minimum balance (₹{self.min_balance:,.0f})"
+            logger.warning(
+                f"[RISK] HALTED — Capital ₹{self.capital:,.2f} below minimum ₹{self.min_balance:,.2f}"
+            )
+            return (
+                False,
+                f"HALTED: Capital below minimum balance (₹{self.min_balance:,.0f})",
+            )
 
         # Check daily loss limit
         daily_pnl = self.daily_pnl_pct()
         if daily_pnl <= -self.daily_loss_limit:
             self._halted = True
-            logger.warning(f"[RISK] HALTED — Daily loss {daily_pnl*100:.2f}% exceeds limit of -{self.daily_loss_limit*100:.1f}%")
-            return False, f"HALTED: Daily loss {daily_pnl*100:.2f}% exceeds limit"
+            logger.warning(
+                f"[RISK] HALTED — Daily loss {daily_pnl * 100:.2f}% exceeds limit "
+                f"of -{self.daily_loss_limit * 100:.1f}%"
+            )
+            return False, f"HALTED: Daily loss {daily_pnl * 100:.2f}% exceeds limit"
 
         return True, "OK"
 
-    def calculate_trade(self, symbol: str, direction: str, entry_price: float, atr: float) -> Optional[TradeRisk]:
+    def calculate_trade(
+        self, symbol: str, direction: str, entry_price: float, atr: float
+    ) -> Optional[TradeRisk]:
         """
         Calculate position size and risk parameters for a trade.
         Returns None if the trade violates risk rules.
@@ -136,7 +172,9 @@ class RiskManager:
             return None
 
         if atr <= 0 or entry_price <= 0:
-            logger.warning(f"[RISK] Invalid ATR ({atr}) or entry ({entry_price}) for {symbol}")
+            logger.warning(
+                f"[RISK] Invalid ATR ({atr}) or entry ({entry_price}) for {symbol}"
+            )
             return None
 
         stop_dist = self.atr_mult * atr
@@ -154,7 +192,9 @@ class RiskManager:
         shares = int(risk_amount / stop_dist)
 
         if shares <= 0:
-            logger.info(f"[RISK] Position size too small for {symbol} (ATR={atr:.2f}, stop_dist={stop_dist:.2f})")
+            logger.info(
+                f"[RISK] Position size too small for {symbol} (ATR={atr:.2f}, stop_dist={stop_dist:.2f})"
+            )
             return None
 
         # Ensure we don't exceed capital
@@ -182,26 +222,35 @@ class RiskManager:
         """Called when a trade is actually placed."""
         self._trades_today += 1
         self._open_positions += 1
-        logger.info(f"[RISK] Trade opened — {self._trades_today} today, {self._open_positions} open")
+        logger.info(
+            f"[RISK] Trade opened — {self._trades_today} today, {self._open_positions} open"
+        )
         self._persist_state()
 
     def on_trade_closed(self, pnl: float):
         """Called when a trade is exited. pnl = realized profit/loss in ₹."""
         self._open_positions = max(0, self._open_positions - 1)
         self.capital += pnl
-        logger.info(f"[RISK] Trade closed — PnL=₹{pnl:,.2f}, Capital=₹{self.capital:,.2f}, Daily={self.daily_pnl_pct()*100:.2f}%")
+        logger.info(
+            f"[RISK] Trade closed — PnL=₹{
+                pnl:,.2f}, Capital=₹{
+                self.capital:,.2f}, Daily={
+                self.daily_pnl_pct() * 100:.2f}%")
 
         # Check daily limit after close
         if self.daily_pnl_pct() <= -self.daily_loss_limit:
             self._halted = True
-            logger.warning("[RISK] HALTED after trade close — daily loss limit breached")
+            logger.warning(
+                "[RISK] HALTED after trade close — daily loss limit breached"
+            )
 
         self._persist_state()
 
     def _persist_state(self):
         """Write current risk state to DailyRiskState table for crash recovery."""
         try:
-            from app.services.db import get_sync_db_session, DailyRiskState
+            from app.services.db import DailyRiskState, get_sync_db_session
+
             db_gen = get_sync_db_session()
             session = next(db_gen)
             if session is None:
@@ -232,7 +281,9 @@ class RiskManager:
         """Restore risk state from DailyRiskState + open positions in DB.
         Call this once on startup after DB init."""
         try:
-            from app.services.db import get_sync_db_session, DailyRiskState, PositionModel, OrderModel
+            from app.services.db import (DailyRiskState, PositionModel,
+                                         get_sync_db_session)
+
             db_gen = get_sync_db_session()
             session = next(db_gen)
             if session is None:
@@ -241,7 +292,9 @@ class RiskManager:
                 today_str = date.today().isoformat()
 
                 # 1. Restore daily risk state
-                risk_state = session.query(DailyRiskState).filter_by(date=today_str).first()
+                risk_state = (
+                    session.query(DailyRiskState).filter_by(date=today_str).first()
+                )
                 if risk_state:
                     self._daily_start_capital = risk_state.starting_capital
                     self.capital = risk_state.current_capital

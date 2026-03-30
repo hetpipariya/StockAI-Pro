@@ -7,6 +7,7 @@ Any change to feature computation happens HERE and only here.
 
 Feature set version: v1.1 (19 columns)
 """
+
 from __future__ import annotations
 
 import logging
@@ -84,7 +85,7 @@ def compute_features(ohlcv_df: pd.DataFrame) -> pd.DataFrame:
 
     c = df["close"]
     h = df["high"]
-    l = df["low"]
+    low_series = df["low"]
     v = df["volume"]
 
     # ── Exponential Moving Averages ─────────────────────────────────────────
@@ -108,14 +109,14 @@ def compute_features(ohlcv_df: pd.DataFrame) -> pd.DataFrame:
     df["macd_hist"] = df["macd"] - df["macd_signal"]
 
     # ── VWAP ────────────────────────────────────────────────────────────────
-    typical_price = (h + l + c) / 3
+    typical_price = (h + low_series + c) / 3
     cum_vol = v.cumsum()
     df["vwap"] = (typical_price * v).cumsum() / (cum_vol + 1e-9)
 
     # ── ATR 14 ───────────────────────────────────────────────────────────────
-    tr1 = h - l
+    tr1 = h - low_series
     tr2 = (h - c.shift(1)).abs()
-    tr3 = (l - c.shift(1)).abs()
+    tr3 = (low_series - c.shift(1)).abs()
     df["true_range"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df["atr_14"] = df["true_range"].rolling(14).mean()
 
@@ -126,7 +127,7 @@ def compute_features(ohlcv_df: pd.DataFrame) -> pd.DataFrame:
     # ── Momentum & Rolling Statistics ───────────────────────────────────────
     df["price_change"] = c - df["open"]
     safe_c = c.clip(lower=1e-9)
-    df["volatility"] = (h - l) / safe_c
+    df["volatility"] = (h - low_series) / safe_c
     df["momentum"] = c - c.shift(3)
     df["rolling_mean_5"] = c.rolling(5, min_periods=1).mean()
     df["rolling_std_5"] = c.rolling(5, min_periods=2).std()
@@ -178,7 +179,9 @@ def validate_features(
     if not missing and not extra:
         for i, (a, b) in enumerate(zip(feature_names, expected)):
             if a != b:
-                parts.append(f"  Order mismatch at index {i}: got '{a}', expected '{b}'")
+                parts.append(
+                    f"  Order mismatch at index {i}: got '{a}', expected '{b}'"
+                )
                 break
 
     msg = "\n".join(parts)
