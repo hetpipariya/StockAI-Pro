@@ -76,7 +76,9 @@ CACHE_TTL_CANDLES_SECONDS = int(os.getenv("CACHE_TTL_CANDLES_SECONDS", "30"))
 CACHE_TTL_PREDICTION_SECONDS = int(os.getenv("CACHE_TTL_PREDICTION_SECONDS", "30"))
 CACHE_TTL_BUNDLE_SECONDS = int(os.getenv("CACHE_TTL_BUNDLE_SECONDS", "30"))
 
-ENABLE_WS = os.getenv("ENABLE_WS", "false").lower() == "true"
+# WebSocket is enabled by default for real-time data
+# Set ENABLE_WS=false only if you want to disable real-time streaming
+ENABLE_WS = os.getenv("ENABLE_WS", "true").lower() == "true"
 
 _SQLITE_FALLBACK = "sqlite+aiosqlite:///./stockai.db"
 

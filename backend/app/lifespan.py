@@ -117,19 +117,33 @@ async def lifespan(app: FastAPI):
 
     connector = None
     if ENABLE_WS:
-        connector = SmartAPIConnector()
-        set_ws_connector(connector)
+        logger.info("[STARTUP] Initializing SmartAPI connector...")
         try:
-            await asyncio.to_thread(connector.login)
-            logger.info("[STARTUP] SmartAPI logged in")
+            connector = SmartAPIConnector()
+            set_ws_connector(connector)
         except Exception as exc:
-            logger.warning("[STARTUP] SmartAPI login failed (mock mode possible): %s", exc)
+            logger.error("[STARTUP] SmartAPI connector initialization failed: %s", exc)
+            connector = None
+        
+        if connector:
+            try:
+                await asyncio.to_thread(connector.login)
+                logger.info("[STARTUP] SmartAPI logged in successfully")
+            except Exception as exc:
+                logger.warning("[STARTUP] SmartAPI login failed (mock mode possible): %s", exc)
 
-        logger.info("[STARTUP] Starting SmartAPI websocket...")
-        try:
-            start_smartapi_ws(DEFAULT_WATCHLIST)
-        except Exception as exc:
-            logger.warning("[STARTUP] SmartAPI websocket start failed: %s", exc)
+            logger.info("[STARTUP] Starting SmartAPI websocket...")
+            try:
+                start_smartapi_ws(DEFAULT_WATCHLIST)
+                logger.info("[STARTUP] SmartAPI WebSocket startup initiated")
+            except Exception as exc:
+                # WebSocket failure should NOT crash the server
+                logger.error(
+                    "[STARTUP] SmartAPI websocket start failed (non-fatal): %s. "
+                    "Server will continue without real-time data. "
+                    "WebSocket will auto-reconnect when available.",
+                    exc
+                )
     else:
         logger.warning("[STARTUP] ENABLE_WS=false — SmartAPI WebSocket startup skipped")
 
@@ -166,15 +180,23 @@ async def lifespan(app: FastAPI):
     logger.info("[SHUTDOWN] Stopping services...")
     try:
         stop_scheduler()
+        logger.info("[SHUTDOWN] Scheduler stopped")
     except Exception as exc:
         logger.warning("[SHUTDOWN] Scheduler stop failed: %s", exc)
 
     ws_connector = get_ws_connector()
     if ws_connector:
+        logger.info("[SHUTDOWN] Stopping WebSocket...")
         try:
             ws_connector.stop_ws()
+            logger.info("[SHUTDOWN] WebSocket stopped")
+        except Exception as exc:
+            logger.warning("[SHUTDOWN] WebSocket stop failed: %s", exc)
+        
+        try:
             ws_connector.terminate_session()
-        except Exception:
-            pass
+            logger.info("[SHUTDOWN] SmartAPI session terminated")
+        except Exception as exc:
+            logger.warning("[SHUTDOWN] Session termination failed: %s", exc)
 
     logger.info("[SHUTDOWN] Clean shutdown complete")

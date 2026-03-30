@@ -515,8 +515,26 @@ class SmartAPIConnector:
         self._ws_reconnect_delay = 1.0
 
         def _create_and_run():
+            """WebSocket connection loop with full error isolation.
+            
+            This runs in a daemon thread and must NEVER crash the main process.
+            All exceptions are caught and logged, with automatic reconnection.
+            """
+            consecutive_errors = 0
+            max_consecutive_errors = 5
+            
             while self._ws_should_reconnect:
                 try:
+                    # Ensure we have valid credentials before connecting
+                    if not self._auth_token or not self._feed_token:
+                        logger.warning("[WS] Missing tokens, attempting login...")
+                        try:
+                            self.login(force=True)
+                        except Exception as login_err:
+                            logger.error(f"[WS] Login failed: {login_err}")
+                            time.sleep(5)
+                            continue
+                    
                     sws = SmartWebSocketV2(
                         self._auth_token,
                         self.api_key,
@@ -525,12 +543,14 @@ class SmartAPIConnector:
                     )
 
                     def _on_data(wsapp, message):
+                        """Handle incoming tick data with full error isolation."""
                         try:
                             on_message(message)
                         except Exception as e:
                             logger.error(f"[WS] Tick handler error: {e}")
 
                     def _on_open(wsapp):
+                        """Handle WebSocket open event."""
                         try:
                             logger.info(f"[WS] ✓ Connected — subscribing {len(token_list)} groups")
                             self._ws_reconnect_delay = 1.0  # Reset backoff
@@ -538,8 +558,13 @@ class SmartAPIConnector:
                         except Exception as e:
                             logger.error(f"[WS] on_open handler failed: {e}")
 
-                    def _on_error(wsapp, error):
+                    def _on_error(wsapp, *args):
+                        """Handle WebSocket error event.
+                        
+                        Using *args ensures compatibility with all SmartAPI versions.
+                        """
                         try:
+                            error = args[0] if args else "Unknown error"
                             logger.error(f"[WS] Error: {error}")
                             if "AG800" in str(error) or "Invalid Token" in str(error):
                                 logger.error("[WS] Force clearing session due to Token Error")
@@ -551,8 +576,17 @@ class SmartAPIConnector:
                         except Exception as e:
                             logger.error(f"[WS] on_error handler failed: {e}")
 
-                    def _on_close(wsapp, close_status_code=None, close_msg=None):
+                    def _on_close(wsapp, *args):
+                        """Handle WebSocket close event.
+                        
+                        SmartAPI SmartWebSocketV2 may call this with varying signatures.
+                        Using *args ensures compatibility with all versions.
+                        """
                         try:
+                            # Extract close_status_code and close_msg from args if present
+                            close_status_code = args[0] if len(args) > 0 else None
+                            close_msg = args[1] if len(args) > 1 else None
+                            
                             logger.info(
                                 "[WS] Connection closed: code=%s message=%s",
                                 close_status_code,
@@ -578,8 +612,15 @@ class SmartAPIConnector:
                     sws.connect()  # Blocks until closed
 
                 except Exception as e:
-                    logger.error(f"[WS] Connection failed: {e}")
-                    if self._ws_should_reconnect:
+                    consecutive_errors += 1
+                    logger.error(f"[WS] Connection failed (attempt {consecutive_errors}/{max_consecutive_errors}): {e}")
+                    
+                    # Circuit breaker: if too many consecutive errors, back off significantly
+                    if consecutive_errors >= max_consecutive_errors:
+                        logger.error(f"[WS] Too many consecutive errors, backing off for 60s")
+                        time.sleep(60)
+                        consecutive_errors = 0
+                    elif self._ws_should_reconnect:
                         time.sleep(self._ws_reconnect_delay)
                         self._ws_reconnect_delay = min(self._ws_reconnect_delay * 1.5, 30.0)
 

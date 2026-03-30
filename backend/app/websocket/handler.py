@@ -54,9 +54,10 @@ _ws_reconnect_attempt = 0
 _ws_reconnect_task = None
 
 _WS_BASE_BACKOFF_SECONDS = 1
-_WS_MAX_BACKOFF_SECONDS = 30
-_WS_MAX_RETRY_ATTEMPTS = 3  # Limit retries to prevent 429 rate limit errors
+_WS_MAX_BACKOFF_SECONDS = 60
+_WS_MAX_RETRY_ATTEMPTS = 10  # Increased for production resilience
 _WATCHLIST_PRICE_MAX = 10000.0
+_WS_CIRCUIT_BREAKER_RESET_TIME = 300  # 5 minutes before resetting circuit breaker
 
 
 def _seed_price_for_symbol(symbol: str) -> float:
@@ -303,23 +304,47 @@ def start_smartapi_ws(symbols_list: list[str]):
 
 
 async def _retry_ws_connect(symbols_list: list[str]):
+    """Retry WebSocket connection with exponential backoff and circuit breaker.
+    
+    Uses exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s (max)
+    Circuit breaker: After max retries, wait 5 minutes before trying again.
+    """
     global _ws_reconnect_attempt
 
     while not _smartapi_ws_started:
         _ws_reconnect_attempt += 1
         
-        # Limit max retries to prevent 429 rate limit errors
+        # Circuit breaker: if max retries reached, wait longer before resetting
         if _ws_reconnect_attempt > _WS_MAX_RETRY_ATTEMPTS:
-            logger.error("[WS] Max retry attempts (%d) reached. Stopping reconnect.", _WS_MAX_RETRY_ATTEMPTS)
+            logger.error(
+                "[WS] Max retry attempts (%d) reached. Circuit breaker activated. "
+                "Waiting %ds before resetting.",
+                _WS_MAX_RETRY_ATTEMPTS,
+                _WS_CIRCUIT_BREAKER_RESET_TIME
+            )
             _set_ws_state("FAILED")
-            return
+            await asyncio.sleep(_WS_CIRCUIT_BREAKER_RESET_TIME)
+            _ws_reconnect_attempt = 0  # Reset counter after waiting
+            logger.info("[WS] Circuit breaker reset. Resuming reconnection attempts.")
+            continue
         
+        # Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s
         wait_s = min(_WS_BASE_BACKOFF_SECONDS * (2 ** (_ws_reconnect_attempt - 1)), _WS_MAX_BACKOFF_SECONDS)
-        logger.warning("[WS] Reconnect attempt %d/%d in %.1fs", _ws_reconnect_attempt, _WS_MAX_RETRY_ATTEMPTS, wait_s)
+        logger.warning(
+            "[WS] Reconnect attempt %d/%d in %.1fs (exponential backoff)",
+            _ws_reconnect_attempt,
+            _WS_MAX_RETRY_ATTEMPTS,
+            wait_s
+        )
         await asyncio.sleep(wait_s)
-        start_smartapi_ws(symbols_list)
-        if _smartapi_ws_started:
-            return
+        
+        try:
+            start_smartapi_ws(symbols_list)
+            if _smartapi_ws_started:
+                logger.info("[WS] Reconnection successful on attempt %d", _ws_reconnect_attempt)
+                return
+        except Exception as exc:
+            logger.error("[WS] Reconnection attempt %d failed: %s", _ws_reconnect_attempt, exc)
 
 
 def _schedule_reconnect(symbols_list: list[str]) -> None:

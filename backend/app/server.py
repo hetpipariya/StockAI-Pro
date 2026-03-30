@@ -126,6 +126,37 @@ async def health():
     }
 
 
+@app.get("/ping")
+async def ping():
+    """Ultra-lightweight health check for Cloudflare and load balancers.
+    
+    This endpoint returns immediately with minimal overhead.
+    Use this for keep-alive and timeout detection.
+    """
+    return {"status": "pong"}
+
+
+@app.get("/api/health/detailed")
+async def detailed_health():
+    """Detailed health check with component status."""
+    db_ok = await check_db_connection(retries=1, delay=0.0)
+    ws_state = get_ws_state()
+    ws_streaming = is_ws_streaming()
+    last_tick_age = get_last_tick_age_seconds()
+    
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "database": "connected" if db_ok else "unreachable",
+        "websocket": {
+            "state": ws_state,
+            "streaming": ws_streaming,
+            "last_tick_age_seconds": last_tick_age if last_tick_age != float("inf") else None,
+        },
+        "clients": get_client_count(),
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
 @app.get("/predict/{symbol}")
 async def predict_alias(symbol: str):
     """Compatibility prediction endpoint: returns signal payload with fallback fields."""
