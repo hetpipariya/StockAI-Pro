@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   Activity,
   Bell,
@@ -16,10 +16,12 @@ import {
 import CandlestickChart from '../components/dashboard/CandlestickChart';
 import SmartSearchBar from '../components/dashboard/SmartSearchBar';
 import { buildLiveWebSocketUrl } from '../config/api';
-import { fetchMarketSnapshot, fetchMarketSymbols, fetchStockBundle } from '../lib/api';
+import MobileLayoutEnhanced from '../layouts/MobileLayoutEnhanced';
+import { fetchMarketSymbols, getBundle } from '../lib/api';
 
 const DEFAULT_WATCHLIST_SYMBOLS = ['RELIANCE', 'TCS', 'HDFCBANK', 'INFY', 'ICICIBANK', 'SBIN'];
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '1d'];
+const MOBILE_BREAKPOINT_QUERY = '(max-width: 1023px)';
 
 const HORIZON_BY_INTERVAL = {
   '1m': '15m',
@@ -210,30 +212,23 @@ const SignalPanel = ({ signal, target, stopLoss, reason, loading, accuracyPct })
 };
 
 const Dashboard = () => {
-  const queryClient = useQueryClient();
-
   const [selectedSymbol, setSelectedSymbol] = useState('RELIANCE');
   const [timeframe, setTimeframe] = useState('1m');
   const [symbolMetaMap, setSymbolMetaMap] = useState({});
   const [toastMessage, setToastMessage] = useState('');
   const [priceBySymbol, setPriceBySymbol] = useState({});
   const [changeBySymbol, setChangeBySymbol] = useState({});
+  const [isMobileView, setIsMobileView] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia(MOBILE_BREAKPOINT_QUERY).matches;
+  });
 
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const shouldReconnectRef = useRef(true);
-  const selectedSymbolRef = useRef(selectedSymbol);
-  const timeframeRef = useRef(timeframe);
+  const reconnectBackoffMsRef = useRef(1000);
   const trackedSymbolsRef = useRef([]);
   const closeBySymbolRef = useRef({});
-
-  useEffect(() => {
-    selectedSymbolRef.current = selectedSymbol;
-  }, [selectedSymbol]);
-
-  useEffect(() => {
-    timeframeRef.current = timeframe;
-  }, [timeframe]);
 
   const { data: symbolCatalog = [] } = useQuery({
     queryKey: ['marketSymbols', 500],
@@ -300,14 +295,34 @@ const Dashboard = () => {
     setSelectedSymbol(stockUniverse[0]);
   }, [selectedSymbol, stockUniverse]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const mediaQuery = window.matchMedia(MOBILE_BREAKPOINT_QUERY);
+    const syncView = (event) => {
+      setIsMobileView(event.matches);
+    };
+
+    setIsMobileView(mediaQuery.matches);
+
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', syncView);
+      return () => mediaQuery.removeEventListener('change', syncView);
+    }
+
+    mediaQuery.addListener(syncView);
+    return () => mediaQuery.removeListener(syncView);
+  }, []);
+
   const {
     data: bundleData,
     isLoading,
     isFetching,
     error,
+    refetch,
   } = useQuery({
     queryKey: ['stockBundle', selectedSymbol, timeframe],
-    queryFn: () => fetchStockBundle(selectedSymbol, {
+    queryFn: () => getBundle(selectedSymbol, {
       interval: timeframe,
       horizon: HORIZON_BY_INTERVAL[timeframe] || '15m',
       limit: 200,
@@ -320,63 +335,6 @@ const Dashboard = () => {
     enabled: Boolean(selectedSymbol),
   });
 
-  const { data: trackedSnapshotMap = {} } = useQuery({
-    queryKey: ['trackedSnapshots', trackedSymbols],
-    enabled: trackedSymbols.length > 0,
-    queryFn: async () => {
-      const entries = await Promise.all(
-        trackedSymbols.map(async (symbol) => {
-          try {
-            const snapshot = await fetchMarketSnapshot(symbol);
-            return [symbol, snapshot];
-          } catch {
-            return [symbol, null];
-          }
-        }),
-      );
-
-      return Object.fromEntries(entries.filter((entry) => entry[1] && typeof entry[1] === 'object'));
-    },
-    staleTime: 45_000,
-    gcTime: 300_000,
-    refetchInterval: 60_000,
-    refetchOnWindowFocus: false,
-  });
-
-  useEffect(() => {
-    const entries = Object.entries(trackedSnapshotMap || {});
-    if (!entries.length) return;
-
-    setPriceBySymbol((previous) => {
-      const next = { ...previous };
-      entries.forEach(([symbol, snapshot]) => {
-        const ltp = toFiniteNumber(snapshot?.price ?? snapshot?.ltp);
-        if (ltp !== null) {
-          next[symbol] = ltp;
-        }
-      });
-      return next;
-    });
-
-    setChangeBySymbol((previous) => {
-      const next = { ...previous };
-      entries.forEach(([symbol, snapshot]) => {
-        const ltp = toFiniteNumber(snapshot?.price ?? snapshot?.ltp);
-        const close = toFiniteNumber(snapshot?.close);
-        const reported = toFiniteNumber(snapshot?.change);
-        const calculated = ltp !== null && close !== null ? ltp - close : null;
-        const resolved = reported ?? calculated;
-        if (resolved !== null) {
-          next[symbol] = resolved;
-        }
-        if (close !== null) {
-          closeBySymbolRef.current[symbol] = close;
-        }
-      });
-      return next;
-    });
-  }, [trackedSnapshotMap]);
-
   const candles = useMemo(
     () => bundleData?.history?.candles || bundleData?.candles || [],
     [bundleData],
@@ -385,8 +343,8 @@ const Dashboard = () => {
   const snapshot = useMemo(() => bundleData?.snapshot || {}, [bundleData]);
   const prediction = useMemo(() => bundleData?.prediction || {}, [bundleData]);
 
-  const bundlePrice = toFiniteNumber(snapshot.price ?? snapshot.ltp);
-  const bundleChange = toFiniteNumber(snapshot.change);
+  const bundlePrice = toFiniteNumber(snapshot?.price ?? snapshot?.ltp);
+  const bundleChange = toFiniteNumber(snapshot?.change);
 
   const displayPrice = toFiniteNumber(priceBySymbol[selectedSymbol]) ?? bundlePrice;
   const displayChange = toFiniteNumber(changeBySymbol[selectedSymbol]) ?? bundleChange;
@@ -399,11 +357,11 @@ const Dashboard = () => {
       [selectedSymbol]: bundlePrice,
     }));
 
-    const close = toFiniteNumber(snapshot.close);
+    const close = toFiniteNumber(snapshot?.close);
     if (close !== null) {
       closeBySymbolRef.current[selectedSymbol] = close;
     }
-  }, [bundlePrice, selectedSymbol, snapshot.close]);
+  }, [bundlePrice, selectedSymbol, snapshot?.close]);
 
   useEffect(() => {
     if (!selectedSymbol || bundleChange === null) return;
@@ -432,6 +390,7 @@ const Dashboard = () => {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        reconnectBackoffMsRef.current = 1000;
         const symbols = trackedSymbolsRef.current;
         if (symbols.length) {
           ws.send(JSON.stringify({ action: 'subscribe', symbols }));
@@ -470,95 +429,17 @@ const Dashboard = () => {
             };
           });
 
-          if (symbol === selectedSymbolRef.current) {
-            queryClient.setQueryData(['stockBundle', symbol, timeframeRef.current], (previous) => {
-              if (!previous || typeof previous !== 'object') return previous;
-
-              const nextSnapshot = { ...(previous.snapshot || {}) };
-              nextSnapshot.price = ltp;
-              nextSnapshot.ltp = ltp;
-              nextSnapshot.bid = toFiniteNumber(message.bid) ?? toFiniteNumber(nextSnapshot.bid) ?? ltp;
-              nextSnapshot.ask = toFiniteNumber(message.ask) ?? toFiniteNumber(nextSnapshot.ask) ?? ltp;
-              nextSnapshot.volume = toFiniteNumber(message.volume) ?? toFiniteNumber(nextSnapshot.volume) ?? 0;
-
-              const close = toFiniteNumber(nextSnapshot.close) ?? toFiniteNumber(closeBySymbolRef.current[symbol]);
-              const inferredChange = close === null ? null : ltp - close;
-              nextSnapshot.change = reportedChange ?? inferredChange ?? toFiniteNumber(nextSnapshot.change) ?? 0;
-
-              if (close !== null) {
-                closeBySymbolRef.current[symbol] = close;
-              }
-
-              return {
-                ...previous,
-                snapshot: nextSnapshot,
-              };
-            });
-          }
-
           return;
-        }
-
-        if (message.type === 'candle_update') {
-          const symbol = String(message.symbol || '').trim().toUpperCase();
-          if (!symbol || symbol !== selectedSymbolRef.current) return;
-
-          const interval = String(message.interval || '').trim().toLowerCase();
-          if (interval && interval !== timeframeRef.current) return;
-
-          const incomingTime = String(message.timestamp || '').trim();
-          const incomingOpen = toFiniteNumber(message.open);
-          const incomingHigh = toFiniteNumber(message.high);
-          const incomingLow = toFiniteNumber(message.low);
-          const incomingClose = toFiniteNumber(message.close);
-
-          if (!incomingTime || incomingOpen === null || incomingHigh === null || incomingLow === null || incomingClose === null) {
-            return;
-          }
-
-          const incoming = {
-            time: incomingTime,
-            open: incomingOpen,
-            high: incomingHigh,
-            low: incomingLow,
-            close: incomingClose,
-            volume: toFiniteNumber(message.volume) ?? 0,
-          };
-
-          queryClient.setQueryData(['stockBundle', symbol, timeframeRef.current], (previous) => {
-            if (!previous || typeof previous !== 'object') return previous;
-
-            const sourceRows = Array.isArray(previous.history?.candles)
-              ? previous.history.candles
-              : Array.isArray(previous.candles)
-                ? previous.candles
-                : [];
-
-            const byTime = new Map(sourceRows.map((row) => [String(row.time), row]));
-            byTime.set(String(incoming.time), incoming);
-
-            const merged = Array.from(byTime.values())
-              .sort((left, right) => new Date(left.time) - new Date(right.time))
-              .slice(-300);
-
-            return {
-              ...previous,
-              candles: merged,
-              history: {
-                ...(previous.history || {}),
-                candles: merged,
-                count: merged.length,
-              },
-            };
-          });
         }
       };
 
       ws.onclose = () => {
         wsRef.current = null;
         if (!shouldReconnectRef.current) return;
+        const nextDelay = reconnectBackoffMsRef.current;
+        reconnectBackoffMsRef.current = Math.min(reconnectBackoffMsRef.current * 2, 15000);
         clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = setTimeout(connect, 2000);
+        reconnectTimerRef.current = setTimeout(connect, nextDelay);
       };
 
       ws.onerror = () => {
@@ -585,7 +466,7 @@ const Dashboard = () => {
         wsRef.current = null;
       }
     };
-  }, [queryClient]);
+  }, []);
 
   useEffect(() => {
     if (!error) return undefined;
@@ -645,6 +526,53 @@ const Dashboard = () => {
 
   const rsi = toFiniteNumber(indicators.rsi);
   const volumeRatio = toFiniteNumber(prediction.volume_ratio) ?? toFiniteNumber(indicators.volume_ratio);
+  const hasBundleData = Boolean(bundleData && typeof bundleData === 'object');
+  const showSkeleton = !hasBundleData && (isLoading || isFetching);
+
+  if (isMobileView) {
+    return (
+      <>
+        <MobileLayoutEnhanced
+          selectedSymbol={selectedSymbol}
+          selectedCompanyName={selectedCompanyName}
+          timeframe={timeframe}
+          timeframes={TIMEFRAMES}
+          setTimeframe={setTimeframe}
+          handleSelectSymbol={handleSelectSymbol}
+          watchlistSymbols={watchlistSymbols}
+          symbolMeta={symbolMeta}
+          priceBySymbol={priceBySymbol}
+          changeBySymbol={changeBySymbol}
+          displayPrice={displayPrice}
+          displayChange={displayChange}
+          marketStatus={marketStatus}
+          snapshot={snapshot}
+          candles={candles}
+          indicators={indicators}
+          signal={signal}
+          signalReason={signalReason}
+          accuracyPct={accuracyPct}
+          target={target}
+          stopLoss={stopLoss}
+          rsi={rsi}
+          volumeRatio={volumeRatio}
+          showSkeleton={showSkeleton}
+          isLoading={isLoading}
+          isFetching={isFetching}
+          error={error}
+          onRetry={refetch}
+          symbolCatalog={symbolCatalog}
+          trendingSymbols={trendingSymbols}
+        />
+
+        {toastMessage ? (
+          <div className="fixed top-5 right-5 z-[90] px-4 py-2 rounded-xl border border-rose-400/50 bg-[#130a11]/95 text-rose-300 text-sm shadow-2xl">
+            {toastMessage}
+          </div>
+        ) : null}
+      </>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-stockai-bg text-white">
@@ -718,6 +646,26 @@ const Dashboard = () => {
       </header>
 
       <main className="px-4 md:px-6 py-5">
+        {error ? (
+          <div className="mb-4 rounded-2xl border border-rose-400/40 bg-rose-950/20 px-4 py-3 flex items-center justify-between gap-3">
+            <p className="text-sm text-rose-200">Failed to load bundle data. Please retry.</p>
+            <button
+              type="button"
+              onClick={() => refetch()}
+              className="rounded-lg bg-rose-400/90 text-rose-950 px-3 py-1.5 text-xs font-semibold hover:bg-rose-300 transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        ) : null}
+
+        {showSkeleton ? (
+          <div className="grid grid-cols-1 xl:grid-cols-[320px_minmax(0,1fr)_340px] gap-5 min-h-[calc(100vh-170px)] animate-pulse">
+            <div className="rounded-3xl border border-white/10 bg-[#070D15] p-4" />
+            <div className="rounded-3xl border border-white/10 bg-[#070E16] p-4 min-h-[520px]" />
+            <div className="rounded-3xl border border-white/10 bg-[#070E16] p-4" />
+          </div>
+        ) : (
         <div className="grid grid-cols-1 xl:grid-cols-[320px_minmax(0,1fr)_340px] gap-5 min-h-[calc(100vh-170px)]">
           <aside className="rounded-3xl border border-white/10 bg-[#070D15] p-4 overflow-hidden flex flex-col">
             <div className="flex items-center justify-between mb-4">
@@ -766,17 +714,17 @@ const Dashboard = () => {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-5">
                 <StatCard
                   label="Volume"
-                  value={(toFiniteNumber(snapshot.volume) ?? 0).toLocaleString('en-IN')}
+                  value={(toFiniteNumber(snapshot?.volume) ?? 0).toLocaleString('en-IN')}
                   icon={Waves}
                 />
                 <StatCard
                   label="Session High"
-                  value={formatCurrency(snapshot.high)}
+                  value={formatCurrency(snapshot?.high)}
                   icon={TrendingUp}
                 />
                 <StatCard
                   label="Session Low"
-                  value={formatCurrency(snapshot.low)}
+                  value={formatCurrency(snapshot?.low)}
                   icon={TrendingDown}
                 />
               </div>
@@ -850,6 +798,7 @@ const Dashboard = () => {
             </div>
           </aside>
         </div>
+        )}
       </main>
 
       {toastMessage ? (

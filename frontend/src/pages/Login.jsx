@@ -2,9 +2,10 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../store/useAuthStore';
-import { Lock, Activity, Sparkles, ChevronRight, AlertTriangle } from 'lucide-react';
+import { Lock, Activity, Sparkles, ChevronRight, AlertTriangle, User } from 'lucide-react';
 
 const Login = () => {
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [isError, setIsError] = useState(false);
   const [isChecking, setIsChecking] = useState(false);
@@ -15,13 +16,16 @@ const Login = () => {
 
   const handleLogin = async (e) => {
     e.preventDefault();
-    if (!password) return;
+    if (!username.trim() || !password) {
+      setIsError(true);
+      return;
+    }
     
     setIsChecking(true);
     setIsError(false);
 
     // Call the actual backend via the Zustand store
-    const success = await login(password);
+    const success = await login({ username: username.trim().toLowerCase(), password });
     
     if (success) {
       navigate('/dashboard');
@@ -72,6 +76,21 @@ const Login = () => {
 
         <form onSubmit={handleLogin} className="relative z-10 space-y-6">
           <div className="relative">
+            <User className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-stockai-muted" />
+            <input
+              type="text"
+              value={username}
+              onChange={(e) => {
+                setUsername(e.target.value);
+                setIsError(false);
+              }}
+              placeholder="Enter Username"
+              autoComplete="username"
+              className="w-full bg-stockai-bg border border-white/10 rounded-xl pl-12 pr-5 py-4 text-base font-semibold tracking-wide focus:outline-none focus:border-stockai-neon focus:ring-1 focus:ring-stockai-neon transition-all"
+            />
+          </div>
+
+          <div>
             <input 
               type="password" 
               value={password}
@@ -79,24 +98,32 @@ const Login = () => {
                 setPassword(e.target.value);
                 setIsError(false);
               }}
-              placeholder="Enter Master Password"
+              placeholder="Enter Password"
               className="w-full bg-stockai-bg border border-white/10 rounded-xl px-5 py-5 text-lg font-mono tracking-[0.3em] text-center focus:outline-none focus:border-stockai-neon focus:ring-1 focus:ring-stockai-neon transition-all"
             />
+          </div>
+
+          <AnimatePresence>
             {isError && (
               <motion.div 
                 initial={{ opacity: 0, y: -10 }} 
                 animate={{ opacity: 1, y: 0 }} 
-                className="absolute -bottom-8 left-0 right-0 flex items-center justify-center text-stockai-sell text-sm font-semibold gap-1"
+                exit={{ opacity: 0, y: -8 }}
+                className="-mt-2 flex items-center justify-center text-stockai-sell text-sm font-semibold gap-1"
               >
-                <AlertTriangle className="w-4 h-4" /> Auth Denied
+                <AlertTriangle className="w-4 h-4" /> {error || 'Auth Denied'}
               </motion.div>
             )}
-          </div>
+          </AnimatePresence>
+
+          <p className="-mt-2 text-center text-xs text-stockai-muted/90">
+            Username is case-insensitive. Use the same account updated by the password utility.
+          </p>
 
           <button 
             type="submit" 
-            disabled={isChecking || !password}
-            className={`w-full py-5 rounded-xl font-bold text-lg flex items-center justify-center transition-all ${isChecking || !password ? 'bg-stockai-muted/20 text-stockai-muted cursor-not-allowed' : 'bg-stockai-neon text-black hover:shadow-glow hover:scale-[1.02]'}`}
+            disabled={isChecking || !username.trim() || !password}
+            className={`w-full py-5 rounded-xl font-bold text-lg flex items-center justify-center transition-all ${isChecking || !username.trim() || !password ? 'bg-stockai-muted/20 text-stockai-muted cursor-not-allowed' : 'bg-stockai-neon text-black hover:shadow-glow hover:scale-[1.02]'}`}
           >
             {isChecking ? (
               <Activity className="w-6 h-6 animate-pulse" />

@@ -22,9 +22,10 @@ from app.services.redis_client import get_cache, set_cache
 logger = logging.getLogger(__name__)
 
 # Bundle-specific cache profile for low-latency UI refreshes.
-HISTORY_CACHE_TTL_SECONDS = 10
-SNAPSHOT_CACHE_TTL_SECONDS = 3
+HISTORY_CACHE_TTL_SECONDS = 5
+SNAPSHOT_CACHE_TTL_SECONDS = 5
 PREDICTION_CACHE_TTL_SECONDS = 5
+BUNDLE_CACHE_TTL_SECONDS = 5
 
 # Guardrails for low-latency bundle responses under partial outages.
 DB_READ_TIMEOUT_SECONDS = 0.12
@@ -66,6 +67,13 @@ YF_INDEX_SYMBOLS = {
 # Connector singleton.
 _connector: SmartAPIConnector | None = None
 _connector_blocked_until: float = 0.0
+
+
+def _bundle_cache_key(symbol: str, interval: str, limit: int, horizon: str) -> str:
+    normalized_interval = str(interval or "1m").strip().lower() or "1m"
+    normalized_horizon = str(horizon or "15m").strip().lower() or "15m"
+    safe_limit = max(1, _to_int(limit, 100))
+    return f"bundle:v3:{symbol}:{normalized_interval}:{safe_limit}:{normalized_horizon}"
 
 
 def _utc_now_iso() -> str:
@@ -1194,6 +1202,17 @@ async def get_bundle(
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     normalized_symbol = _normalize_symbol(symbol)
+    cache_key = _bundle_cache_key(normalized_symbol, interval, limit, horizon)
+
+    cached_bundle = await get_cache(cache_key)
+    if isinstance(cached_bundle, dict):
+        logger.debug(
+            "[BUNDLE] cache hit symbol=%s interval=%s horizon=%s",
+            normalized_symbol,
+            interval,
+            horizon,
+        )
+        return cached_bundle
 
     history_task = asyncio.create_task(
         get_history(normalized_symbol, interval=interval, limit=limit)
@@ -1206,6 +1225,26 @@ async def get_bundle(
         snapshot_task,
         status_task,
     )
+
+    if not isinstance(history_payload, dict):
+        history_payload = {
+            "symbol": normalized_symbol,
+            "interval": interval,
+            "candles": [],
+            "data": [],
+            "count": 0,
+            "source": "UNAVAILABLE",
+            "data_source": "UNAVAILABLE",
+        }
+
+    if not isinstance(snapshot_payload, dict):
+        snapshot_payload = _unavailable_snapshot(normalized_symbol)
+
+    if not isinstance(market_status, dict):
+        market_status = {
+            "state": "CLOSED",
+            "details": {},
+        }
 
     history_candles = history_payload.get("candles", []) if isinstance(history_payload, dict) else []
     history_count = len(history_candles) if isinstance(history_candles, list) else 0
@@ -1233,6 +1272,34 @@ async def get_bundle(
 
     indicators_payload, prediction_payload = await asyncio.gather(indicators_task, prediction_task)
 
+    if not isinstance(indicators_payload, dict):
+        indicators_payload = {
+            "symbol": normalized_symbol,
+            "ema_20": 0.0,
+            "ema_50": 0.0,
+            "ema9": 0.0,
+            "ema15": 0.0,
+            "rsi": 0.0,
+            "rsi9": 0.0,
+            "macd": {
+                "value": 0.0,
+                "signal": 0.0,
+                "histogram": 0.0,
+            },
+            "bollinger": {
+                "upper": 0.0,
+                "middle": 0.0,
+                "lower": 0.0,
+            },
+        }
+
+    if not isinstance(prediction_payload, dict):
+        prediction_payload = _prediction_fallback(
+            normalized_symbol,
+            _to_float(snapshot_payload.get("ltp", 0.0), 0.0),
+            "Prediction unavailable",
+        )
+
     if history_count < MIN_CANDLES_FOR_BUNDLE:
         prediction_payload = _prediction_fallback(
             normalized_symbol,
@@ -1242,7 +1309,7 @@ async def get_bundle(
 
     latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
 
-    return {
+    response_payload = {
         "symbol": normalized_symbol,
         "timestamp": _utc_now_iso(),
         "candles": history_payload.get("candles", []),
@@ -1263,3 +1330,6 @@ async def get_bundle(
         "market": market_status.get("details", {}),
         "latency_ms": latency_ms,
     }
+
+    await set_cache(cache_key, response_payload, ttl=BUNDLE_CACHE_TTL_SECONDS)
+    return response_payload

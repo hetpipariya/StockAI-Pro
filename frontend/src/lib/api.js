@@ -59,7 +59,84 @@ const normalizeSymbolList = (payload) => {
     .filter(Boolean);
 };
 
-export const fetchStockBundle = async (symbol, options = {}) => {
+const createEmptyBundle = (symbol) => ({
+  symbol,
+  history: {
+    candles: [],
+    count: 0,
+    source: 'UNAVAILABLE',
+    data_source: 'UNAVAILABLE',
+  },
+  snapshot: {
+    symbol,
+    price: 0,
+    ltp: 0,
+    open: 0,
+    high: 0,
+    low: 0,
+    close: 0,
+    change: 0,
+    volume: 0,
+    source: 'UNAVAILABLE',
+    data_source: 'UNAVAILABLE',
+    market_status: 'CLOSED',
+  },
+  prediction: {
+    symbol,
+    signal: 'HOLD',
+    confidence: 0,
+    confidence_pct: 0,
+    prediction: 0,
+    target: 0,
+    stop_loss: 0,
+    reasoning: 'Prediction unavailable',
+  },
+  indicators: {
+    symbol,
+    ema_20: 0,
+    ema_50: 0,
+    rsi: 0,
+    macd: {
+      value: 0,
+      signal: 0,
+      histogram: 0,
+    },
+    bollinger: {
+      upper: 0,
+      middle: 0,
+      lower: 0,
+    },
+  },
+});
+
+const normalizeBundlePayload = (symbol, payload) => {
+  const defaults = createEmptyBundle(symbol);
+  if (!payload || typeof payload !== 'object') return defaults;
+
+  return {
+    ...defaults,
+    ...payload,
+    history: {
+      ...defaults.history,
+      ...(payload.history && typeof payload.history === 'object' ? payload.history : {}),
+      candles: Array.isArray(payload?.history?.candles) ? payload.history.candles : [],
+    },
+    snapshot: {
+      ...defaults.snapshot,
+      ...(payload.snapshot && typeof payload.snapshot === 'object' ? payload.snapshot : {}),
+    },
+    prediction: {
+      ...defaults.prediction,
+      ...(payload.prediction && typeof payload.prediction === 'object' ? payload.prediction : {}),
+    },
+    indicators: {
+      ...defaults.indicators,
+      ...(payload.indicators && typeof payload.indicators === 'object' ? payload.indicators : {}),
+    },
+  };
+};
+
+export const getBundle = async (symbol, options = {}) => {
   const normalizedSymbol = String(symbol || '').trim().toUpperCase();
   if (!normalizedSymbol) throw new Error('Symbol is required');
 
@@ -71,9 +148,12 @@ export const fetchStockBundle = async (symbol, options = {}) => {
     },
   });
 
-  // Backend contract is wrapped as { success, data, error, timestamp }.
-  // Return normalized payload data for UI components.
-  return unwrapPayload(response.data);
+  const raw = unwrapPayload(response.data);
+  return normalizeBundlePayload(normalizedSymbol, raw);
+};
+
+export const fetchStockBundle = async (symbol, options = {}) => {
+  return getBundle(symbol, options);
 };
 
 export const fetchMarketSymbols = async (limit = 100) => {
@@ -96,15 +176,6 @@ export const searchMarketSymbols = async (query, limit = 25) => {
   });
 
   return normalizeSymbolList(response.data);
-};
-
-export const fetchMarketSnapshot = async (symbol) => {
-  const normalizedSymbol = String(symbol || '').trim().toUpperCase();
-  if (!normalizedSymbol) throw new Error('Symbol is required');
-
-  const response = await api.get(`/market/snapshot/${encodeURIComponent(normalizedSymbol)}`);
-  const data = unwrapPayload(response.data);
-  return data && typeof data === 'object' ? data : {};
 };
 
 // Search is smart on frontend but basic proxy here if necessary 

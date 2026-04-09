@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query
@@ -44,6 +45,97 @@ def _error_response(code: str, message: str) -> dict:
     }
 
 
+def _default_bundle_data(symbol: str) -> dict:
+    return {
+        "symbol": symbol,
+        "history": {
+            "candles": [],
+            "count": 0,
+            "source": "UNAVAILABLE",
+            "data_source": "UNAVAILABLE",
+        },
+        "snapshot": {
+            "symbol": symbol,
+            "price": 0.0,
+            "ltp": 0.0,
+            "open": 0.0,
+            "high": 0.0,
+            "low": 0.0,
+            "close": 0.0,
+            "change": 0.0,
+            "volume": 0,
+            "source": "UNAVAILABLE",
+            "data_source": "UNAVAILABLE",
+            "market_status": "CLOSED",
+        },
+        "prediction": {
+            "symbol": symbol,
+            "signal": "HOLD",
+            "confidence": 0.0,
+            "confidence_pct": 0,
+            "prediction": 0.0,
+            "target": 0.0,
+            "stop_loss": 0.0,
+            "reasoning": "Prediction unavailable",
+        },
+        "indicators": {
+            "symbol": symbol,
+            "ema_20": 0.0,
+            "ema_50": 0.0,
+            "rsi": 0.0,
+            "macd": {
+                "value": 0.0,
+                "signal": 0.0,
+                "histogram": 0.0,
+            },
+            "bollinger": {
+                "upper": 0.0,
+                "middle": 0.0,
+                "lower": 0.0,
+            },
+        },
+    }
+
+
+def _normalize_bundle_data(symbol: str, payload: dict | None) -> dict:
+    defaults = _default_bundle_data(symbol)
+    if not isinstance(payload, dict):
+        return defaults
+
+    normalized = {
+        **defaults,
+        **payload,
+    }
+
+    history = payload.get("history") if isinstance(payload.get("history"), dict) else {}
+    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+    prediction = payload.get("prediction") if isinstance(payload.get("prediction"), dict) else {}
+    indicators = payload.get("indicators") if isinstance(payload.get("indicators"), dict) else {}
+
+    normalized["history"] = {
+        **defaults["history"],
+        **history,
+    }
+    normalized["snapshot"] = {
+        **defaults["snapshot"],
+        **snapshot,
+    }
+    normalized["prediction"] = {
+        **defaults["prediction"],
+        **prediction,
+    }
+    normalized["indicators"] = {
+        **defaults["indicators"],
+        **indicators,
+    }
+
+    candles = normalized["history"].get("candles")
+    if not isinstance(candles, list):
+        normalized["history"]["candles"] = []
+
+    return normalized
+
+
 @router.get("/bundle/{symbol}")
 async def get_bundle(
     symbol: str,
@@ -53,6 +145,14 @@ async def get_bundle(
 ):
     """Single optimized market bundle endpoint."""
     normalized_symbol = symbol.strip().upper()
+    started_at = time.perf_counter()
+    logger.debug(
+        "[BUNDLE] request symbol=%s interval=%s limit=%s horizon=%s",
+        normalized_symbol,
+        interval,
+        limit,
+        horizon,
+    )
 
     try:
         payload = await asyncio.wait_for(
@@ -64,7 +164,15 @@ async def get_bundle(
             ),
             timeout=8.0,
         )
-        return _success_response(payload)
+        normalized_payload = _normalize_bundle_data(normalized_symbol, payload)
+        logger.info(
+            "[BUNDLE] success symbol=%s interval=%s horizon=%s latency_ms=%.2f",
+            normalized_symbol,
+            interval,
+            horizon,
+            (time.perf_counter() - started_at) * 1000.0,
+        )
+        return _success_response(normalized_payload)
     except asyncio.TimeoutError:
         logger.warning(
             "[BUNDLE] Timeout symbol=%s interval=%s horizon=%s",

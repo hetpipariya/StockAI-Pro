@@ -111,13 +111,13 @@ export const authAPI = {
 export const marketAPI = {
   getSymbols: (limit = 50) =>
     apiClient.get('/api/market/symbols', { params: { limit } }),
+}
 
-  getSnapshot: (symbol) =>
-    apiClient.get(`/api/market/snapshot/${symbol}`),
-
-  getCandles: (symbol, interval = '1m', limit = 100) =>
-    apiClient.get(`/api/market/candles/${symbol}`, {
-      params: { interval, limit },
+// BUNDLE API - single endpoint for dashboard data
+export const bundleAPI = {
+  getBundle: (symbol, interval = '1m', limit = 100, horizon = '15m') =>
+    apiClient.get(`/api/bundle/${symbol}`, {
+      params: { interval, limit, horizon },
     }),
 }
 
@@ -134,12 +134,6 @@ export const tradingAPI = {
 
   cancelOrder: (orderId) =>
     apiClient.delete(`/api/trading/orders/${orderId}`),
-}
-
-// PREDICT API
-export const predictAPI = {
-  getSignal: (symbol) =>
-    apiClient.get(`/api/predict/signal/${symbol}`),
 }
 
 export default apiClient
