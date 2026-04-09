@@ -8,11 +8,11 @@ Writes to:
 Every action (signal, place, confirm, fill, fail, exit) is logged with
 full context so trades can be reconstructed after the fact.
 """
+
 from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -37,7 +37,7 @@ def _write_jsonl(entry: dict):
 def _write_db(entry: dict):
     """Insert a trade log row into the database (sync session)."""
     try:
-        from app.services.db import get_sync_db_session, TradeLogModel
+        from app.services.db import TradeLogModel, get_sync_db_session
 
         user_id = entry.get("user_id")
         if user_id is None:
@@ -65,14 +65,35 @@ def _write_db(entry: dict):
                 status=entry.get("status"),
                 pnl=entry.get("pnl"),
                 error=entry.get("error"),
-                extra=json.dumps({
-                    k: v for k, v in entry.items()
-                    if k not in {
-                        "order_id", "event", "symbol", "direction", "quantity",
-                        "price", "stop_loss", "target", "confidence", "reason",
-                        "mode", "status", "pnl", "error", "timestamp",
-                    }
-                }, default=str) if entry else None,
+                extra=(
+                    json.dumps(
+                        {
+                            k: v
+                            for k, v in entry.items()
+                            if k
+                            not in {
+                                "order_id",
+                                "event",
+                                "symbol",
+                                "direction",
+                                "quantity",
+                                "price",
+                                "stop_loss",
+                                "target",
+                                "confidence",
+                                "reason",
+                                "mode",
+                                "status",
+                                "pnl",
+                                "error",
+                                "timestamp",
+                            }
+                        },
+                        default=str,
+                    )
+                    if entry
+                    else None
+                ),
             )
             session.add(row)
             session.commit()

@@ -3,14 +3,19 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Optional, Any
-import redis.asyncio as redis
+from typing import Any, Optional
+
+try:
+    import redis.asyncio as redis_asyncio
+except Exception:  # pragma: no cover - local environments may not have redis installed
+    redis_asyncio = None
+
 from app.config import REDIS_URL
 
 logger = logging.getLogger(__name__)
 
 # Global redis client
-_redis: Optional[redis.Redis] = None
+_redis: Optional[Any] = None
 
 # Fallback in-memory dict if Redis fails
 _fallback_cache: dict[str, tuple[str, float]] = {}  # (value, expiry_monotonic)
@@ -21,7 +26,7 @@ _redis_last_attempt: float = 0
 _REDIS_RETRY_INTERVAL = 60  # seconds between re-attempts
 
 
-async def get_redis() -> Optional[redis.Redis]:
+async def get_redis() -> Optional[Any]:
     """Get Redis connection or fallback to in-memory mode.
     Only attempts to connect once; retries every 60s."""
     global _redis, _redis_failed, _redis_last_attempt
@@ -29,26 +34,46 @@ async def get_redis() -> Optional[redis.Redis]:
     if _redis is not None:
         return _redis
 
+    if redis_asyncio is None:
+        if not _redis_failed:
+            logger.warning(
+                "[REDIS] redis package not installed. Using in-memory fallback cache."
+            )
+        _redis_failed = True
+        return None
+
     # If we already know Redis is down, only retry periodically
     if _redis_failed:
         now = time.monotonic()
         if (now - _redis_last_attempt) < _REDIS_RETRY_INTERVAL:
             return None  # Use memory fallback silently
         # Time to retry
-        logger.info("[REDIS] Retrying connection after %ds cooldown...", _REDIS_RETRY_INTERVAL)
+        logger.info(
+            "[REDIS] Retrying connection after %ds cooldown...", _REDIS_RETRY_INTERVAL
+        )
 
     _redis_last_attempt = time.monotonic()
 
     try:
         use_ssl = str(REDIS_URL).startswith("rediss://")
-        client = redis.from_url(
-            REDIS_URL,
-            decode_responses=True,
-            socket_connect_timeout=3,
-            socket_timeout=3,
-            ssl_cert_reqs=None if use_ssl else "required",
-            health_check_interval=30,
-        )
+        try:
+            client = redis_asyncio.from_url(
+                REDIS_URL,
+                decode_responses=True,
+                socket_connect_timeout=3,
+                socket_timeout=3,
+                ssl_cert_reqs=None if use_ssl else "required",
+                health_check_interval=30,
+            )
+        except TypeError:
+            # Some redis client versions reject ssl_cert_reqs or other kwargs.
+            client = redis_asyncio.from_url(
+                REDIS_URL,
+                decode_responses=True,
+                socket_connect_timeout=3,
+                socket_timeout=3,
+                health_check_interval=30,
+            )
         await client.ping()
         _redis = client
         _redis_failed = False
@@ -56,7 +81,9 @@ async def get_redis() -> Optional[redis.Redis]:
     except Exception as e:
         _redis_failed = True
         _redis = None
-        logger.warning("[REDIS] Unavailable (%s). Using in-memory fallback.", type(e).__name__)
+        logger.warning(
+            "[REDIS] Unavailable (%s). Using in-memory fallback.", type(e).__name__
+        )
 
     return _redis
 
@@ -74,6 +101,7 @@ async def set_cache(key: str, value: Any, ttl: int = 60) -> None:
 
     # Fallback — store with expiry time
     import time as _time
+
     _fallback_cache[key] = (val_str, _time.monotonic() + ttl)
 
 
@@ -93,6 +121,7 @@ async def get_cache(key: str) -> Optional[Any]:
 
     # Fallback — check TTL
     import time as _time
+
     entry = _fallback_cache.get(key)
     if entry:
         val, expiry = entry

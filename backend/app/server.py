@@ -74,6 +74,7 @@ Instrumentator().instrument(app).expose(app)
 
 app.include_router(auth.compat_router)
 app.include_router(auth.router)
+app.include_router(auth.v1_router)
 app.include_router(news.router)
 app.include_router(sentiment.router)
 app.include_router(backtest.router)

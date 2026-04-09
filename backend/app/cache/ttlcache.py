@@ -1,9 +1,10 @@
 """In-memory LRU TTL cache for market snapshots and features."""
+
 from __future__ import annotations
 
 import time
-from typing import Any, Optional
 from threading import Lock
+from typing import Any, Optional
 
 _default_ttl = 60  # seconds
 _default_maxsize = 1000

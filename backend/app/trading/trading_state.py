@@ -6,6 +6,7 @@ Ensures the trading engine doesn't lose state across restarts:
   2. Restores RiskManager state from DailyRiskState table
   3. Logs restored state summary
 """
+
 from __future__ import annotations
 
 import logging
@@ -25,7 +26,9 @@ def load_trading_state():
     mode = config.TRADING_MODE
     capital = config.STARTING_CAPITAL
 
-    logger.info(f"[STATE] Loading trading state: mode={mode}, starting_capital=₹{capital:,.2f}")
+    logger.info(
+        f"[STATE] Loading trading state: mode={mode}, starting_capital=₹{capital:,.2f}"
+    )
 
     # Initialize executor singleton (creates RiskManager + OrderRouter)
     executor = get_executor(mode=mode, capital=capital)
@@ -46,6 +49,10 @@ def load_trading_state():
 
     if mode == "LIVE":
         if not config.TRADING_ENABLED:
-            logger.warning("[STATE] ⚠ LIVE mode requested but TRADING_ENABLED=false — orders will be blocked")
+            logger.warning(
+                "[STATE] ⚠ LIVE mode requested but TRADING_ENABLED=false — orders will be blocked"
+            )
         if not config.LIVE_CONFIRMED:
-            logger.warning("[STATE] ⚠ LIVE mode requested but LIVE_CONFIRMED=false — live orders require confirmation")
+            logger.warning(
+                "[STATE] ⚠ LIVE mode requested but LIVE_CONFIRMED=false — live orders require confirmation"
+            )

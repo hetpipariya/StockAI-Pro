@@ -119,23 +119,6 @@ const normalizeHistoryRows = (historyPayload) => {
     .filter((row) => row.time && row.open != null && row.high != null && row.low != null && row.close != null);
 };
 
-const shouldFallbackToQueryPredict = (rawPayload, normalizedPayload) => {
-  const payload = unwrapData(rawPayload);
-  const explanation = String(
-    payload?.explanation || normalizedPayload?.explanation || ''
-  ).toLowerCase();
-
-  if (explanation.includes('no quant model artifact found')) {
-    return true;
-  }
-
-  const currentPrice = Number(normalizedPayload?.currentPrice || 0);
-  const target = Number(normalizedPayload?.target || 0);
-  const stopLoss = Number(normalizedPayload?.stopLoss || 0);
-
-  return currentPrice === 0 && target === 0 && stopLoss === 0;
-};
-
 const extractErrorMessage = (payload, fallback) => {
   if (!payload || typeof payload !== 'object') return fallback;
   return (
@@ -301,7 +284,9 @@ async function apiFetch(endpoint, options = {}) {
         try {
           const errorData = await response.json();
           message = extractErrorMessage(errorData, message);
-        } catch (_) {}
+        } catch (_) {
+          // Response body may be empty/non-JSON for gateway or proxy failures.
+        }
 
         throw { status: response.status, message, url, method, endpoint: normalizedEndpoint };
       }
@@ -398,35 +383,24 @@ export const api = {
     };
   },
 
-  getPrediction: async (symbol) => {
+  getPrediction: async (symbol, interval = '1m', horizon = '15m') => {
     const normalizedSymbol = String(symbol || '').trim().toUpperCase();
     if (!normalizedSymbol) {
       throw { status: 400, message: 'Symbol is required for prediction', url: `${API_BASE}/predict/{symbol}` };
     }
 
-    try {
-      const payload = await apiFetch(`/predict/${encodeURIComponent(normalizedSymbol)}`);
-      const normalized = normalizePredictionPayload(payload, normalizedSymbol);
-      if (!normalized) {
-        throw { status: 0, message: 'Invalid prediction payload', url: `${API_BASE}/predict/${normalizedSymbol}` };
-      }
-      if (!shouldFallbackToQueryPredict(payload, normalized)) {
-        return normalized;
-      }
+    const bundle = await api.getBundle(normalizedSymbol, interval, 100, horizon);
+    const normalized = normalizePredictionPayload(bundle?.prediction, normalizedSymbol);
 
-      const fallbackPayload = await apiFetch(
-        `/predict?symbol=${encodeURIComponent(normalizedSymbol)}&horizon=${encodeURIComponent('15m')}`
-      );
-      const fallbackNormalized = normalizePredictionPayload(fallbackPayload, normalizedSymbol);
-      return fallbackNormalized || normalized;
-    } catch (pathError) {
-      const fallbackPayload = await apiFetch(
-        `/predict?symbol=${encodeURIComponent(normalizedSymbol)}&horizon=${encodeURIComponent('15m')}`
-      );
-      const normalized = normalizePredictionPayload(fallbackPayload, normalizedSymbol);
-      if (!normalized) throw pathError;
-      return normalized;
+    if (!normalized) {
+      throw {
+        status: 0,
+        message: 'Invalid prediction payload',
+        url: `${API_BASE}/bundle/${normalizedSymbol}`,
+      };
     }
+
+    return normalized;
   },
 
   signup: async ({ username, email, password }) => {

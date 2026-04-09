@@ -18,8 +18,9 @@ backward compatibility with ``app.server:app`` (used by Dockerfile,
 docker-compose, and the README) while also supporting the conventional path.
 """
 
-from app.server import app  # noqa: F401 — re-export the FastAPI instance
 import logging
+
+from app.server import app  # noqa: F401 — re-export the FastAPI instance
 
 logger = logging.getLogger(__name__)
 
@@ -30,4 +31,10 @@ if __name__ == "__main__":
     import uvicorn
 
     logger.info("[BOOT] Starting FastAPI on %s:%s", "0.0.0.0", 8000)
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, proxy_headers=True, forwarded_allow_ips="*")
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )

@@ -2,6 +2,7 @@
 Instrument Master — downloads Angel One's full instrument list and provides
 symbol↔token mapping for all NSE equities.
 """
+
 from __future__ import annotations
 
 import logging
@@ -40,6 +41,7 @@ def load_instruments(force: bool = False) -> int:
 
         try:
             import httpx
+
             resp = httpx.get(SCRIPMASTER_URL, timeout=30.0)
             resp.raise_for_status()
             instruments = resp.json()
@@ -51,7 +53,9 @@ def load_instruments(force: bool = False) -> int:
             return len(_symbol_to_token)
 
         elapsed = (time.monotonic() - t0) * 1000
-        logger.info(f"[INSTRUMENTS] Downloaded {len(instruments)} total instruments in {elapsed:.0f}ms")
+        logger.info(
+            f"[INSTRUMENTS] Downloaded {len(instruments)} total instruments in {elapsed:.0f}ms"
+        )
 
         # Filter NSE equities
         sym_map = {}
@@ -64,11 +68,11 @@ def load_instruments(force: bool = False) -> int:
             token = inst.get("token", "")
             name = inst.get("name", "")
             inst_type = inst.get("instrumenttype", "")
-            
+
             # We want NSE equities: exch_seg=NSE, and symbol ends with -EQ or instrumenttype is empty/EQ
             if exch != "NSE":
                 continue
-            
+
             # Filter to EQ (equity) instruments
             # Angel One formats: symbol="RELIANCE-EQ", name="RELIANCE", instrumenttype="" or "EQ"
             if not symbol.endswith("-EQ") and inst_type not in ("", "EQ"):
@@ -99,7 +103,7 @@ def load_instruments(force: bool = False) -> int:
             symbol = inst.get("symbol", "")
             token = inst.get("token", "")
             name = inst.get("name", "")
-            
+
             if symbol in ("Nifty 50", "Nifty Bank", "NIFTY", "BANKNIFTY"):
                 clean = symbol.upper().replace(" ", " ")
                 if clean == "NIFTY":
@@ -107,8 +111,13 @@ def load_instruments(force: bool = False) -> int:
                 sym_map[clean] = token
                 tok_map[token] = clean
                 info_map[clean] = {
-                    "symbol": clean, "token": token, "name": name or clean,
-                    "tradingsymbol": symbol, "exchange": "NSE", "isin": "", "lotsize": "1",
+                    "symbol": clean,
+                    "token": token,
+                    "name": name or clean,
+                    "tradingsymbol": symbol,
+                    "exchange": "NSE",
+                    "isin": "",
+                    "lotsize": "1",
                 }
 
         _symbol_to_token = sym_map
@@ -123,20 +132,46 @@ def load_instruments(force: bool = False) -> int:
 def _load_fallback():
     """Minimal hardcoded fallback if ScripMaster download fails."""
     global _symbol_to_token, _token_to_symbol, _symbol_to_info
-    
+
     fallback = {
-        "RELIANCE": "2881", "SBIN": "3045", "TCS": "11536", "INFY": "1594",
-        "HDFCBANK": "1330", "ICICIBANK": "1333", "TATASTEEL": "895", "ITC": "1660",
-        "AXISBANK": "590", "KOTAKBANK": "1922", "BHARTIARTL": "10604", "WIPRO": "3787",
-        "HINDUNILVR": "1394", "LT": "11483", "MARUTI": "10999", "SUNPHARMA": "3351",
-        "TATAMOTORS": "3432", "TITAN": "3506", "BAJFINANCE": "317", "HCLTECH": "7229",
-        "NTPC": "11630", "POWERGRID": "14977", "ULTRACEMCO": "11532",
-        "NIFTY 50": "99926000", "BANKNIFTY": "99926009",
+        "RELIANCE": "2881",
+        "SBIN": "3045",
+        "TCS": "11536",
+        "INFY": "1594",
+        "HDFCBANK": "1330",
+        "ICICIBANK": "1333",
+        "TATASTEEL": "895",
+        "ITC": "1660",
+        "AXISBANK": "590",
+        "KOTAKBANK": "1922",
+        "BHARTIARTL": "10604",
+        "WIPRO": "3787",
+        "HINDUNILVR": "1394",
+        "LT": "11483",
+        "MARUTI": "10999",
+        "SUNPHARMA": "3351",
+        "TATAMOTORS": "3432",
+        "TITAN": "3506",
+        "BAJFINANCE": "317",
+        "HCLTECH": "7229",
+        "NTPC": "11630",
+        "POWERGRID": "14977",
+        "ULTRACEMCO": "11532",
+        "NIFTY 50": "99926000",
+        "BANKNIFTY": "99926009",
     }
     _symbol_to_token = fallback
     _token_to_symbol = {v: k for k, v in fallback.items()}
     _symbol_to_info = {
-        sym: {"symbol": sym, "token": tok, "name": sym, "tradingsymbol": f"{sym}-EQ", "exchange": "NSE", "isin": "", "lotsize": "1"}
+        sym: {
+            "symbol": sym,
+            "token": tok,
+            "name": sym,
+            "tradingsymbol": f"{sym}-EQ",
+            "exchange": "NSE",
+            "isin": "",
+            "lotsize": "1",
+        }
         for sym, tok in fallback.items()
     }
     logger.warning(f"[INSTRUMENTS] Using fallback with {len(fallback)} instruments")

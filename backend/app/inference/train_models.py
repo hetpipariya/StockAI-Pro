@@ -9,25 +9,25 @@ Usage:
 The trained models are saved to root/models/ and automatically loaded
 by the inference engine on next startup.
 """
-from __future__ import annotations
 
-import sys
+from __future__ import annotations
+from app.inference.feature_engineering import (FEATURE_COLUMNS,
+                                               FEATURE_VERSION,
+                                               compute_features,
+                                               validate_features)
+
 import json
 import logging
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
 
 # Ensure project root is on sys.path
 _project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_project_root))
 
-from app.inference.feature_engineering import (
-    FEATURE_COLUMNS,
-    compute_features,
-    validate_features,
-    FEATURE_VERSION,
-)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -39,11 +39,36 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 # Top symbols to train on (diversified across sectors)
 DEFAULT_SYMBOLS = [
-    "RELIANCE", "TCS", "INFY", "HDFCBANK", "SBIN", "ICICIBANK",
-    "TATASTEEL", "ITC", "AXISBANK", "KOTAKBANK", "WIPRO", "BHARTIARTL",
-    "HINDUNILVR", "LT", "MARUTI", "SUNPHARMA", "TATAMOTORS", "TITAN",
-    "BAJFINANCE", "HCLTECH", "NTPC", "POWERGRID", "ADANIENT", "ULTRACEMCO",
-    "BAJAJFINSV", "NESTLEIND", "DRREDDY", "TECHM", "CIPLA", "DIVISLAB",
+    "RELIANCE",
+    "TCS",
+    "INFY",
+    "HDFCBANK",
+    "SBIN",
+    "ICICIBANK",
+    "TATASTEEL",
+    "ITC",
+    "AXISBANK",
+    "KOTAKBANK",
+    "WIPRO",
+    "BHARTIARTL",
+    "HINDUNILVR",
+    "LT",
+    "MARUTI",
+    "SUNPHARMA",
+    "TATAMOTORS",
+    "TITAN",
+    "BAJFINANCE",
+    "HCLTECH",
+    "NTPC",
+    "POWERGRID",
+    "ADANIENT",
+    "ULTRACEMCO",
+    "BAJAJFINSV",
+    "NESTLEIND",
+    "DRREDDY",
+    "TECHM",
+    "CIPLA",
+    "DIVISLAB",
 ]
 
 
@@ -69,13 +94,15 @@ def _fetch_training_data(symbols: list[str]) -> pd.DataFrame:
                 continue
 
             # Build clean OHLCV DataFrame
-            ohlcv_df = pd.DataFrame({
-                "open": df["Open"].astype(float),
-                "high": df["High"].astype(float),
-                "low": df["Low"].astype(float),
-                "close": df["Close"].astype(float),
-                "volume": df["Volume"].astype(int),
-            })
+            ohlcv_df = pd.DataFrame(
+                {
+                    "open": df["Open"].astype(float),
+                    "high": df["High"].astype(float),
+                    "low": df["Low"].astype(float),
+                    "close": df["Close"].astype(float),
+                    "volume": df["Volume"].astype(int),
+                }
+            )
 
             # Compute features using the SHARED canonical function
             feature_df = compute_features(ohlcv_df)
@@ -88,7 +115,12 @@ def _fetch_training_data(symbols: list[str]) -> pd.DataFrame:
             # Preserve original close for label computation
             feature_df["_raw_close"] = ohlcv_df["close"].values[: len(feature_df)]
             all_data.append(feature_df)
-            logger.info("[TRAIN] %s: %d rows with %d features", sym, len(feature_df), len(FEATURE_COLUMNS))
+            logger.info(
+                "[TRAIN] %s: %d rows with %d features",
+                sym,
+                len(feature_df),
+                len(FEATURE_COLUMNS),
+            )
 
         except Exception as e:
             logger.warning("[TRAIN] Failed to fetch %s: %s", sym, e)
@@ -100,7 +132,8 @@ def _fetch_training_data(symbols: list[str]) -> pd.DataFrame:
     combined = pd.concat(all_data, ignore_index=True)
     logger.info(
         "[TRAIN] Combined dataset: %d rows from %d symbols",
-        len(combined), len(all_data),
+        len(combined),
+        len(all_data),
     )
     return combined
 
@@ -137,7 +170,8 @@ def _prepare_features(
 
     logger.info(
         "[TRAIN] Feature matrix: %s, Label distribution: %s",
-        X.shape, y.value_counts().to_dict(),
+        X.shape,
+        y.value_counts().to_dict(),
     )
     return X, y
 
@@ -154,12 +188,16 @@ def train(symbols: list[str] | None = None):
     """
     import joblib
     from sklearn.ensemble import RandomForestClassifier
-    from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import accuracy_score, classification_report
+    from sklearn.preprocessing import StandardScaler
 
     symbols = symbols or DEFAULT_SYMBOLS
     logger.info("[TRAIN] Starting training for %d symbols", len(symbols))
-    logger.info("[TRAIN] Feature version: %s (%d columns)", FEATURE_VERSION, len(FEATURE_COLUMNS))
+    logger.info(
+        "[TRAIN] Feature version: %s (%d columns)",
+        FEATURE_VERSION,
+        len(FEATURE_COLUMNS),
+    )
 
     # 1. Fetch data and compute canonical features
     df = _fetch_training_data(symbols)
@@ -207,7 +245,9 @@ def train(symbols: list[str] | None = None):
         xgb_pred = xgb.predict(X_test_scaled)
         xgb_acc = accuracy_score(y_test, xgb_pred)
         logger.info("[TRAIN] XGBoost accuracy: %.4f", xgb_acc)
-        logger.info("[TRAIN] XGBoost report:\n%s", classification_report(y_test, xgb_pred))
+        logger.info(
+            "[TRAIN] XGBoost report:\n%s", classification_report(y_test, xgb_pred)
+        )
 
         xgb_path = MODEL_DIR / "xgb_model.pkl"
         joblib.dump(xgb, xgb_path)
@@ -233,7 +273,9 @@ def train(symbols: list[str] | None = None):
         rf_pred = rf.predict(X_test_scaled)
         rf_acc = accuracy_score(y_test, rf_pred)
         logger.info("[TRAIN] RandomForest accuracy: %.4f", rf_acc)
-        logger.info("[TRAIN] RandomForest report:\n%s", classification_report(y_test, rf_pred))
+        logger.info(
+            "[TRAIN] RandomForest report:\n%s", classification_report(y_test, rf_pred)
+        )
 
         rf_path = MODEL_DIR / "rf_model.pkl"
         joblib.dump(rf, rf_path)
@@ -251,15 +293,18 @@ def train(symbols: list[str] | None = None):
             "model": best_model,
             "scaler": scaler,
             "features": FEATURE_COLUMNS,
-            "version": FEATURE_VERSION
+            "version": FEATURE_VERSION,
         }
         joblib.dump(payload, MODEL_DIR / "model.pkl")
         joblib.dump(FEATURE_COLUMNS, MODEL_DIR / "features.pkl")
         with open(MODEL_DIR / "feature_cols.json", "w", encoding="utf-8") as f:
-            json.dump({"version": FEATURE_VERSION, "features": FEATURE_COLUMNS}, f, indent=2)
+            json.dump(
+                {"version": FEATURE_VERSION, "features": FEATURE_COLUMNS}, f, indent=2
+            )
         logger.info(
             "[TRAIN] ✓ Saved primary model payload (best_acc=%.4f) with version %s",
-            best_acc, FEATURE_VERSION
+            best_acc,
+            FEATURE_VERSION,
         )
 
         # Final validation: ensure what we saved matches what inference expects
@@ -276,6 +321,7 @@ def train(symbols: list[str] | None = None):
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser(description="Train StockAI Pro ML models")
     parser.add_argument("--symbol", type=str, help="Train on a single symbol")
     args = parser.parse_args()

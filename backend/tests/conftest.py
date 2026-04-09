@@ -1,4 +1,5 @@
 """Shared test fixtures for StockAI Pro backend tests."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,7 +9,8 @@ import numpy as np
 import pandas as pd
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
+                                    create_async_engine)
 from sqlalchemy.pool import StaticPool
 
 from app.middleware import _api_requests, _login_attempts
@@ -59,7 +61,9 @@ async def test_engine():
 
 @pytest.fixture
 def session_factory(test_engine):
-    return async_sessionmaker(bind=test_engine, class_=AsyncSession, expire_on_commit=False)
+    return async_sessionmaker(
+        bind=test_engine, class_=AsyncSession, expire_on_commit=False
+    )
 
 
 @pytest.fixture

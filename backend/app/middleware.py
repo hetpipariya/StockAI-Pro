@@ -17,7 +17,8 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
-from app.config import FRONTEND_URL as _FRONTEND_URL, API_RATE_LIMIT
+from app.config import API_RATE_LIMIT
+from app.config import FRONTEND_URL as _FRONTEND_URL
 from app.utils.auth_utils import decode_access_token
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,12 @@ _last_cleanup = time.monotonic()
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _extract_rate_key(request: Request, client_ip: str) -> str:
@@ -61,17 +67,27 @@ def _normalize_payload(payload: Any, status_code: int) -> dict[str, Any]:
         if "success" in payload:
             success = bool(payload.get("success"))
         elif "status" in payload:
-            success = str(payload.get("status", "")).lower() in {"ok", "success", "true"}
+            success = str(payload.get("status", "")).lower() in {
+                "ok",
+                "success",
+                "true",
+            }
 
         if payload.get("error"):
             success = False
 
-        data = payload.get("data") if "data" in payload else (payload if success else None)
-        error = None if success else (
-            payload.get("error")
-            or payload.get("detail")
-            or payload.get("message")
-            or "Request failed"
+        data = (
+            payload.get("data") if "data" in payload else (payload if success else None)
+        )
+        error = (
+            None
+            if success
+            else (
+                payload.get("error")
+                or payload.get("detail")
+                or payload.get("message")
+                or "Request failed"
+            )
         )
 
         normalized: dict[str, Any] = {
@@ -95,7 +111,11 @@ def _normalize_payload(payload: Any, status_code: int) -> dict[str, Any]:
 
 async def _normalize_json_response(request: Request, response: Response) -> Response:
     path = request.url.path
-    if path.startswith("/docs") or path.startswith("/openapi") or path.startswith("/redoc"):
+    if (
+        path.startswith("/docs")
+        or path.startswith("/openapi")
+        or path.startswith("/redoc")
+    ):
         return response
 
     body = b""
@@ -184,9 +204,15 @@ def configure_cors(app: FastAPI) -> list[str]:
         for origin in os.getenv("CORS_ORIGINS", "").split(",")
         if origin.strip()
     ]
-    allowed_origins = sorted({origin.rstrip("/") for origin in [*default_origins, *extra_origins] if origin})
+    allowed_origins = sorted(
+        {origin.rstrip("/") for origin in [*default_origins, *extra_origins] if origin}
+    )
 
-    logger.info("[CORS] Allowed origins (%d): %s", len(allowed_origins), ", ".join(allowed_origins))
+    logger.info(
+        "[CORS] Allowed origins (%d): %s",
+        len(allowed_origins),
+        ", ".join(allowed_origins),
+    )
 
     app.add_middleware(
         CORSMiddleware,
@@ -199,7 +225,9 @@ def configure_cors(app: FastAPI) -> list[str]:
     return allowed_origins
 
 
-def _check_rate_limit(key: str, limit: int = _RATE_LIMIT, window: float = _RATE_WINDOW) -> bool:
+def _check_rate_limit(
+    key: str, limit: int = _RATE_LIMIT, window: float = _RATE_WINDOW
+) -> bool:
     """Return True if request is allowed, False if rate-limited."""
     global _last_cleanup
     now = time.monotonic()
@@ -237,7 +265,12 @@ def add_production_middleware(app: FastAPI) -> None:
         rate_key = _extract_rate_key(request, client_ip)
         now = time.monotonic()
 
-        if request.method == "POST" and path in ("/api/auth/login", "/api/auth/token"):
+        if request.method == "POST" and path in (
+            "/api/auth/login",
+            "/api/auth/token",
+            "/api/v1/auth/login",
+            "/api/v1/auth/token",
+        ):
             if rate_key not in _login_attempts:
                 _login_attempts[rate_key] = deque()
             attempts = _login_attempts[rate_key]
@@ -278,7 +311,13 @@ def add_production_middleware(app: FastAPI) -> None:
             response = await asyncio.wait_for(call_next(request), timeout=45.0)
         except asyncio.TimeoutError:
             elapsed = time.perf_counter() - start_time
-            logger.error("[TIMEOUT] %s %s timed out after %.1fs from %s", request.method, path, elapsed, client_ip)
+            logger.error(
+                "[TIMEOUT] %s %s timed out after %.1fs from %s",
+                request.method,
+                path,
+                elapsed,
+                client_ip,
+            )
             response = JSONResponse(
                 status_code=504,
                 content={
@@ -293,7 +332,13 @@ def add_production_middleware(app: FastAPI) -> None:
             return _corsify_error_response(request, response)
         except Exception as exc:
             elapsed = time.perf_counter() - start_time
-            logger.error("[ERROR] %s %s failed after %.1fs: %s", request.method, path, elapsed, exc)
+            logger.error(
+                "[ERROR] %s %s failed after %.1fs: %s",
+                request.method,
+                path,
+                elapsed,
+                exc,
+            )
             response = JSONResponse(
                 status_code=500,
                 content={
@@ -309,7 +354,14 @@ def add_production_middleware(app: FastAPI) -> None:
 
         elapsed = time.perf_counter() - start_time
         if path.startswith("/api/") and elapsed > 0.5:
-            logger.info("[API] %s %s -> %d (%.2fs) from %s", request.method, path, response.status_code, elapsed, client_ip)
+            logger.info(
+                "[API] %s %s -> %d (%.2fs) from %s",
+                request.method,
+                path,
+                response.status_code,
+                elapsed,
+                client_ip,
+            )
 
         return await _normalize_json_response(request, response)
 
@@ -322,8 +374,12 @@ def add_exception_handlers(app: FastAPI) -> None:
             content={
                 "success": False,
                 "status": "error",
-                "error": exc.detail if isinstance(exc.detail, str) else "Request failed",
-                "message": exc.detail if isinstance(exc.detail, str) else "Request failed",
+                "error": (
+                    exc.detail if isinstance(exc.detail, str) else "Request failed"
+                ),
+                "message": (
+                    exc.detail if isinstance(exc.detail, str) else "Request failed"
+                ),
                 "data": None,
                 "code": exc.status_code,
                 "timestamp": _utc_now_iso(),
@@ -331,7 +387,9 @@ def add_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    async def validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ):
         errors = [
             {"field": ".".join(str(x) for x in e["loc"]), "message": e["msg"]}
             for e in exc.errors()

@@ -1,6 +1,18 @@
 name: CD
 
 on:
+  workflow_call:
+    secrets:
+      RENDER_API_KEY:
+        required: true
+      RENDER_SERVICE_ID:
+        required: true
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+      CLOUDFLARE_PROJECT_NAME:
+        required: true
   workflow_run:
     workflows: ["CI"]
     types: [completed]
@@ -92,7 +104,7 @@ jobs:
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
       RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
       DEPLOY_COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
-      BACKEND_HEALTH_URL: ${{ vars.BACKEND_HEALTH_URL }}
+      BACKEND_HEALTH_URL: https://api.stockai-pro.in/api/health
     steps:
       - name: Trigger Render deploy for CI commit
         id: trigger
@@ -215,9 +227,9 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_PROJECT_NAME: ${{ secrets.CLOUDFLARE_PROJECT_NAME }}
-      VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL != '' && vars.VITE_API_BASE_URL || 'https://api.stockai-pro.in' }}
-      VITE_WS_URL: ${{ vars.VITE_WS_URL != '' && vars.VITE_WS_URL || 'wss://api.stockai-pro.in/live' }}
-      FRONTEND_PROD_URL: ${{ vars.FRONTEND_PROD_URL }}
+      VITE_API_BASE_URL: https://api.stockai-pro.in
+      VITE_WS_URL: wss://api.stockai-pro.in/live
+      FRONTEND_PROD_URL: https://stockai-pro.in
     steps:
       - name: Checkout deployment commit
         uses: actions/checkout@v4

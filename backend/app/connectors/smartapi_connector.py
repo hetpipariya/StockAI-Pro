@@ -733,6 +733,61 @@ class SmartAPIConnector:
 
     # ─── Orders ───
 
+    def get_positions(self) -> list[dict]:
+        """Fetch current broker positions with token-refresh retry and safe fallback."""
+        self._ensure_login()
+        if not self._obj:
+            return []
+
+        for attempt in range(2):
+            try:
+                _rate_limit()
+                if hasattr(self._obj, "position"):
+                    resp = self._obj.position()
+                elif hasattr(self._obj, "getPosition"):
+                    resp = self._obj.getPosition()
+                else:
+                    logger.error("[SMARTAPI] position API is not available in SDK")
+                    return []
+
+                if isinstance(resp, list):
+                    return resp
+
+                if isinstance(resp, dict):
+                    if resp.get("status"):
+                        data = resp.get("data", [])
+                        if isinstance(data, list):
+                            return data
+                        if isinstance(data, dict):
+                            nested = data.get("positions", [])
+                            return nested if isinstance(nested, list) else []
+                        return []
+
+                    if attempt == 0 and self._handle_api_error(resp, "position"):
+                        continue
+
+                    logger.warning(
+                        "[SMARTAPI] position call failed: %s",
+                        resp.get("message", "Unknown error"),
+                    )
+                    return []
+
+                logger.warning("[SMARTAPI] Unexpected position response type: %s", type(resp))
+                return []
+
+            except Exception as exc:
+                logger.warning(
+                    "[SMARTAPI] position call exception (attempt %d): %s",
+                    attempt + 1,
+                    exc,
+                )
+                if attempt == 0:
+                    self._refresh_session()
+                    continue
+                return []
+
+        return []
+
     def place_order(self, order_payload: dict) -> dict:
         """Place order via SmartAPI."""
         self._ensure_login()

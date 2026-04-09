@@ -3,21 +3,21 @@ Live Trading Executor — evaluates 15m candles against the XGBoost model.
 Mirrors the exact backtest parameters: EMA9/21/50, RSI, Volume Spike, ATR.
 Operates in PAPER or LIVE mode with multi-layer safety checks.
 """
+
 from __future__ import annotations
 
 import logging
-import asyncio
-import numpy as np
-import pandas as pd
-from datetime import datetime
 from typing import Optional
 
+import numpy as np
+import pandas as pd
+
 from app import config
+from app.connectors.order_router import OrderRouter
 from app.inference.feature_engineering import compute_features
 from app.trading.candle_builder import candle_builder_15m
-from app.trading.risk_manager import RiskManager, TradeRisk
+from app.trading.risk_manager import RiskManager
 from app.trading.trade_logger import log_trade
-from app.connectors.order_router import OrderRouter
 
 logger = logging.getLogger(__name__)
 
@@ -44,17 +44,23 @@ class LiveExecutor:
     def _load_model(self):
         """Load the trained XGBoost ensemble from disk."""
         try:
-            from app.inference.models import _ensemble_model, _scaler, _features_list, load_models
+            from app.inference.models import _ensemble_model, load_models
+
             if not _ensemble_model:
                 load_models()
-            from app.inference.models import _ensemble_model as m, _scaler as s, _features_list as f
+            from app.inference.models import _ensemble_model as m
+            from app.inference.models import _features_list as f
+            from app.inference.models import _scaler as s
+
             self._model = m
             self._scaler = s
             self._features_list = f
             if self._model:
                 logger.info("[EXECUTOR] ML model loaded successfully")
             else:
-                logger.warning("[EXECUTOR] No ML model available — signals will be technical-only")
+                logger.warning(
+                    "[EXECUTOR] No ML model available — signals will be technical-only"
+                )
         except Exception as e:
             logger.warning(f"[EXECUTOR] Failed to load ML model: {e}")
 
@@ -69,7 +75,7 @@ class LiveExecutor:
             input_arr = np.array([input_data])
             input_scaled = self._scaler.transform(input_arr)
             input_scaled = np.nan_to_num(input_scaled, nan=0.0, posinf=0.0, neginf=0.0)
-            
+
             pred = int(self._model.predict(input_scaled)[0])
             if hasattr(self._model, "predict_proba"):
                 proba_arr = self._model.predict_proba(input_scaled)[0]
@@ -81,14 +87,18 @@ class LiveExecutor:
             logger.error(f"[EXECUTOR] ML prediction error: {e}")
             return -1, 0
 
-    def evaluate_signal(self, symbol: str, user_id: Optional[int] = None) -> Optional[dict]:
+    def evaluate_signal(
+        self, symbol: str, user_id: Optional[int] = None
+    ) -> Optional[dict]:
         """
         Evaluate the current 15m candle history for a trade signal.
         Returns signal dict or None if no trade.
         """
         # Safety gate: check kill-switch before evaluation
         if not config.TRADING_ENABLED:
-            logger.info(f"[EXECUTOR] Kill-switch active — skipping signal eval for {symbol}")
+            logger.info(
+                f"[EXECUTOR] Kill-switch active — skipping signal eval for {symbol}"
+            )
             return None
 
         candles = candle_builder_15m.get_history(symbol, limit=200)
@@ -108,7 +118,7 @@ class LiveExecutor:
         candles_df.ffill(inplace=True)
         candles_df.fillna(0, inplace=True)
 
-        feature_df = compute_features(candles_df.tail(200))
+        feature_df = compute_features(candles_df.tail(200), include_legacy=True)
         if feature_df.empty:
             return None
 
@@ -130,16 +140,26 @@ class LiveExecutor:
         reason = ""
 
         # BUY: ML=1 + Close > EMA50 + Volume Spike + RSI 55-75 + ATR > 0.3% price
-        if (ml_pred == 1 and close > ema_50 and ema_9 > ema_21
-            and vol_spike == 1 and 55 < rsi < 75
-            and atr > close * 0.003):
+        if (
+            ml_pred == 1
+            and close > ema_50
+            and ema_9 > ema_21
+            and vol_spike == 1
+            and 55 < rsi < 75
+            and atr > close * 0.003
+        ):
             signal = "BUY"
             reason = f"ML=UP ({confidence}%) EMA9>21 RSI={rsi:.1f} VolSpike"
 
         # SELL: ML=0 + Close < EMA50 + Volume Spike + RSI 25-45 + ATR > 0.3% price
-        elif (ml_pred == 0 and close < ema_50 and ema_9 < ema_21
-              and vol_spike == 1 and 25 < rsi < 45
-              and atr > close * 0.003):
+        elif (
+            ml_pred == 0
+            and close < ema_50
+            and ema_9 < ema_21
+            and vol_spike == 1
+            and 25 < rsi < 45
+            and atr > close * 0.003
+        ):
             signal = "SELL"
             reason = f"ML=DN ({confidence}%) EMA9<21 RSI={rsi:.1f} VolSpike"
 
@@ -168,12 +188,20 @@ class LiveExecutor:
         }
 
         log_trade(
-            "SIGNAL", order_id="PRE-ORDER", symbol=symbol,
-            direction=signal, quantity=trade_risk.position_size,
-            price=trade_risk.entry_price, stop_loss=trade_risk.stop_price,
-            target=trade_risk.target_price, confidence=confidence,
-            reason=reason, mode=self.router.mode, atr=trade_risk.atr,
-            rsi=round(rsi, 2), ml_prediction=ml_pred,
+            "SIGNAL",
+            order_id="PRE-ORDER",
+            symbol=symbol,
+            direction=signal,
+            quantity=trade_risk.position_size,
+            price=trade_risk.entry_price,
+            stop_loss=trade_risk.stop_price,
+            target=trade_risk.target_price,
+            confidence=confidence,
+            reason=reason,
+            mode=self.router.mode,
+            atr=trade_risk.atr,
+            rsi=round(rsi, 2),
+            ml_prediction=ml_pred,
             user_id=user_id,
         )
 
@@ -182,7 +210,10 @@ class LiveExecutor:
     def execute_signal(self, signal_data: dict, user_id: Optional[int] = None) -> dict:
         """Execute a validated signal through the order router."""
         if user_id is None:
-            logger.warning("[EXECUTOR] Missing user_id — blocking execution for %s", signal_data["symbol"])
+            logger.warning(
+                "[EXECUTOR] Missing user_id — blocking execution for %s",
+                signal_data["symbol"],
+            )
             return {
                 "order_id": "BLOCKED",
                 "status": "REJECTED",
@@ -192,7 +223,9 @@ class LiveExecutor:
 
         # Final safety gate before execution
         if not config.TRADING_ENABLED:
-            logger.warning(f"[EXECUTOR] Kill-switch active — blocking execution for {signal_data['symbol']}")
+            logger.warning(
+                f"[EXECUTOR] Kill-switch active — blocking execution for {signal_data['symbol']}"
+            )
             return {
                 "order_id": "BLOCKED",
                 "status": "REJECTED",
@@ -202,7 +235,11 @@ class LiveExecutor:
 
         # LIVE mode requires explicit confirmation to prevent accidental real-money trades
         if self.router.mode == "LIVE" and not config.LIVE_CONFIRMED:
-            logger.warning(f"[EXECUTOR] LIVE mode not confirmed — blocking execution for {signal_data['symbol']}. Set LIVE_CONFIRMED=true in .env to enable.")
+            logger.warning(
+                "[EXECUTOR] LIVE mode not confirmed — blocking execution for %s. "
+                "Set LIVE_CONFIRMED=true in .env to enable.",
+                signal_data["symbol"],
+            )
             return {
                 "order_id": "BLOCKED",
                 "status": "REJECTED",
@@ -219,12 +256,14 @@ class LiveExecutor:
             target=signal_data["target"],
             user_id=user_id,
             reason=signal_data["reason"],
-            confidence=signal_data["confidence"]
+            confidence=signal_data["confidence"],
         )
 
         # Auto-confirm paper orders for seamless paper trading
         if result.status == "PENDING_CONFIRMATION" and self.router.mode == "PAPER":
-            confirmed = self.router.confirm_and_execute(result.order_id, user_id=user_id)
+            confirmed = self.router.confirm_and_execute(
+                result.order_id, user_id=user_id
+            )
             if confirmed:
                 self.risk.on_trade_opened()
                 return {
@@ -241,7 +280,9 @@ class LiveExecutor:
             "error": result.error,
         }
 
-    def check_exits(self, symbol: str, current_price: float, user_id: Optional[int] = None) -> Optional[dict]:
+    def check_exits(
+        self, symbol: str, current_price: float, user_id: Optional[int] = None
+    ) -> Optional[dict]:
         """Check if an open position should be exited (hit SL or TP)."""
         pos = self.router.get_position(symbol, user_id=user_id)
         if not pos:
@@ -280,9 +321,17 @@ class LiveExecutor:
         # Step 1: Check exits on open positions
         current_candle = candle_builder_15m.get_current_candle(symbol)
         if current_candle and self.router.has_position(symbol, user_id=user_id):
-            exit_result = self.check_exits(symbol, current_candle['close'], user_id=user_id)
+            exit_result = self.check_exits(
+                symbol, current_candle["close"], user_id=user_id
+            )
             if exit_result:
-                logger.info(f"[EXECUTOR] EXIT {symbol}: {exit_result['reason']} @ ₹{exit_result['exit_price']:.2f} PnL=₹{exit_result['pnl']:,.2f}")
+                logger.info(
+                    "[EXECUTOR] EXIT %s: %s @ Rs%.2f PnL=Rs%.2f",
+                    symbol,
+                    exit_result["reason"],
+                    float(exit_result["exit_price"]),
+                    float(exit_result["pnl"]),
+                )
                 return {"action": "EXIT", **exit_result}
 
         # Step 2: If no position, evaluate new signal
@@ -290,7 +339,14 @@ class LiveExecutor:
             signal = self.evaluate_signal(symbol, user_id=user_id)
             if signal:
                 exec_result = self.execute_signal(signal, user_id=user_id)
-                logger.info(f"[EXECUTOR] ENTRY {signal['signal']} {symbol} @ ₹{signal['entry']:.2f} Qty={signal['quantity']} → {exec_result['status']}")
+                logger.info(
+                    "[EXECUTOR] ENTRY %s %s @ Rs%.2f Qty=%s -> %s",
+                    signal["signal"],
+                    symbol,
+                    float(signal["entry"]),
+                    signal["quantity"],
+                    exec_result["status"],
+                )
                 return {"action": "ENTRY", **signal, **exec_result}
 
         return None
@@ -325,7 +381,11 @@ def get_executor(
         if _system_executor is None:
             _system_executor = LiveExecutor(mode=actual_mode, starting_capital=capital)
         elif _system_executor.router.mode != actual_mode:
-            logger.info("[EXECUTOR][SYSTEM] Mode changed: %s → %s", _system_executor.router.mode, actual_mode)
+            logger.info(
+                "[EXECUTOR][SYSTEM] Mode changed: %s → %s",
+                _system_executor.router.mode,
+                actual_mode,
+            )
             _system_executor.router.mode = actual_mode
         return _system_executor
 
@@ -336,7 +396,12 @@ def get_executor(
         _user_executors[key] = executor
         logger.info("[EXECUTOR] Created user-scoped executor for user_id=%d", key)
     elif executor.router.mode != actual_mode:
-        logger.info("[EXECUTOR][user=%d] Mode changed: %s → %s", key, executor.router.mode, actual_mode)
+        logger.info(
+            "[EXECUTOR][user=%d] Mode changed: %s → %s",
+            key,
+            executor.router.mode,
+            actual_mode,
+        )
         executor.router.mode = actual_mode
 
     return executor

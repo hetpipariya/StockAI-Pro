@@ -1,55 +1,32 @@
-import React, { useEffect } from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
-import DesktopLayout from './layouts/DesktopLayout';
-import MobileLayout from './layouts/MobileLayout';
-import { useWindowWidth } from './hooks/useWindowWidth';
-import { AppProvider } from './context/AppContext';
-import { AuthProvider } from './context/AuthContext';
-import ProtectedRoute from './components/Auth/ProtectedRoute';
-import { ToastProvider } from './components/ui/Toast';
-import LoginPage from './pages/LoginPage';
-import SignupPage from './pages/SignupPage';
-import { API_BASE, isBackendReservedPath } from './config/api';
+import React from 'react'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
-function BackendPathRedirectGuard() {
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
+import Landing from './pages/Landing'
+import Login from './pages/Login'
+import Dashboard from './pages/Dashboard'
+import { useAuthStore } from './store/useAuthStore'
 
-    const { pathname, search, hash } = window.location;
-    if (!isBackendReservedPath(pathname)) return;
+const queryClient = new QueryClient();
 
-    const target = `${API_BASE}${pathname}${search}${hash}`;
-    window.location.replace(target);
-  }, []);
+const ProtectedRoute = ({ children }) => {
+  const isAuth = useAuthStore(state => state.isAuthenticated) || localStorage.getItem('stockai_auth') === 'true';
+  return isAuth ? children : <Navigate to="/login" replace />;
+};
 
-  return null;
-}
-
-function Dashboard() {
-  const width = useWindowWidth();
-  const isDesktop = width >= 1024;
-
+function App() {
   return (
-    <ProtectedRoute>
-      <AppProvider>{isDesktop ? <DesktopLayout /> : <MobileLayout />}</AppProvider>
-    </ProtectedRoute>
-  );
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Landing />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </QueryClientProvider>
+  )
 }
 
-export default function App() {
-  return (
-    <>
-      <BackendPathRedirectGuard />
-      <ToastProvider>
-        <AuthProvider>
-          <Routes>
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/signup" element={<SignupPage />} />
-            <Route path="/" element={<Dashboard />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AuthProvider>
-      </ToastProvider>
-    </>
-  );
-}
+export default App;

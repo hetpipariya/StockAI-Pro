@@ -72,9 +72,9 @@ REQUIRE_POSTGRES = os.getenv("REQUIRE_POSTGRES", "true").lower() == "true"
 DB_SLOW_QUERY_MS = int(os.getenv("DB_SLOW_QUERY_MS", "100"))
 API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", "200"))
 
-CACHE_TTL_SNAPSHOT_SECONDS = int(os.getenv("CACHE_TTL_SNAPSHOT_SECONDS", "5"))
-CACHE_TTL_CANDLES_SECONDS = int(os.getenv("CACHE_TTL_CANDLES_SECONDS", "30"))
-CACHE_TTL_PREDICTION_SECONDS = int(os.getenv("CACHE_TTL_PREDICTION_SECONDS", "30"))
+CACHE_TTL_SNAPSHOT_SECONDS = int(os.getenv("CACHE_TTL_SNAPSHOT_SECONDS", "3"))
+CACHE_TTL_CANDLES_SECONDS = int(os.getenv("CACHE_TTL_CANDLES_SECONDS", "10"))
+CACHE_TTL_PREDICTION_SECONDS = int(os.getenv("CACHE_TTL_PREDICTION_SECONDS", "5"))
 CACHE_TTL_BUNDLE_SECONDS = int(os.getenv("CACHE_TTL_BUNDLE_SECONDS", "30"))
 
 # WebSocket is enabled by default for real-time data
@@ -192,7 +192,7 @@ MARKET_CLOSE = os.getenv("MARKET_CLOSE", "15:30")
 TRADING_MODE = os.getenv("TRADING_MODE", "PAPER").upper()
 TRADING_ENABLED = os.getenv("TRADING_ENABLED", "true").lower() == "true"
 LIVE_CONFIRMED = os.getenv("LIVE_CONFIRMED", "false").lower() == "true"
-ENABLE_MOCK_DATA = os.getenv("ENABLE_MOCK_DATA", "true").lower() == "true"
+ENABLE_MOCK_DATA = os.getenv("ENABLE_MOCK_DATA", "false").lower() == "true"
 CORS_ORIGINS = os.getenv(
     "CORS_ORIGINS",
     "https://stockai-pro.in,https://www.stockai-pro.in,http://localhost:5173,http://127.0.0.1:5173",

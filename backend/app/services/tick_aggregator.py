@@ -2,12 +2,13 @@
 Tick Aggregator — converts raw SmartAPI ticks into 1-minute OHLCV candles.
 Thread-safe accumulator per symbol.
 """
+
 from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timedelta
-from typing import Optional, Callable
+from datetime import datetime
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,15 @@ class TickAggregator:
             completed = self._accumulators[symbol].add_tick(ltp, volume)
 
         if completed:
-            logger.info(f"[TICK] 1m candle completed: {symbol} O={completed['open']:.2f} H={completed['high']:.2f} L={completed['low']:.2f} C={completed['close']:.2f} V={completed['volume']}")
+            logger.info(
+                "[TICK] 1m candle completed: %s O=%.2f H=%.2f L=%.2f C=%.2f V=%s",
+                symbol,
+                completed["open"],
+                completed["high"],
+                completed["low"],
+                completed["close"],
+                completed["volume"],
+            )
 
             # Trigger callback
             if self._on_candle:
@@ -134,7 +143,9 @@ class TickAggregator:
         with self._lock:
             return {
                 "symbols": len(self._accumulators),
-                "ticks": {sym: acc.tick_count for sym, acc in self._accumulators.items()},
+                "ticks": {
+                    sym: acc.tick_count for sym, acc in self._accumulators.items()
+                },
             }
 
 

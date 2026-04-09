@@ -1,18 +1,20 @@
 import logging
-from fastapi import APIRouter, Query, HTTPException
-from typing import List, Optional
 
+from fastapi import APIRouter, HTTPException, Query
+
+from app.services.bundle_service import get_history as get_history_service
 from app.services.indicators import IndicatorEngine
-from app.routes.market import get_history
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/indicators", tags=["indicators"])
 
-@router.get("")
+
+# Deprecated: replaced by /api/bundle
+@router.get("", deprecated=True)
 async def get_indicators(
     symbol: str = Query(...),
     interval: str = Query("1m"),
-    indicators: str = Query("ema9,rsi9,macd", description="Comma separated indicators")
+    indicators: str = Query("ema9,rsi9,macd", description="Comma separated indicators"),
 ):
     """
     Get indicator values for a symbol.
@@ -20,42 +22,54 @@ async def get_indicators(
     """
     try:
         # Fetch up to 500 candles
-        history_response = await get_history(symbol=symbol, interval=interval, limit=500)
-        
-        # Unwrap standardized {status, data: {symbol, data: [...]}, message} response
+        history_response = await get_history_service(
+            symbol=symbol, interval=interval, limit=500
+        )
+
+        # Unwrap normalized history payload from service layer.
         if not isinstance(history_response, dict):
             raise HTTPException(500, "Invalid history response")
 
-        hist_payload = history_response.get("data", {})
+        hist_payload = history_response
         if not isinstance(hist_payload, dict):
             raise HTTPException(500, "Malformed history payload")
 
-        candles = hist_payload.get("data", [])
+        candles = hist_payload.get("candles") or hist_payload.get("data", [])
         if not isinstance(candles, list):
             candles = []
-        
+
         if not candles or len(candles) < 20:
-            logger.warning(f"[INDICATORS] Insufficient candle data for {symbol}: {len(candles) if candles else 0}")
-            return {"status": "success", "data": {"symbol": symbol, "data": []}, "message": f"Need 20+ candles, got {len(candles) if candles else 0}"}
-            
+            logger.warning(
+                f"[INDICATORS] Insufficient candle data for {symbol}: {len(candles) if candles else 0}"
+            )
+            return {
+                "status": "success",
+                "data": {"symbol": symbol, "data": []},
+                "message": f"Need 20+ candles, got {len(candles) if candles else 0}",
+            }
+
         df = IndicatorEngine.compute_all(candles)
-        
+
         # Reset index to get 'time' back as a column if it was used as index
-        if 'time' not in df.columns and df.index.name == 'time':
+        if "time" not in df.columns and df.index.name == "time":
             df.reset_index(inplace=True)
-        elif 'time' not in df.columns:
+        elif "time" not in df.columns:
             # If time is neither column nor index, skip (shouldn't happen)
-            return {"status": "success", "data": {"symbol": symbol, "data": []}, "message": "Time column missing"}
-        
+            return {
+                "status": "success",
+                "data": {"symbol": symbol, "data": []},
+                "message": "Time column missing",
+            }
+
         # Parse requested indicators
         ind_list = [i.strip().lower() for i in indicators.split(",")]
-        
+
         # Ensure we always return the time column
         cols_to_return = ["time"]
         for ind in ind_list:
             if ind in df.columns:
                 cols_to_return.append(ind)
-                
+
             # Handle group requests
             if ind == "bb":
                 for c in ["bb_upper", "bb_lower", "sma20"]:
@@ -79,25 +93,23 @@ async def get_indicators(
                 for c in ["tenkan_sen"]:
                     if c in df.columns:
                         cols_to_return.append(c)
-                
+
         # Deduplicate columns
-        cols_to_return = list(dict.fromkeys([c for c in cols_to_return if c in df.columns]))
-        
+        cols_to_return = list(
+            dict.fromkeys([c for c in cols_to_return if c in df.columns])
+        )
+
         result_df = df[cols_to_return]
-        
+
         # Convert to records
         result_data = result_df.to_dict(orient="records")
-        
+
         return {
             "status": "success",
-            "data": {
-                "symbol": symbol,
-                "interval": interval,
-                "data": result_data
-            },
-            "message": "Indicators calculated successfully"
+            "data": {"symbol": symbol, "interval": interval, "data": result_data},
+            "message": "Indicators calculated successfully",
         }
-        
+
     except Exception as e:
         logger.error(f"Indicator calculation failed: {e}")
         raise HTTPException(500, str(e))

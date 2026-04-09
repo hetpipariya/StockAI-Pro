@@ -34,6 +34,13 @@ const toNumber = (value, fallback = null) => {
   return Number.isFinite(num) ? num : fallback;
 };
 
+const normalizeConfidencePct = (value, fallback = 0) => {
+  const raw = toNumber(value, null);
+  if (raw == null) return fallback;
+  const pct = raw <= 1 ? raw * 100 : raw;
+  return Math.max(0, Math.min(100, pct));
+};
+
 const candleTimestampToSeconds = (value) => {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value > 1e12 ? Math.floor(value / 1000) : Math.floor(value);
@@ -233,11 +240,33 @@ export const AppProvider = ({ children }) => {
           setSignalData({
             symbol: normalizedSymbol,
             signal: bundledPrediction.signal,
-            confidence: bundledPrediction.confidence,
+            confidence: normalizeConfidencePct(
+              bundledPrediction.confidence,
+              toNumber(bundledPrediction.confidence_pct, 0)
+            ),
+            momentumScore: toNumber(bundledPrediction.momentum_score, 50),
+            trendScore: toNumber(bundledPrediction.trend_score, 50),
+            volatilityScore: toNumber(bundledPrediction.volatility_score, 50),
+            volatilityState: bundledPrediction.volatility_state || 'MISSING',
+            volumeScore: toNumber(bundledPrediction.volume_score, 50),
+            volumeRatio: toNumber(bundledPrediction.volume_ratio, 1),
+            volumeRatioFlag: bundledPrediction.volume_ratio_flag || 'NORMAL',
+            volumeSpike: Boolean(bundledPrediction.volume_spike),
+            volumeSpikeStrength: toNumber(bundledPrediction.volume_spike_strength, 0),
+            vwapDeviation: toNumber(bundledPrediction.vwap_deviation, 0),
+            vwapBias: bundledPrediction.vwap_bias || 'NEUTRAL',
+            obvSlope: toNumber(bundledPrediction.obv_slope, 0),
+            obvDivergence: Boolean(bundledPrediction.obv_divergence),
+            volumeTrendSlope: toNumber(bundledPrediction.volume_trend_slope, 0),
+            volumeTrendDirection: bundledPrediction.volume_trend_direction || 'FLAT',
+            positionSizeFactor: toNumber(bundledPrediction.position_size_factor, 0.75),
+            mtfAlignment: bundledPrediction.mtf_alignment || 'NEUTRAL',
+            emaStructure: bundledPrediction.ema_structure || 'MIXED STACK',
             currentPrice: payload?.snapshot?.ltp,
             target: bundledPrediction.target_price,
             stopLoss: bundledPrediction.stop_loss,
             regime: bundledPrediction.regime,
+            reason: bundledPrediction.reason || bundledPrediction.explanation,
             explanation: bundledPrediction.explanation,
             timestamp: new Date().toISOString(),
           });
@@ -358,6 +387,48 @@ export const AppProvider = ({ children }) => {
         const symbol = String(message.symbol || '').toUpperCase();
         if (symbol !== selectedSymbolRef.current) return;
         updateBundleFromCandle(message);
+        return;
+      }
+
+      if (message.type === 'signal_update') {
+        const symbol = String(message.symbol || '').toUpperCase();
+        if (symbol !== selectedSymbolRef.current) return;
+
+        setSignalData((prev) => ({
+          ...(prev || {}),
+          symbol,
+          signal: String(message.signal || 'HOLD').toUpperCase(),
+          confidence: normalizeConfidencePct(
+            message.confidence,
+            toNumber(message.confidence_pct, 0)
+          ),
+          momentumScore: toNumber(message.momentum_score, toNumber(prev?.momentumScore, 50)),
+          trendScore: toNumber(message.trend_score, toNumber(prev?.trendScore, 50)),
+          volatilityScore: toNumber(message.volatility_score, toNumber(prev?.volatilityScore, 50)),
+          volatilityState: message.volatility_state || prev?.volatilityState || 'MISSING',
+          volumeScore: toNumber(message.volume_score, toNumber(prev?.volumeScore, 50)),
+          volumeRatio: toNumber(message.volume_ratio, toNumber(prev?.volumeRatio, 1)),
+          volumeRatioFlag: message.volume_ratio_flag || prev?.volumeRatioFlag || 'NORMAL',
+          volumeSpike: Boolean(message.volume_spike),
+          volumeSpikeStrength: toNumber(message.volume_spike_strength, toNumber(prev?.volumeSpikeStrength, 0)),
+          vwapDeviation: toNumber(message.vwap_deviation, toNumber(prev?.vwapDeviation, 0)),
+          vwapBias: message.vwap_bias || prev?.vwapBias || 'NEUTRAL',
+          obvSlope: toNumber(message.obv_slope, toNumber(prev?.obvSlope, 0)),
+          obvDivergence: Boolean(message.obv_divergence),
+          volumeTrendSlope: toNumber(message.volume_trend_slope, toNumber(prev?.volumeTrendSlope, 0)),
+          volumeTrendDirection: message.volume_trend_direction || prev?.volumeTrendDirection || 'FLAT',
+          positionSizeFactor: toNumber(message.position_size_factor, toNumber(prev?.positionSizeFactor, 0.75)),
+          mtfAlignment: message.mtf_alignment || prev?.mtfAlignment || 'NEUTRAL',
+          emaStructure: message.ema_structure || prev?.emaStructure || 'MIXED STACK',
+          currentPrice: toNumber(message.prediction, toNumber(prev?.currentPrice, 0)),
+          target: toNumber(message.target_price, toNumber(prev?.target, 0)),
+          stopLoss: toNumber(message.stop_loss, toNumber(prev?.stopLoss, 0)),
+          regime: message.regime || prev?.regime || 'Unknown',
+          reason: message.reason || message.explanation || prev?.reason || '',
+          explanation: message.explanation || prev?.explanation || '',
+          timestamp: message.timestamp || new Date().toISOString(),
+        }));
+        setSignalError(null);
       }
     };
 
@@ -454,12 +525,31 @@ export const AppProvider = ({ children }) => {
       return {
         symbol: String(signalData.symbol || selectedSymbol),
         signal: String(signalData.signal || 'HOLD').toUpperCase(),
-        confidence: toNumber(signalData.confidence, 0),
+        confidence: normalizeConfidencePct(signalData.confidence, 0),
+        momentumScore: toNumber(signalData.momentumScore, 50),
+        trendScore: toNumber(signalData.trendScore, 50),
+        volatilityScore: toNumber(signalData.volatilityScore, 50),
+        volatilityState: signalData.volatilityState || 'MISSING',
+        volumeScore: toNumber(signalData.volumeScore, 50),
+        volumeRatio: toNumber(signalData.volumeRatio, 1),
+        volumeRatioFlag: signalData.volumeRatioFlag || 'NORMAL',
+        volumeSpike: Boolean(signalData.volumeSpike),
+        volumeSpikeStrength: toNumber(signalData.volumeSpikeStrength, 0),
+        vwapDeviation: toNumber(signalData.vwapDeviation, 0),
+        vwapBias: signalData.vwapBias || 'NEUTRAL',
+        obvSlope: toNumber(signalData.obvSlope, 0),
+        obvDivergence: Boolean(signalData.obvDivergence),
+        volumeTrendSlope: toNumber(signalData.volumeTrendSlope, 0),
+        volumeTrendDirection: signalData.volumeTrendDirection || 'FLAT',
+        positionSizeFactor: toNumber(signalData.positionSizeFactor, 0.75),
+        mtfAlignment: signalData.mtfAlignment || 'NEUTRAL',
+        emaStructure: signalData.emaStructure || 'MIXED STACK',
         target: toNumber(signalData.target, currentPrice),
         stopLoss: toNumber(signalData.stopLoss, currentPrice),
         currentPrice,
         timestamp: signalData.timestamp || new Date().toISOString(),
         regime: signalData.regime || 'Unknown',
+        reason: signalData.reason || signalData.explanation || '',
         explanation: signalData.explanation || '',
         modelVersion: toNumber(signalData.modelVersion, 0),
       };
@@ -475,12 +565,34 @@ export const AppProvider = ({ children }) => {
     return {
       symbol: String(bundleData?.symbol || selectedSymbol),
       signal: String(prediction.signal || 'HOLD').toUpperCase(),
-      confidence: toNumber(prediction.confidence, 0),
+      confidence: normalizeConfidencePct(
+        prediction.confidence,
+        toNumber(prediction.confidence_pct, 0)
+      ),
+      momentumScore: toNumber(prediction.momentum_score, 50),
+      trendScore: toNumber(prediction.trend_score, 50),
+      volatilityScore: toNumber(prediction.volatility_score, 50),
+      volatilityState: prediction.volatility_state || 'MISSING',
+      volumeScore: toNumber(prediction.volume_score, 50),
+      volumeRatio: toNumber(prediction.volume_ratio, 1),
+      volumeRatioFlag: prediction.volume_ratio_flag || 'NORMAL',
+      volumeSpike: Boolean(prediction.volume_spike),
+      volumeSpikeStrength: toNumber(prediction.volume_spike_strength, 0),
+      vwapDeviation: toNumber(prediction.vwap_deviation, 0),
+      vwapBias: prediction.vwap_bias || 'NEUTRAL',
+      obvSlope: toNumber(prediction.obv_slope, 0),
+      obvDivergence: Boolean(prediction.obv_divergence),
+      volumeTrendSlope: toNumber(prediction.volume_trend_slope, 0),
+      volumeTrendDirection: prediction.volume_trend_direction || 'FLAT',
+      positionSizeFactor: toNumber(prediction.position_size_factor, 0.75),
+      mtfAlignment: prediction.mtf_alignment || 'NEUTRAL',
+      emaStructure: prediction.ema_structure || 'MIXED STACK',
       target: toNumber(prediction.target_price, 0),
       stopLoss: toNumber(prediction.stop_loss, 0),
       currentPrice,
       timestamp: new Date().toISOString(),
       regime: prediction.regime || 'Unknown',
+      reason: prediction.reason || prediction.explanation || '',
       explanation: prediction.explanation || '',
     };
   }, [bundleData, isSignalLoading, selectedSymbol, signalData, signalError, snapshot]);

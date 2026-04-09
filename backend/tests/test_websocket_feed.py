@@ -127,9 +127,13 @@ async def test_on_smartapi_tick_normalizes_reliance_paise(monkeypatch):
             return None
 
     monkeypatch.setattr(handler, "broadcast_tick", _capture)
-    monkeypatch.setattr(handler.tick_aggregator, "process_tick", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        handler.tick_aggregator, "process_tick", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(handler, "_cached_candle_builder_15m", _DummyCandleBuilder())
-    monkeypatch.setattr(handler, "_schedule_async", lambda coro: asyncio.create_task(coro))
+    monkeypatch.setattr(
+        handler, "_schedule_async", lambda coro: asyncio.create_task(coro)
+    )
 
     msg = {
         "tradingsymbol": "RELIANCE-EQ",

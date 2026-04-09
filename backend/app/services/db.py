@@ -3,25 +3,24 @@ Database models and engine configuration.
 PostgreSQL primary, SQLite dev-only fallback.
 All trading tables enforce user_id isolation via foreign keys.
 """
+
 import asyncio
 import logging
-import warnings
 import time
+import warnings
 from datetime import datetime
-from typing import Optional
 
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy import (
-    create_engine, text, ForeignKey, Text,
-    String, Float, Integer, DateTime, UniqueConstraint, Index, Boolean,
-    event,
-)
+from sqlalchemy import (Boolean, DateTime, Float, ForeignKey, Index, Integer,
+                        String, Text, UniqueConstraint, create_engine, event,
+                        text)
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import (Mapped, declarative_base, mapped_column,
+                            relationship, sessionmaker)
 from sqlalchemy.pool import AsyncAdaptedQueuePool
-from sqlalchemy.orm import (
-    declarative_base, Mapped, mapped_column, sessionmaker, relationship,
-)
 
-from app.config import DATABASE_URL as CONFIG_DATABASE_URL, APP_ENV, REQUIRE_POSTGRES, DB_SLOW_QUERY_MS
+from app.config import APP_ENV
+from app.config import DATABASE_URL as CONFIG_DATABASE_URL
+from app.config import DB_SLOW_QUERY_MS, REQUIRE_POSTGRES
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +34,16 @@ Base = declarative_base()
 
 class UserModel(Base):
     """User account with auth, trading config, and relationships."""
+
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
-    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=True, index=True)
+    username: Mapped[str] = mapped_column(
+        String(50), unique=True, nullable=False, index=True
+    )
+    email: Mapped[str] = mapped_column(
+        String(255), unique=True, nullable=True, index=True
+    )
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # Account state
@@ -47,24 +51,38 @@ class UserModel(Base):
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # Trading config (per-user, loaded into UserTradingState)
-    starting_capital: Mapped[float] = mapped_column(Float, default=100_000.0, nullable=False)
-    trading_mode: Mapped[str] = mapped_column(String(10), default="PAPER", nullable=False)
+    starting_capital: Mapped[float] = mapped_column(
+        Float, default=100_000.0, nullable=False
+    )
+    trading_mode: Mapped[str] = mapped_column(
+        String(10), default="PAPER", nullable=False
+    )
 
     # Refresh token storage (for token rotation)
     refresh_token_hash: Mapped[str] = mapped_column(String(255), nullable=True)
 
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
     last_login: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )
 
     # Relationships
-    orders = relationship("OrderModel", back_populates="user", cascade="all, delete-orphan")
-    positions = relationship("PositionModel", back_populates="user", cascade="all, delete-orphan")
-    trade_logs = relationship("TradeLogModel", back_populates="user", cascade="all, delete-orphan")
-    predictions = relationship("PredictionModel", back_populates="user", cascade="all, delete-orphan")
+    orders = relationship(
+        "OrderModel", back_populates="user", cascade="all, delete-orphan"
+    )
+    positions = relationship(
+        "PositionModel", back_populates="user", cascade="all, delete-orphan"
+    )
+    trade_logs = relationship(
+        "TradeLogModel", back_populates="user", cascade="all, delete-orphan"
+    )
+    predictions = relationship(
+        "PredictionModel", back_populates="user", cascade="all, delete-orphan"
+    )
 
     def __repr__(self):
         return f"<User id={self.id} username={self.username}>"
@@ -72,6 +90,7 @@ class UserModel(Base):
 
 class CandleModel(Base):
     """OHLCV candle storage with composite unique on (symbol, timeframe, timestamp)."""
+
     __tablename__ = "candles"
     __table_args__ = (
         UniqueConstraint("symbol", "timeframe", "timestamp", name="uq_candle"),
@@ -91,6 +110,7 @@ class CandleModel(Base):
 
 class OrderModel(Base):
     """Orders with user isolation and composite indexes."""
+
     __tablename__ = "orders"
     __table_args__ = (
         Index("ix_orders_user_symbol", "user_id", "symbol"),
@@ -100,8 +120,10 @@ class OrderModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     order_id: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
@@ -116,9 +138,13 @@ class OrderModel(Base):
     confidence: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
     reason: Mapped[str] = mapped_column(Text, nullable=True)
     error: Mapped[str] = mapped_column(Text, nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, index=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
     )
 
     user = relationship("UserModel", back_populates="orders")
@@ -126,6 +152,7 @@ class OrderModel(Base):
 
 class PositionModel(Base):
     """Open positions — one per user per symbol (enforced by unique constraint)."""
+
     __tablename__ = "positions"
     __table_args__ = (
         UniqueConstraint("user_id", "symbol", name="uq_position_user_symbol"),
@@ -134,8 +161,10 @@ class PositionModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=False,
     )
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     direction: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -146,7 +175,9 @@ class PositionModel(Base):
     mode: Mapped[str] = mapped_column(String(10), default="paper")
     opened_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow,
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
     )
 
     user = relationship("UserModel", back_populates="positions")
@@ -154,6 +185,7 @@ class PositionModel(Base):
 
 class TradeLogModel(Base):
     """Immutable audit trail for every trade action."""
+
     __tablename__ = "trade_logs"
     __table_args__ = (
         Index("ix_trade_logs_user_id", "user_id"),
@@ -163,10 +195,14 @@ class TradeLogModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=False,
     )
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, index=True
+    )
     order_id: Mapped[str] = mapped_column(String(100), nullable=True, index=True)
     event: Mapped[str] = mapped_column(String(50), nullable=False)
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
@@ -188,18 +224,21 @@ class TradeLogModel(Base):
 
 class PredictionModel(Base):
     """ML predictions — nullable user_id for system-generated predictions."""
+
     __tablename__ = "predictions"
-    __table_args__ = (
-        Index("ix_predictions_symbol_timestamp", "symbol", "timestamp"),
-    )
+    __table_args__ = (Index("ix_predictions_symbol_timestamp", "symbol", "timestamp"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("users.id", ondelete="SET NULL"),
-        nullable=True, index=True,
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, index=True
+    )
     horizon: Mapped[str] = mapped_column(String(10), nullable=True)
     predicted_price: Mapped[float] = mapped_column(Float, nullable=True)
     signal: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -213,6 +252,7 @@ class PredictionModel(Base):
 
 class TradeModel(Base):
     """Simple trade table for API examples and production smoke checks."""
+
     __tablename__ = "trades"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -221,11 +261,14 @@ class TradeModel(Base):
     quantity: Mapped[int] = mapped_column(Integer)
     price: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(20), default="OPEN")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, index=True
+    )
 
 
 class OrderStateLog(Base):
     """Order state transitions for debugging."""
+
     __tablename__ = "order_states"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -236,6 +279,7 @@ class OrderStateLog(Base):
 
 class DailyRiskState(Base):
     """Global daily risk snapshot (legacy — user-level risk is in TradingManager)."""
+
     __tablename__ = "daily_risk_state"
 
     date: Mapped[str] = mapped_column(String(10), primary_key=True)
@@ -253,14 +297,18 @@ _db_url = CONFIG_DATABASE_URL.strip()
 _env = APP_ENV
 
 if not _db_url:
-    raise RuntimeError("DATABASE_URL resolution failed: empty value received from app.config")
+    raise RuntimeError(
+        "DATABASE_URL resolution failed: empty value received from app.config"
+    )
 
 DATABASE_URL = _db_url
 _is_postgres = "postgresql" in _db_url or "postgres" in _db_url
 _is_sqlite = _db_url.startswith("sqlite")
 
 if _env == "production" and _is_sqlite:
-    raise RuntimeError("FATAL: SQLite is not allowed in production. Configure PostgreSQL.")
+    raise RuntimeError(
+        "FATAL: SQLite is not allowed in production. Configure PostgreSQL."
+    )
 
 if REQUIRE_POSTGRES and not _is_postgres:
     warnings.warn(
@@ -329,7 +377,9 @@ sync_session_factory = sessionmaker(
 
 def _register_slow_query_logging(target_engine, label: str) -> None:
     @event.listens_for(target_engine, "before_cursor_execute")
-    def before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    def before_cursor_execute(
+        conn, cursor, statement, parameters, context, executemany
+    ):
         conn.info.setdefault("_query_start_time", []).append(time.perf_counter())
 
     @event.listens_for(target_engine, "after_cursor_execute")
@@ -385,11 +435,16 @@ async def check_db_connection(retries: int = 3, delay: float = 2.0) -> bool:
             if attempt < retries:
                 logger.warning(
                     "[DB] Connection check failed (attempt %d/%d): %s — retrying in %.1fs",
-                    attempt, retries, exc, wait,
+                    attempt,
+                    retries,
+                    exc,
+                    wait,
                 )
                 await asyncio.sleep(wait)
             else:
-                logger.error("[DB] Connection check failed after %d attempts: %s", retries, exc)
+                logger.error(
+                    "[DB] Connection check failed after %d attempts: %s", retries, exc
+                )
     return False
 
 

@@ -1,13 +1,12 @@
 """
 Tests for the RiskManager — position sizing, daily limits, trade caps.
 """
-import pytest
+
+from app.trading.risk_manager import RiskManager
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from app.trading.risk_manager import RiskManager, TradeRisk
 
 
 class TestRiskManagerBasics:
@@ -26,8 +25,9 @@ class TestRiskManagerBasics:
     def test_position_size_1pct_risk(self):
         """1% of 100k = 1000 risk. With ATR=10 and mult=1.5, stop_dist=15.
         Shares = 1000 / 15 = 66."""
-        rm = RiskManager(starting_capital=100_000, risk_per_trade_pct=0.01,
-                         atr_stop_multiplier=1.5)
+        rm = RiskManager(
+            starting_capital=100_000, risk_per_trade_pct=0.01, atr_stop_multiplier=1.5
+        )
         trade = rm.calculate_trade("RELIANCE", "BUY", 1000.0, atr=10.0)
         assert trade is not None
         assert trade.position_size == 66  # 1000 / 15 = 66.67 -> 66
@@ -118,7 +118,9 @@ class TestRiskManagerEdgeCases:
 
     def test_position_size_exceeds_capital(self):
         """If shares * price > capital, cap shares."""
-        rm = RiskManager(starting_capital=1000, risk_per_trade_pct=0.10, min_account_balance=0)
+        rm = RiskManager(
+            starting_capital=1000, risk_per_trade_pct=0.10, min_account_balance=0
+        )
         trade = rm.calculate_trade("TEST", "BUY", 500.0, atr=1.0)
         assert trade is not None
         # Risk = 100, stop_dist = 1.5, shares = 100/1.5 = 66

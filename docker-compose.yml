@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   db:
     image: postgres:15-alpine
@@ -47,7 +45,7 @@ services:
       - SMARTAPI_CLIENT_PWD=${SMARTAPI_CLIENT_PWD}
       - SMARTAPI_TOTP_SECRET=${SMARTAPI_TOTP_SECRET}
       - JWT_SECRET=${JWT_SECRET:-super-secret-jwt-key-for-stockai-pro}
-      - NEWS_API_KEY=${NEWS_API_KEY}
+      - NEWS_API_KEY=${NEWS_API_KEY:-}
     ports:
       - "8000:8000"
     depends_on:

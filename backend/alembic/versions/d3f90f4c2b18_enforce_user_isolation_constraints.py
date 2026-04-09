@@ -5,11 +5,11 @@ Revises: b770c489ddcd
 Create Date: 2026-03-29 00:00:00.000000
 
 """
+
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "d3f90f4c2b18"
@@ -42,7 +42,9 @@ def upgrade() -> None:
 
     if null_user_rows_exist:
         # Enforcing NOT NULL requires cleanup for legacy rows.
-        first_user_id = bind.execute(sa.text("SELECT id FROM users ORDER BY id LIMIT 1")).scalar()
+        first_user_id = bind.execute(
+            sa.text("SELECT id FROM users ORDER BY id LIMIT 1")
+        ).scalar()
         if first_user_id is None:
             raise RuntimeError(
                 "Cannot enforce user_id NOT NULL because users table is empty. "
@@ -88,17 +90,33 @@ def upgrade() -> None:
     )
 
     if not _index_exists("orders", "ix_orders_user_symbol"):
-        op.create_index("ix_orders_user_symbol", "orders", ["user_id", "symbol"], unique=False)
+        op.create_index(
+            "ix_orders_user_symbol", "orders", ["user_id", "symbol"], unique=False
+        )
     if not _index_exists("orders", "ix_orders_user_status"):
-        op.create_index("ix_orders_user_status", "orders", ["user_id", "status"], unique=False)
+        op.create_index(
+            "ix_orders_user_status", "orders", ["user_id", "status"], unique=False
+        )
     if not _index_exists("positions", "ix_positions_user_id"):
         op.create_index("ix_positions_user_id", "positions", ["user_id"], unique=False)
     if not _index_exists("trade_logs", "ix_trade_logs_user_id"):
-        op.create_index("ix_trade_logs_user_id", "trade_logs", ["user_id"], unique=False)
+        op.create_index(
+            "ix_trade_logs_user_id", "trade_logs", ["user_id"], unique=False
+        )
     if not _index_exists("trade_logs", "ix_trade_logs_user_symbol"):
-        op.create_index("ix_trade_logs_user_symbol", "trade_logs", ["user_id", "symbol"], unique=False)
+        op.create_index(
+            "ix_trade_logs_user_symbol",
+            "trade_logs",
+            ["user_id", "symbol"],
+            unique=False,
+        )
     if not _index_exists("trade_logs", "ix_trade_logs_user_timestamp"):
-        op.create_index("ix_trade_logs_user_timestamp", "trade_logs", ["user_id", "timestamp"], unique=False)
+        op.create_index(
+            "ix_trade_logs_user_timestamp",
+            "trade_logs",
+            ["user_id", "timestamp"],
+            unique=False,
+        )
 
 
 def downgrade() -> None:

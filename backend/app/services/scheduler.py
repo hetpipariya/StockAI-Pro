@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from app import config
 from app.services.instrument_master import load_instruments
-from app.websocket.handler import auto_start_ws, get_or_create_ws_connector, mock_ws_data_job
+from app.websocket.handler import auto_start_ws, get_or_create_ws_connector
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +22,13 @@ def start_scheduler() -> None:
     scheduler.add_job(regen_token, "cron", hour=8, minute=30)
     scheduler.add_job(refresh_instruments, "cron", hour=8, minute=0)
     scheduler.add_job(prewarm_predictions, "cron", minute="*/15")
-    scheduler.add_job(auto_start_ws, "cron", minute="*/1")
-    scheduler.add_job(mock_ws_data_job, "interval", seconds=5)
-    scheduler.add_job(sync_broker_positions, "cron", minute="*/5", hour="9-15", day_of_week="mon-fri")
+    if config.ENABLE_WS:
+        scheduler.add_job(auto_start_ws, "cron", minute="*/1")
+    else:
+        logger.info("[SCHEDULER] ENABLE_WS=false; skipping websocket jobs")
+    scheduler.add_job(
+        sync_broker_positions, "cron", minute="*/5", hour="9-15", day_of_week="mon-fri"
+    )
     scheduler.start()
     logger.info("[SCHEDULER] Started recurring jobs")
 
@@ -74,14 +80,29 @@ async def sync_broker_positions():
 
         summaries = trading_manager.get_all_summaries()
         for summary in summaries:
-            user_id = int(summary.get("user_id"))
-            executor = get_executor(
-                user_id=user_id,
-                mode=summary.get("mode", _cfg.TRADING_MODE),
-                capital=float(summary.get("starting_capital", _cfg.STARTING_CAPITAL)),
-            )
-            report = executor.router.sync_positions_with_broker(user_id=user_id)
-            if report.get("mismatches"):
-                logger.warning("[SYNC] user_id=%d mismatches: %s", user_id, report["mismatches"])
+            try:
+                raw_user_id = summary.get("user_id")
+                if raw_user_id is None:
+                    logger.warning("[SYNC] Skipping summary without user_id: %s", summary)
+                    continue
+
+                user_id = int(raw_user_id)
+                executor = await asyncio.to_thread(
+                    get_executor,
+                    user_id=user_id,
+                    mode=summary.get("mode", _cfg.TRADING_MODE),
+                    capital=float(summary.get("starting_capital", _cfg.STARTING_CAPITAL)),
+                )
+                report = await asyncio.to_thread(
+                    executor.router.sync_positions_with_broker,
+                    user_id=user_id,
+                )
+
+                if report.get("mismatches"):
+                    logger.warning(
+                        "[SYNC] user_id=%d mismatches: %s", user_id, report["mismatches"]
+                    )
+            except Exception as user_exc:
+                logger.warning("[SYNC] Per-user sync skipped due to error: %s", user_exc)
     except Exception as e:
         logger.error("[SYNC] Broker sync job failed: %s", e)

@@ -116,7 +116,9 @@ async def test_refresh_rejects_access_token(client, signup_user):
     created = await signup_user("refresh_type")
     access_token = created["tokens"]["access_token"]
 
-    response = await client.post("/api/v1/auth/refresh", json={"refresh_token": access_token})
+    response = await client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": access_token}
+    )
 
     assert response.status_code == 401
     body = response.json()
@@ -132,12 +134,16 @@ async def test_refresh_rotation_invalidates_old_refresh_token(client, signup_use
     # JWT payload uses second-level timestamps; wait so refreshed token gets a new iat/exp.
     await asyncio.sleep(1.1)
 
-    first_refresh = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_1})
+    first_refresh = await client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": refresh_1}
+    )
     assert first_refresh.status_code == 200
     refresh_2 = first_refresh.json()["data"]["refresh_token"]
     assert refresh_2 != refresh_1
 
-    replay = await client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_1})
+    replay = await client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": refresh_1}
+    )
     assert replay.status_code == 401
     replay_body = replay.json()
     assert replay_body["status"] == "error"

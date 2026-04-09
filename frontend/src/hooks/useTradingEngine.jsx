@@ -9,6 +9,13 @@ export const toFiniteNumber = (value) => {
   return Number.isFinite(num) ? num : null
 }
 
+const normalizeConfidencePct = (value, fallback = 0) => {
+  const raw = toFiniteNumber(value)
+  if (raw == null) return fallback
+  const pct = raw <= 1 ? raw * 100 : raw
+  return Math.max(0, Math.min(100, pct))
+}
+
 const MAX_CANDLES = 100
 const HISTORY_LIMIT = 100
 const WS_BATCH_MS = 32
@@ -145,7 +152,7 @@ export function useTradingEngine() {
   
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState(null)
-  const [isMockData, setIsMockData] = useState(false)
+  const [isUnavailableData, setIsUnavailableData] = useState(false)
   const [marketStatus, setMarketStatus] = useState(null)
   const [activeSignal, setActiveSignal] = useState(null)
   
@@ -209,18 +216,29 @@ export function useTradingEngine() {
     setSnapshot(nextSnapshot)
     setIndicatorData(nextIndicators)
     setMarketStatus(nextStatus)
+    setIsUnavailableData(
+      Boolean(nextSnapshot?.unavailable) ||
+        String(nextSnapshot?.data_source || '').toUpperCase() === 'UNAVAILABLE'
+    )
     setErrorMsg(cleanedHistory.length ? null : 'No market data available')
     setLoading(false)
 
     if (nextPrediction) {
-      setPrediction(nextPrediction)
-      const predConfidence = toFiniteNumber(nextPrediction?.confidence) ?? 0
+      const normalizedPrediction = {
+        ...nextPrediction,
+        confidence: normalizeConfidencePct(
+          nextPrediction?.confidence,
+          toFiniteNumber(nextPrediction?.confidence_pct) ?? 0
+        ),
+      }
+      setPrediction(normalizedPrediction)
+      const predConfidence = normalizedPrediction.confidence
       if (nextPrediction?.signal && nextPrediction.signal !== 'HOLD' && predConfidence >= 70) {
         if (!previousPredictionRef.current || previousPredictionRef.current.signal !== nextPrediction.signal) {
-          setActiveSignal(nextPrediction)
+          setActiveSignal(normalizedPrediction)
         }
       }
-      previousPredictionRef.current = nextPrediction
+      previousPredictionRef.current = normalizedPrediction
     }
   }, [])
 
@@ -262,7 +280,7 @@ export function useTradingEngine() {
       setSnapshot(null)
       setPrediction(null)
       setIndicatorData([])
-      setIsMockData(false)
+      setIsUnavailableData(false)
       setErrorMsg(null)
       setLoading(true)
     }
@@ -311,7 +329,7 @@ export function useTradingEngine() {
       ask: toFiniteNumber(tick.ask) ?? ltp,
       volume: toFiniteNumber(tick.volume) ?? 0,
     }))
-    setIsMockData(Boolean(tick.is_mock))
+    setIsUnavailableData(Boolean(tick.unavailable))
 
     setOhlcv((prev) => {
       if (!Array.isArray(prev) || prev.length === 0) {
@@ -334,61 +352,19 @@ export function useTradingEngine() {
   }, [])
 
   const loadMoreHistory = useCallback(async () => {
+    // Bundle API Deprecation Note (2026-04-01):
+    // The old /market/history endpoint with pagination (to_time) is deprecated.
+    // The new /bundle endpoint returns up to 100 candles per request.
+    // Client-side history expansion is handled via WebSocket candle updates + local state.
+    // This function is retained as a no-op for backward compatibility.
     if (isPaginatingRef.current || ohlcv.length === 0) return
-    isPaginatingRef.current = true
     
-    try {
-      const targetSymbol = symbolRef.current
-      const targetTimeframe = timeframeRef.current
-      const targetIndicatorKey = indicatorKeyRef.current
-      const oldestCandle = ohlcv[0]
-      const tf = targetTimeframe === '1d' ? '1d' : targetTimeframe
-      const d = new Date(oldestCandle.time)
-      const toTime = d.toISOString()
-
-      if (paginationAbortRef.current) {
-        paginationAbortRef.current.abort()
-      }
-      const controller = new AbortController()
-      paginationAbortRef.current = controller
-
-      const payload = await apiGetWithRetry('/market/history', {
-        signal: controller.signal,
-        params: {
-          symbol: targetSymbol,
-          interval: tf,
-          limit: HISTORY_LIMIT,
-          to_time: toTime,
-        },
-        retries: 1,
-        cacheTtlMs: 3000,
-      })
-
-      if (controller.signal.aborted) return
-      if (symbolRef.current !== targetSymbol || timeframeRef.current !== targetTimeframe || indicatorKeyRef.current !== targetIndicatorKey) {
-        return
-      }
-
-      const rawNewCandles = Array.isArray(payload?.data?.data)
-        ? payload.data.data.filter((candle) => isPlainObject(candle))
-        : []
-      const newCandles = validateAndCleanOHLCV(rawNewCandles, targetTimeframe)
-      
-      if (newCandles.length > 0) {
-        setOhlcv((prev) => {
-           const merged = mergeCandles(prev, newCandles)
-           const key = timeframeKey(targetSymbol, targetTimeframe, targetIndicatorKey)
-           historyCacheRef.current.set(key, merged)
-           return merged
-        })
-      }
-    } catch (error) {
-      if (error?.name !== 'AbortError') {
-        setErrorMsg('No market data available')
-      }
-    } finally {
-      setTimeout(() => { isPaginatingRef.current = false }, 500)
-    }
+    // Pagination is now handled by:
+    // 1. Initial bundle API fetch (100 candles)
+    // 2. Real-time WebSocket updates appending new candles
+    // 3. Local state merging older → newer
+    // No additional historical pagination needed.
+    return
   }, [ohlcv])
 
   const prevWsSymbolRef = useRef(null)
@@ -479,7 +455,13 @@ export function useTradingEngine() {
     symbol, setSymbol,
     timeframe, setTimeframe,
     ohlcv, snapshot, prediction, indicators, setIndicators, indicatorData,
-    loading, errorMsg, isMockData, marketStatus, activeSignal, setActiveSignal,
+    loading,
+    errorMsg,
+    isUnavailableData,
+    isMockData: isUnavailableData,
+    marketStatus,
+    activeSignal,
+    setActiveSignal,
     wsConnected: isConnected,
     wsReconnecting: isReconnecting,
     loadMoreHistory

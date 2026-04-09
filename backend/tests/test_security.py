@@ -19,7 +19,9 @@ async def test_tampered_access_token_is_rejected(client, signup_user):
     replacement = "A" if signature[0] != "A" else "B"
     tampered = f"{header}.{payload}.{replacement}{signature[1:]}"
 
-    response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {tampered}"})
+    response = await client.get(
+        "/api/v1/auth/me", headers={"Authorization": f"Bearer {tampered}"}
+    )
 
     assert response.status_code == 401
     body = response.json()
@@ -42,7 +44,9 @@ async def test_expired_access_token_is_rejected(client):
         algorithm=config.JWT_ALGORITHM,
     )
 
-    response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {expired_token}"})
+    response = await client.get(
+        "/api/v1/auth/me", headers={"Authorization": f"Bearer {expired_token}"}
+    )
 
     assert response.status_code == 401
     body = response.json()

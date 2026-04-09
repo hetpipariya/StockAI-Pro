@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
-from typing import Optional, Literal
+import asyncio
 import uuid
+from typing import Literal, Optional
 
-from app.connectors import SmartAPIConnector, get_symbol_token, get_tradingsymbol
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
 from app.config import SMARTAPI_EXCHANGE
-from app.services.db import async_session, OrderModel, UserModel
+from app.connectors import (SmartAPIConnector, get_symbol_token,
+                            get_tradingsymbol)
 from app.routes.auth import get_current_user
+from app.services.db import OrderModel, UserModel, async_session
 
 router = APIRouter(prefix="/api", tags=["order"])
 
@@ -44,7 +47,7 @@ async def place_order(
     order_id = ""
     status = ""
     resp_data = None
-    
+
     if req.mode == "paper":
         order_id = f"PAPER_{req.symbol}_{req.transactiontype}_{req.quantity}_{uuid.uuid4().hex[:6]}"
         status = "COMPLETED"
@@ -72,17 +75,19 @@ async def place_order(
             "stoploss": "0",
         }
         try:
-            conn = get_connector()
-            resp = conn.place_order(payload)
+            conn = await asyncio.to_thread(get_connector)
+            resp = await asyncio.to_thread(conn.place_order, payload)
             if resp and resp.get("status"):
-                order_id = resp.get("data", {}).get("orderid", f"LIVE_{uuid.uuid4().hex[:8]}")
+                order_id = resp.get("data", {}).get(
+                    "orderid", f"LIVE_{uuid.uuid4().hex[:8]}"
+                )
                 status = "OPEN"
                 resp_data = resp
             else:
                 raise HTTPException(500, f"SmartAPI error: {resp}")
         except Exception as e:
             raise HTTPException(500, str(e))
-            
+
     # Save to DB
     if async_session:
         try:
@@ -95,12 +100,13 @@ async def place_order(
                     quantity=req.quantity,
                     price=req.price or 0.0,
                     status=status,
-                    mode=req.mode
+                    mode=req.mode,
                 )
                 session.add(order_record)
                 await session.commit()
         except Exception as e:
             import logging
+
             logging.getLogger(__name__).warning("Failed to save order to DB: %s", e)
 
     return resp_data

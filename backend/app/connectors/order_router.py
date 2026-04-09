@@ -173,8 +173,11 @@ class OrderRouter:
                 ).total_seconds()
                 if time_diff < 900:  # 15 minutes
                     logger.warning(
-                        f"[ORDER] Idempotency block: Exact {direction} order for {symbol} placed {
-                            time_diff:.0f}s ago. Skipping.")
+                        "[ORDER] Idempotency block: Exact %s order for %s placed %.0fs ago. Skipping.",
+                        direction,
+                        symbol,
+                        time_diff,
+                    )
                     log_trade(
                         "REJECTED",
                         order_id=recent_duplicate.order_id,

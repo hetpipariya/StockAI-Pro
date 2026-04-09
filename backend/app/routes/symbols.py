@@ -1,8 +1,10 @@
 """Symbol search route — uses instrument master for real NSE symbol data."""
+
 import logging
+
 from fastapi import APIRouter, Query
 
-from app.services.instrument_master import search_symbols, get_instrument_count
+from app.services.instrument_master import get_instrument_count, search_symbols
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/symbols", tags=["symbols"])

@@ -10,18 +10,14 @@ from fastapi import FastAPI
 from app.config import DATABASE_URL, ENABLE_WS
 from app.connectors import SmartAPIConnector
 from app.services.db import check_db_connection, init_db
-from app.services.instrument_master import get_instrument_count, load_instruments
+from app.services.instrument_master import (get_instrument_count,
+                                            load_instruments)
 from app.services.market_state import is_market_open
 from app.services.redis_client import get_redis
 from app.services.scheduler import start_scheduler, stop_scheduler
-from app.websocket.handler import (
-    DEFAULT_WATCHLIST,
-    get_ws_connector,
-    is_ws_streaming,
-    set_event_loop,
-    set_ws_connector,
-    start_smartapi_ws,
-)
+from app.websocket.handler import (DEFAULT_WATCHLIST, get_ws_connector,
+                                   is_ws_streaming, set_event_loop,
+                                   set_ws_connector, start_smartapi_ws)
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +25,7 @@ _DB_BACKEND = "SQLite" if DATABASE_URL.startswith("sqlite") else "PostgreSQL"
 try:
     parsed = urlparse(DATABASE_URL)
     if parsed.hostname:
-        clean_path = (parsed.path or "")
+        clean_path = parsed.path or ""
         for sep in ("\n", "\r", "`n", "`r"):
             clean_path = clean_path.split(sep)[0]
         for marker in ("JWT_SECRET=", "APP_ENV=", "ENV=", "REDIS_URL="):
@@ -106,7 +102,9 @@ async def lifespan(app: FastAPI):
     try:
         await get_redis()
     except Exception as exc:
-        logger.warning("[STARTUP] Redis init failed; in-memory cache fallback active: %s", exc)
+        logger.warning(
+            "[STARTUP] Redis init failed; in-memory cache fallback active: %s", exc
+        )
 
     logger.info("[STARTUP] Loading instrument master...")
     try:
@@ -124,13 +122,13 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             logger.error("[STARTUP] SmartAPI connector initialization failed: %s", exc)
             connector = None
-        
+
         if connector:
             try:
                 await asyncio.to_thread(connector.login)
                 logger.info("[STARTUP] SmartAPI logged in successfully")
             except Exception as exc:
-                logger.warning("[STARTUP] SmartAPI login failed (mock mode possible): %s", exc)
+                logger.warning("[STARTUP] SmartAPI login failed: %s", exc)
 
             logger.info("[STARTUP] Starting SmartAPI websocket...")
             try:
@@ -142,7 +140,7 @@ async def lifespan(app: FastAPI):
                     "[STARTUP] SmartAPI websocket start failed (non-fatal): %s. "
                     "Server will continue without real-time data. "
                     "WebSocket will auto-reconnect when available.",
-                    exc
+                    exc,
                 )
     else:
         logger.warning("[STARTUP] ENABLE_WS=false — SmartAPI WebSocket startup skipped")
@@ -156,8 +154,18 @@ async def lifespan(app: FastAPI):
         except ModuleNotFoundError:
             from .inference.runner import predict_symbol
 
-        warmup_result = predict_symbol(symbol="RELIANCE", timeframe="15m", latest_ltp=1400.0)
-        logger.info("[STARTUP] Model warmup complete: signal=%s confidence=%d%%", warmup_result.signal, warmup_result.confidence)
+        warmup_result = await asyncio.to_thread(
+            predict_symbol,
+            symbol="RELIANCE",
+            timeframe="15m",
+            latest_ltp=1400.0,
+        )
+        logger.info(
+            "[STARTUP] Model warmup complete: signal=%s confidence=%.3f (%.1f%%)",
+            warmup_result.signal,
+            warmup_result.confidence,
+            warmup_result.confidence * 100.0,
+        )
     except Exception as exc:
         logger.warning("[STARTUP] Model warmup failed: %s", exc)
 
@@ -169,7 +177,10 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     logger.info("  StockAI Pro - Backend Ready")
     logger.info("  Instruments: %s", get_instrument_count())
-    logger.info("  SmartAPI: %s", "Connected" if (connector and connector.is_logged_in) else "Not connected")
+    logger.info(
+        "  SmartAPI: %s",
+        "Connected" if (connector and connector.is_logged_in) else "Not connected",
+    )
     logger.info("  Market: %s", "Open" if is_market_open() else "Closed")
     logger.info("  WS Stream: %s", "started" if is_ws_streaming() else "not started")
     logger.info("=" * 60)
@@ -192,7 +203,7 @@ async def lifespan(app: FastAPI):
             logger.info("[SHUTDOWN] WebSocket stopped")
         except Exception as exc:
             logger.warning("[SHUTDOWN] WebSocket stop failed: %s", exc)
-        
+
         try:
             ws_connector.terminate_session()
             logger.info("[SHUTDOWN] SmartAPI session terminated")

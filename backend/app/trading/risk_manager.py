@@ -232,10 +232,11 @@ class RiskManager:
         self._open_positions = max(0, self._open_positions - 1)
         self.capital += pnl
         logger.info(
-            f"[RISK] Trade closed — PnL=₹{
-                pnl:,.2f}, Capital=₹{
-                self.capital:,.2f}, Daily={
-                self.daily_pnl_pct() * 100:.2f}%")
+            "[RISK] Trade closed - PnL=Rs%.2f, Capital=Rs%.2f, Daily=%.2f%%",
+            pnl,
+            self.capital,
+            self.daily_pnl_pct() * 100,
+        )
 
         # Check daily limit after close
         if self.daily_pnl_pct() <= -self.daily_loss_limit:

@@ -2,23 +2,21 @@
 Tests for the canonical feature engineering module.
 Ensures feature computation is deterministic, correct, and aligned.
 """
-import numpy as np
-import pandas as pd
-import pytest
+
+from app.inference.feature_engineering import (FEATURE_COLUMNS,
+                                               FEATURE_VERSION,
+                                               compute_features,
+                                               get_feature_summary,
+                                               validate_features)
 import sys
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+import pytest
+
 # Ensure backend is importable
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from app.inference.feature_engineering import (
-    FEATURE_COLUMNS,
-    FEATURE_VERSION,
-    MIN_ROWS_FOR_FEATURES,
-    compute_features,
-    validate_features,
-    get_feature_summary,
-)
 
 
 class TestFeatureColumns:
@@ -34,8 +32,17 @@ class TestFeatureColumns:
     def test_no_duplicate_columns(self):
         assert len(FEATURE_COLUMNS) == len(set(FEATURE_COLUMNS))
 
-    def test_v11_contract_columns_present(self):
-        for col in ["ema_9", "ema_21", "macd_hist", "atr_14", "volume_spike"]:
+    def test_v20_contract_columns_present(self):
+        for col in [
+            "price_change",
+            "volume_change",
+            "rolling_mean_10",
+            "ema_12",
+            "ema_26",
+            "bollinger_upper",
+            "bollinger_lower",
+            "lag_3",
+        ]:
             assert col in FEATURE_COLUMNS
 
     def test_ohlcv_not_in_feature_vector(self):
@@ -43,7 +50,16 @@ class TestFeatureColumns:
             assert col not in FEATURE_COLUMNS
 
     def test_key_indicators_present(self):
-        for col in ["ema_9", "ema_20", "ema_21", "ema_50", "rsi_14", "macd", "macd_signal", "vwap", "atr_14"]:
+        for col in [
+            "rsi",
+            "ema_12",
+            "ema_26",
+            "macd",
+            "bollinger_upper",
+            "bollinger_lower",
+            "volatility",
+            "lag_1",
+        ]:
             assert col in FEATURE_COLUMNS
 
 
@@ -84,13 +100,13 @@ class TestComputeFeatures:
         result = compute_features(mock_ohlcv_df)
         # EMAs should be close to price
         close_mean = mock_ohlcv_df["close"].mean()
-        assert abs(result["ema_20"].mean() - close_mean) < close_mean * 0.1
-        assert abs(result["ema_50"].mean() - close_mean) < close_mean * 0.1
+        assert abs(result["ema_12"].mean() - close_mean) < close_mean * 0.1
+        assert abs(result["ema_26"].mean() - close_mean) < close_mean * 0.1
 
     def test_rsi_range(self, mock_ohlcv_df):
         result = compute_features(mock_ohlcv_df)
         # After backfill, RSI should be in reasonable range (may have 0s from fill)
-        rsi = result["rsi_14"]
+        rsi = result["rsi"]
         assert rsi.max() <= 100
         assert rsi.min() >= 0
 
@@ -102,22 +118,103 @@ class TestComputeFeatures:
 
     def test_handles_string_prices(self):
         """Should handle string values via pd.to_numeric(errors='coerce')."""
-        n = 30
-        df = pd.DataFrame({
-            "open": [str(100 + i * 0.1) for i in range(n)],
-            "high": [str(101 + i * 0.1) for i in range(n)],
-            "low": [str(99 + i * 0.1) for i in range(n)],
-            "close": [str(100.5 + i * 0.1) for i in range(n)],
-            "volume": [str(10000)] * n,
-        })
+        n = 60
+        df = pd.DataFrame(
+            {
+                "open": [str(100 + i * 0.1) for i in range(n)],
+                "high": [str(101 + i * 0.1) for i in range(n)],
+                "low": [str(99 + i * 0.1) for i in range(n)],
+                "close": [str(100.5 + i * 0.1) for i in range(n)],
+                "volume": [str(10000)] * n,
+            }
+        )
         result = compute_features(df)
         assert len(result) == n
         assert result.isna().sum().sum() == 0
 
-    def test_bullish_trend_strength_positive(self, bullish_ohlcv_df):
+    def test_bullish_momentum_positive(self, bullish_ohlcv_df):
         result = compute_features(bullish_ohlcv_df)
-        # In a strong uptrend, trend_strength should be positive at the end
-        assert result["trend_strength"].iloc[-1] > 0
+        # In a strong uptrend, momentum should be positive at the end.
+        assert result["momentum"].iloc[-1] > 0
+
+    def test_include_legacy_aliases(self, mock_ohlcv_df):
+        result = compute_features(mock_ohlcv_df, include_legacy=True)
+        for col in [
+            "ema_50",
+            "rsi_14",
+            "atr_14",
+            "volume_spike",
+            "vwap",
+            "body_strength_score",
+            "upper_wick_pct",
+            "lower_wick_pct",
+            "bullish_engulfing",
+            "bearish_engulfing",
+            "doji_flag",
+            "consecutive_green",
+            "consecutive_red",
+            "streak_strength_score",
+        ]:
+            assert col in result.columns
+
+    def test_price_action_legacy_values_are_bounded(self, mock_ohlcv_df):
+        result = compute_features(mock_ohlcv_df, include_legacy=True)
+
+        assert ((result["body_strength_score"] >= 0) & (result["body_strength_score"] <= 1)).all()
+        assert ((result["upper_wick_pct"] >= 0) & (result["upper_wick_pct"] <= 1)).all()
+        assert ((result["lower_wick_pct"] >= 0) & (result["lower_wick_pct"] <= 1)).all()
+        assert ((result["streak_strength_score"] >= 0) & (result["streak_strength_score"] <= 1)).all()
+
+    def test_price_action_legacy_detects_bullish_engulfing(self):
+        n = 60
+        df = pd.DataFrame(
+            {
+                "open": [100.0] * n,
+                "high": [101.0] * n,
+                "low": [99.0] * n,
+                "close": [100.2] * n,
+                "volume": [10000] * n,
+            }
+        )
+
+        # Previous candle (bearish, smaller body)
+        df.loc[n - 2, "open"] = 101.0
+        df.loc[n - 2, "high"] = 101.3
+        df.loc[n - 2, "low"] = 99.9
+        df.loc[n - 2, "close"] = 100.2
+
+        # Current candle (bullish engulfing)
+        df.loc[n - 1, "open"] = 99.9
+        df.loc[n - 1, "high"] = 102.4
+        df.loc[n - 1, "low"] = 99.8
+        df.loc[n - 1, "close"] = 102.1
+
+        result = compute_features(df, include_legacy=True)
+
+        assert int(result["bullish_engulfing"].iloc[-1]) == 1
+        assert int(result["bearish_engulfing"].iloc[-1]) == 0
+
+    def test_price_action_legacy_detects_doji(self):
+        n = 60
+        df = pd.DataFrame(
+            {
+                "open": [100.0] * n,
+                "high": [101.0] * n,
+                "low": [99.0] * n,
+                "close": [100.2] * n,
+                "volume": [10000] * n,
+            }
+        )
+
+        # Make the final candle a doji: body < 10% of range
+        df.loc[n - 1, "open"] = 100.0
+        df.loc[n - 1, "high"] = 101.0
+        df.loc[n - 1, "low"] = 99.0
+        df.loc[n - 1, "close"] = 100.05
+
+        result = compute_features(df, include_legacy=True)
+
+        assert int(result["doji_flag"].iloc[-1]) == 1
 
     def test_deterministic(self, mock_ohlcv_df):
         """Same input should produce identical output."""

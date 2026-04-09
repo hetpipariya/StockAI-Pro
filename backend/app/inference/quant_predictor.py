@@ -5,6 +5,7 @@ import logging
 import os
 import pickle
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,6 +21,18 @@ _FILE_PATH = Path(__file__).resolve()
 _PARENTS = _FILE_PATH.parents
 BACKEND_ROOT = _PARENTS[2] if len(_PARENTS) > 2 else _FILE_PATH.parent
 PROJECT_ROOT = _PARENTS[3] if len(_PARENTS) > 3 else BACKEND_ROOT
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+try:
+    from experiments_v2.features.feature_engineering import (
+        FEATURE_COLUMNS as EXPERIMENTS_FEATURE_COLUMNS,
+        compute_technical_features,
+    )
+except Exception:
+    EXPERIMENTS_FEATURE_COLUMNS = []
+    compute_technical_features = None
 
 
 def _iter_model_dir_candidates() -> List[Path]:
@@ -85,6 +98,7 @@ LEGACY_MODEL_PATH = MODELS_DIR / "model.pkl"
 LATEST_POINTER_PATH = MODELS_DIR / "latest_model.json"
 MODEL_VERSION_PATTERN = re.compile(r"model_v(\d+)\.pkl$")
 MIN_SIGNAL_CONFIDENCE = 0.55
+LIVE_INTERVAL = os.getenv("QUANT_PREDICT_INTERVAL", "5m").strip().lower() or "5m"
 
 _ARTIFACT: Optional[Dict[str, Any]] = None
 _ARTIFACT_PATH: Optional[Path] = None
@@ -152,7 +166,7 @@ def _standardize_ohlcv(raw_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _compute_features(df: pd.DataFrame) -> pd.DataFrame:
+def _compute_features_legacy(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["returns"] = out["close"].pct_change()
 
@@ -198,6 +212,49 @@ def _compute_features(df: pd.DataFrame) -> pd.DataFrame:
     out.replace([np.inf, -np.inf], np.nan, inplace=True)
     out.dropna(inplace=True)
     return out
+
+
+def _compute_features(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """Compute live features with experiments_v2 contract, then fallback to legacy logic."""
+    if compute_technical_features is None:
+        return _compute_features_legacy(df)
+
+    try:
+        working = df.copy().sort_index()
+        working = working.reset_index().rename(columns={"index": "timestamp"})
+
+        for col in ["open", "high", "low", "close", "volume"]:
+            working[col] = pd.to_numeric(working[col], errors="coerce")
+
+        working["timestamp"] = pd.to_datetime(working["timestamp"], errors="coerce")
+        working["symbol"] = str(symbol).upper()
+        working["timeframe"] = "5m"
+        working["source_file"] = "live_yfinance"
+
+        required_columns = [
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "symbol",
+            "timeframe",
+            "source_file",
+        ]
+        prepared = working[required_columns].dropna(subset=["timestamp", "open", "high", "low", "close", "volume"])
+        if prepared.empty:
+            return _compute_features_legacy(df)
+
+        engineered = compute_technical_features(prepared)
+        if engineered is None or engineered.empty:
+            return _compute_features_legacy(df)
+
+        engineered = engineered.sort_values("timestamp").reset_index(drop=True)
+        return engineered
+    except Exception as exc:
+        logger.warning("Falling back to legacy feature builder for %s: %s", symbol, exc)
+        return _compute_features_legacy(df)
 
 
 def _parse_model_version(path: Path) -> int:
@@ -346,10 +403,14 @@ def _load_artifact() -> Dict[str, Any]:
 
 def _fetch_recent_15m(symbol: str) -> pd.DataFrame:
     ticker = f"{symbol}.NS"
+    period = "60d"
+    if LIVE_INTERVAL in {"1h", "60m"}:
+        period = "730d"
+
     raw = yf.download(
         ticker,
-        period="60d",
-        interval="15m",
+        period=period,
+        interval=LIVE_INTERVAL,
         auto_adjust=False,
         prepost=False,
         progress=False,
@@ -526,7 +587,7 @@ def predict_signal(symbol: str) -> Dict[str, Any]:
         label_mapping = artifact.get("label_mapping", {"0": -1, "1": 0, "2": 1})
 
         df = _fetch_recent_15m(normalized_symbol)
-        features = _compute_features(df)
+        features = _compute_features(df, symbol=normalized_symbol)
         if features.empty:
             raise ValueError(
                 f"Feature generation produced empty frame for {normalized_symbol}"

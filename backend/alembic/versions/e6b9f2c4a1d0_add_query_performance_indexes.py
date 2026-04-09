@@ -5,11 +5,11 @@ Revises: d3f90f4c2b18
 Create Date: 2026-03-29 00:30:00.000000
 
 """
+
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "e6b9f2c4a1d0"
@@ -26,10 +26,17 @@ def _index_exists(table_name: str, index_name: str) -> bool:
 
 def upgrade() -> None:
     if not _index_exists("orders", "ix_orders_user_timestamp"):
-        op.create_index("ix_orders_user_timestamp", "orders", ["user_id", "timestamp"], unique=False)
+        op.create_index(
+            "ix_orders_user_timestamp", "orders", ["user_id", "timestamp"], unique=False
+        )
 
     if not _index_exists("predictions", "ix_predictions_symbol_timestamp"):
-        op.create_index("ix_predictions_symbol_timestamp", "predictions", ["symbol", "timestamp"], unique=False)
+        op.create_index(
+            "ix_predictions_symbol_timestamp",
+            "predictions",
+            ["symbol", "timestamp"],
+            unique=False,
+        )
 
 
 def downgrade() -> None:

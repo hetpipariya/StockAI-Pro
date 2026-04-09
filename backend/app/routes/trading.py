@@ -6,26 +6,28 @@ SECURITY: All endpoints require JWT authentication. Each user's trading state
 (capital, positions, risk) is fully isolated via TradingManager.
 All DB queries filter by current_user.id.
 """
+
 from __future__ import annotations
 
+import asyncio
 import logging
-from fastapi import APIRouter, Query, Depends
-from sqlalchemy import desc, select
-from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import desc, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app import config
-from app.trading.user_state import trading_manager, UserPosition
+from app.routes.auth import get_current_user
+from app.services.db import (OrderModel, PositionModel, TradeLogModel,
+                             UserModel, get_async_session)
 from app.trading.candle_builder import candle_builder_15m
 from app.trading.live_executor import get_executor
-from app.routes.auth import get_current_user
-from app.services.db import (
-    get_async_session, UserModel, OrderModel, TradeLogModel, PositionModel,
-)
+from app.trading.user_state import UserPosition, trading_manager
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/trading", tags=["trading"])
+router = APIRouter(prefix="/api/v1/trading", tags=["trading"])
 
 
 @router.get("/status")
@@ -34,7 +36,8 @@ async def trading_status(current_user: UserModel = Depends(get_current_user)):
     state = await trading_manager.get_state(user_id=current_user.id)
     summary = state.get_summary()
 
-    executor = get_executor(
+    executor = await asyncio.to_thread(
+        get_executor,
         user_id=current_user.id,
         mode=current_user.trading_mode or config.TRADING_MODE,
         capital=current_user.starting_capital,
@@ -52,12 +55,17 @@ async def evaluate_signal(
     current_user: UserModel = Depends(get_current_user),
 ):
     """Evaluate whether a trade signal exists for the given symbol right now."""
-    executor = get_executor(
+    executor = await asyncio.to_thread(
+        get_executor,
         user_id=current_user.id,
         mode=current_user.trading_mode or config.TRADING_MODE,
         capital=current_user.starting_capital,
     )
-    signal = executor.evaluate_signal(symbol.upper(), user_id=current_user.id)
+    signal = await asyncio.to_thread(
+        executor.evaluate_signal,
+        symbol.upper(),
+        current_user.id,
+    )
     if signal:
         return {"has_signal": True, **signal}
     return {
@@ -89,17 +97,30 @@ async def execute_trade(
             "message": f"Position already open for {symbol.upper()}",
         }
 
-    executor = get_executor(
+    executor = await asyncio.to_thread(
+        get_executor,
         user_id=current_user.id,
         mode=current_user.trading_mode or config.TRADING_MODE,
         capital=current_user.starting_capital,
     )
-    signal_data = executor.evaluate_signal(symbol.upper(), user_id=current_user.id)
+    signal_data = await asyncio.to_thread(
+        executor.evaluate_signal,
+        symbol.upper(),
+        current_user.id,
+    )
 
     if not signal_data:
-        return {"executed": False, "symbol": symbol.upper(), "message": "No actionable signal"}
+        return {
+            "executed": False,
+            "symbol": symbol.upper(),
+            "message": "No actionable signal",
+        }
 
-    exec_result = executor.execute_signal(signal_data, user_id=current_user.id)
+    exec_result = await asyncio.to_thread(
+        executor.execute_signal,
+        signal_data,
+        current_user.id,
+    )
 
     if exec_result.get("status") in ("FILLED", "COMPLETED"):
         pos = UserPosition(
@@ -318,12 +339,17 @@ async def confirm_order(
     current_user: UserModel = Depends(get_current_user),
 ):
     """Confirm a PENDING_CONFIRMATION order and trigger execution."""
-    executor = get_executor(
+    executor = await asyncio.to_thread(
+        get_executor,
         user_id=current_user.id,
         mode=current_user.trading_mode or config.TRADING_MODE,
         capital=current_user.starting_capital,
     )
-    result = executor.router.confirm_and_execute(order_id, user_id=current_user.id)
+    result = await asyncio.to_thread(
+        executor.router.confirm_and_execute,
+        order_id,
+        current_user.id,
+    )
     if result:
         return {
             "confirmed": True,

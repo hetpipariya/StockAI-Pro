@@ -216,8 +216,13 @@ __pycache__/
 venv/
 node_modules/
 logs/
+backtest_engine/
+experiments_v2/
 *.log
-models/\r\n# But allow backend models for Docker builds\r\n!backend/models/\r\n!backend/models/*.pkl
+models/
+# But allow backend models for Docker builds
+!backend/models/
+!backend/models/*.pkl
 *.parquet
 .DS_Store
 *.egg-info/
@@ -226,3 +231,4 @@ build/
 !.env.example
 *.db
 *.db-journal
+

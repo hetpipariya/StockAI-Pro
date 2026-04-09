@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 from pathlib import Path
-
 
 KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
@@ -96,9 +94,7 @@ def validate_profile(project_root: Path, profile: str) -> list[str]:
 
     missing = sorted(REQUIRED_KEYS[profile] - keys)
     if missing:
-        issues.append(
-            f"{relative_path}: missing required keys -> {', '.join(missing)}"
-        )
+        issues.append(f"{relative_path}: missing required keys -> {', '.join(missing)}")
 
     return issues
 
@@ -137,7 +133,9 @@ def main() -> int:
             print(f"- {issue}")
         return 1
 
-    print("Environment template validation passed for profiles:", ", ".join(args.profiles))
+    print(
+        "Environment template validation passed for profiles:", ", ".join(args.profiles)
+    )
     return 0
 
 

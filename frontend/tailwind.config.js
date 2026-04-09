@@ -1,42 +1,41 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  darkMode: 'class',
   theme: {
     extend: {
       colors: {
-        trading: {
-          bg: '#0b0f14',
+        stockai: {
+          bg: '#06090E',
+          neon: '#00FF9F',
           surface: 'rgba(255,255,255,0.03)',
-          accent: '#14b8a6',
-          buy: '#10b981',
-          sell: '#ef4444',
-          muted: '#64748b',
-        },
-        'terminal': {
-          bg: '#0b0f14',
-          surface: '#111827',
-          border: '#334155',
-          accent: '#14b8a6',
-          buy: '#10b981',
-          sell: '#ef4444',
-          muted: '#64748b',
-        },
+          card: '#0D131B',
+          muted: '#64748B',
+          buy: '#00FF9F',
+          sell: '#FF3366',
+        }
       },
       fontFamily: {
-        mono: ['JetBrains Mono', 'IBM Plex Mono', 'monospace'],
-      },
-      backgroundImage: {
-        'grid-pattern': 'linear-gradient(rgba(20,184,166,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(20,184,166,0.03) 1px, transparent 1px)',
+        sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
+        mono: ['JetBrains Mono', 'monospace'],
       },
       animation: {
-        'pulse-soft': 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'float': 'float 6s ease-in-out infinite',
         'glow': 'glow 2s ease-in-out infinite alternate',
+        'pulse-slow': 'pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite',
       },
       keyframes: {
-        glow: {
-          '0%': { boxShadow: '0 0 12px rgba(20,184,166,0.2)' },
-          '100%': { boxShadow: '0 0 24px rgba(20,184,166,0.4)' },
+        float: {
+          '0%, 100%': { transform: 'translateY(0)' },
+          '50%': { transform: 'translateY(-10px)' },
         },
+        glow: {
+          '0%': { boxShadow: '0 0 10px rgba(0, 255, 159, 0.2)' },
+          '100%': { boxShadow: '0 0 25px rgba(0, 255, 159, 0.6)' },
+        },
+      },
+      backgroundImage: {
+        'grid-pattern': 'linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px)',
       },
     },
   },

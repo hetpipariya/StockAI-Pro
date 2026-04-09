@@ -2,13 +2,12 @@
 Tests for the hardened trading engine — state reload, safety checks,
 order lifecycle, trade logging, and kill-switch.
 """
-import pytest
-import sys
+
 import json
+import sys
 import tempfile
 from pathlib import Path
-from datetime import datetime, date
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -25,7 +24,9 @@ class TestRiskManagerPersistence:
         with patch("app.services.db.get_sync_db_session") as mock_db:
             mock_session = MagicMock()
             mock_db.return_value = iter([mock_session])
-            mock_session.query.return_value.filter_by.return_value.first.return_value = None
+            mock_session.query.return_value.filter_by.return_value.first.return_value = (
+                None
+            )
 
             rm.on_trade_opened()
             # Verify session.add was called (new DailyRiskState row)
@@ -49,7 +50,9 @@ class TestRiskManagerPersistence:
             mock_risk_state.trades_today = 3
             mock_risk_state.halted = False
 
-            mock_session.query.return_value.filter_by.return_value.first.return_value = mock_risk_state
+            mock_session.query.return_value.filter_by.return_value.first.return_value = (
+                mock_risk_state
+            )
             mock_session.query.return_value.count.return_value = 2
 
             rm.load_from_db()
@@ -67,7 +70,11 @@ class TestRiskManagerSafety:
         from app.trading.risk_manager import RiskManager
 
         # Set capital just barely above min, with loose daily loss limit so it doesn't halt from that
-        rm = RiskManager(starting_capital=11_000, min_account_balance=10_000, daily_loss_limit_pct=0.99)
+        rm = RiskManager(
+            starting_capital=11_000,
+            min_account_balance=10_000,
+            daily_loss_limit_pct=0.99,
+        )
         # Lose enough to drop below min_balance but not trigger daily loss limit
         rm.on_trade_opened()
         rm.on_trade_closed(pnl=-2000.0)
@@ -115,6 +122,7 @@ class TestOrderRouterSafety:
             mock_config.LIVE_CONFIRMED = False
 
             from app.connectors.order_router import OrderRouter
+
             router = OrderRouter(mode="LIVE")
             assert router.mode == "PAPER"
 
@@ -127,10 +135,15 @@ class TestOrderRouterSafety:
 
             with patch("app.connectors.order_router.log_trade"):
                 from app.connectors.order_router import OrderRouter
+
                 router = OrderRouter(mode="PAPER")
                 result = router.place_order(
-                    symbol="TEST", direction="BUY", quantity=10,
-                    price=100.0, stop_loss=95.0, target=110.0
+                    symbol="TEST",
+                    direction="BUY",
+                    quantity=10,
+                    price=100.0,
+                    stop_loss=95.0,
+                    target=110.0,
                 )
                 assert result.status == "REJECTED"
                 assert "Kill-switch" in result.error
@@ -149,9 +162,15 @@ class TestTradeLogger:
                     from app.trading.trade_logger import log_trade
 
                     log_trade(
-                        "SIGNAL", order_id="TEST-001", symbol="RELIANCE",
-                        direction="BUY", quantity=10, price=2500.0,
-                        confidence=75, reason="ML=UP", mode="PAPER",
+                        "SIGNAL",
+                        order_id="TEST-001",
+                        symbol="RELIANCE",
+                        direction="BUY",
+                        quantity=10,
+                        price=2500.0,
+                        confidence=75,
+                        reason="ML=UP",
+                        mode="PAPER",
                     )
 
                     assert log_file.exists()
@@ -174,9 +193,15 @@ class TestTradeLogger:
                     from app.trading.trade_logger import log_trade
 
                     log_trade(
-                        "SIGNAL", order_id="TEST-002", symbol="TCS",
-                        direction="SELL", quantity=5, price=3400.0,
-                        atr=15.5, rsi=32.1, ml_prediction=0,
+                        "SIGNAL",
+                        order_id="TEST-002",
+                        symbol="TCS",
+                        direction="SELL",
+                        quantity=5,
+                        price=3400.0,
+                        atr=15.5,
+                        rsi=32.1,
+                        ml_prediction=0,
                         mode="PAPER",
                     )
 
@@ -191,10 +216,10 @@ class TestConfigValues:
 
     def test_trading_safety_defaults(self):
         """Default config values should be safe."""
-        from app.config import (
-            TRADING_MODE, TRADING_ENABLED, LIVE_CONFIRMED,
-            STARTING_CAPITAL, MIN_ACCOUNT_BALANCE, MAX_RISK_PER_TRADE_PCT,
-        )
+        from app.config import (LIVE_CONFIRMED, MAX_RISK_PER_TRADE_PCT,
+                                MIN_ACCOUNT_BALANCE, STARTING_CAPITAL,
+                                TRADING_MODE)
+
         assert TRADING_MODE == "PAPER"
         assert LIVE_CONFIRMED is False  # Default must be False for safety
         assert STARTING_CAPITAL == 100_000
@@ -220,9 +245,12 @@ class TestOrderLifecycle:
                 mock_order = MagicMock()
                 mock_order.status = "FILLED"
                 mock_order.order_id = "TEST-123"
-                mock_session.query.return_value.filter_by.return_value.first.return_value = mock_order
+                mock_session.query.return_value.filter_by.return_value.first.return_value = (
+                    mock_order
+                )
 
                 from app.connectors.order_router import OrderRouter
+
                 router = OrderRouter(mode="PAPER")
                 result = router.confirm_and_execute("TEST-123")
                 assert result is None  # Should reject

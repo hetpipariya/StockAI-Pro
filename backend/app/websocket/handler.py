@@ -11,17 +11,14 @@ from typing import Optional
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
-from app.connectors import SmartAPIConnector
 from app import config
+from app.connectors import SmartAPIConnector
 from app.services.candle_store import store_candles
 from app.services.instrument_master import get_symbol, get_token
 from app.services.market_state import is_market_open
 from app.services.tick_aggregator import tick_aggregator
-from app.websocket.relay import (
-    broadcast_candle,
-    broadcast_tick,
-    socket_manager,
-)
+from app.websocket.relay import (broadcast_candle, broadcast_signal,
+                                 broadcast_tick, socket_manager)
 
 logger = logging.getLogger(__name__)
 
@@ -58,18 +55,30 @@ _WS_MAX_BACKOFF_SECONDS = 60
 _WS_MAX_RETRY_ATTEMPTS = 10  # Increased for production resilience
 _WATCHLIST_PRICE_MAX = 10000.0
 _WS_CIRCUIT_BREAKER_RESET_TIME = 300  # 5 minutes before resetting circuit breaker
+_MOCK_IDLE_THRESHOLD_SECONDS = 20.0
+
+_MOCK_BASE_PRICE = {
+    "RELIANCE": 1348.10,
+    "TCS": 2590.00,
+    "INFY": 1331.50,
+    "HDFCBANK": 798.00,
+    "SBIN": 1040.45,
+    "ICICIBANK": 1283.50,
+    "TATASTEEL": 146.80,
+    "ITC": 303.00,
+    "AXISBANK": 1098.20,
+    "KOTAKBANK": 371.85,
+    "WIPRO": 530.40,
+    "BHARTIARTL": 1859.70,
+    "HINDUNILVR": 2412.30,
+    "LT": 3890.30,
+    "MARUTI": 12180.00,
+}
 
 
-def _seed_price_for_symbol(symbol: str) -> float:
-    """Generate a deterministic fallback price for symbols with no cached ticks."""
-    normalized = str(symbol or "UNKNOWN").strip().upper()
-    score = sum((idx + 1) * ord(ch) for idx, ch in enumerate(normalized))
-    major = 100 + (score % 2400)
-    minor = (score % 100) / 100.0
-    return round(major + minor, 2)
-
-
-def _normalize_watchlist_price(symbol: str, raw_price: float, ref_price: float = 0.0) -> float:
+def _normalize_watchlist_price(
+    symbol: str, raw_price: float, ref_price: float = 0.0
+) -> float:
     """Normalize likely paise values into rupees and reject implausible spikes."""
     if not math.isfinite(raw_price) or raw_price <= 0:
         return 0.0
@@ -87,35 +96,23 @@ def _normalize_watchlist_price(symbol: str, raw_price: float, ref_price: float =
         if normalized > ref_price * 50:
             normalized = normalized / 100.0
         elif normalized > ref_price * 10:
-            logger.warning("[TICK] %s rejected outlier LTP=%s (ref=%s)", symbol_upper, normalized, ref_price)
+            logger.warning(
+                "[TICK] %s rejected outlier LTP=%s (ref=%s)",
+                symbol_upper,
+                normalized,
+                ref_price,
+            )
             return 0.0
 
     if symbol_upper in DEFAULT_WATCHLIST and normalized > _WATCHLIST_PRICE_MAX:
-        logger.warning("[TICK] %s rejected implausible watchlist price=%s", symbol_upper, normalized)
+        logger.warning(
+            "[TICK] %s rejected implausible watchlist price=%s",
+            symbol_upper,
+            normalized,
+        )
         return 0.0
 
     return round(normalized, 2)
-
-
-def _resolve_mock_base_price(symbol: str) -> tuple[float, bool]:
-    """Return (price, is_seeded) for mock emissions."""
-    cached = float(_last_known_prices.get(symbol, 0.0) or 0.0)
-    if cached > 0 and math.isfinite(cached):
-        normalized_cached = _normalize_watchlist_price(symbol, cached)
-        if normalized_cached > 0:
-            if normalized_cached != round(cached, 2):
-                logger.warning(
-                    "[MOCK] Corrected cached price for %s from %s to %s",
-                    symbol,
-                    round(cached, 2),
-                    normalized_cached,
-                )
-            _last_known_prices[symbol] = normalized_cached
-            return normalized_cached, False
-
-    seeded = _seed_price_for_symbol(symbol)
-    _last_known_prices[symbol] = seeded
-    return seeded, True
 
 
 def set_event_loop(loop: asyncio.AbstractEventLoop) -> None:
@@ -160,6 +157,82 @@ def get_last_tick_age_seconds() -> float:
     return max(0.0, time.time() - _last_live_tick_time)
 
 
+def _resolve_mock_base_price(symbol: str) -> tuple[float, bool]:
+    """Resolve a deterministic fallback LTP for mock ticks.
+
+    Returns (price, seeded) where seeded indicates if no prior live/cached value existed.
+    """
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        return 1.0, True
+
+    cached = _last_known_prices.get(normalized_symbol)
+    if isinstance(cached, (int, float)) and math.isfinite(cached) and cached > 0:
+        normalized_cached = _normalize_watchlist_price(normalized_symbol, float(cached), 0.0)
+        if normalized_cached > 0:
+            _last_known_prices[normalized_symbol] = normalized_cached
+            return normalized_cached, False
+
+    seeded_price = _MOCK_BASE_PRICE.get(normalized_symbol)
+    if not seeded_price:
+        # Deterministic fallback for symbols outside curated watchlist.
+        token = sum(ord(ch) for ch in normalized_symbol)
+        seeded_price = round(100 + (token % 5000) * 0.73, 2)
+
+    normalized_seeded = _normalize_watchlist_price(normalized_symbol, float(seeded_price), 0.0)
+    if normalized_seeded <= 0:
+        normalized_seeded = max(1.0, float(seeded_price))
+
+    _last_known_prices[normalized_symbol] = normalized_seeded
+    return normalized_seeded, True
+
+
+async def mock_ws_data_job() -> None:
+    """Emit synthetic websocket ticks when mock mode is enabled.
+
+    Behavior:
+    - Off-hours: send unavailable ticks for all watchlist symbols.
+    - Market open but feed idle: seed missing symbols and mark seeded payloads unavailable.
+    """
+    if not bool(getattr(config, "ENABLE_MOCK_DATA", False)):
+        return
+
+    market_open = is_market_open()
+    tick_age = get_last_tick_age_seconds()
+    feed_idle = tick_age >= _MOCK_IDLE_THRESHOLD_SECONDS
+
+    # During market hours with healthy feed, do not emit mock ticks.
+    if market_open and not feed_idle:
+        return
+
+    for raw_symbol in DEFAULT_WATCHLIST:
+        symbol = str(raw_symbol or "").strip().upper()
+        if not symbol:
+            continue
+
+        ltp, seeded = _resolve_mock_base_price(symbol)
+
+        if market_open:
+            mock_reason = "IDLE_FEED_SEEDED" if seeded else "IDLE_FEED_STALE"
+            unavailable = seeded
+        else:
+            mock_reason = "OFF_HOURS_SEEDED" if seeded else "OFF_HOURS_STALE"
+            unavailable = True
+
+        payload = {
+            "ltp": ltp,
+            "bid": ltp,
+            "ask": ltp,
+            "volume": 0,
+            "is_mock": True,
+            "unavailable": bool(unavailable),
+            "mock_reason": mock_reason,
+            "data_source": "MOCK",
+        }
+
+        await broadcast_tick(symbol, payload)
+
+
 def _schedule_async(coro):
     """Schedule coroutine on app event loop from SmartAPI callback thread."""
     if not _event_loop or not _event_loop.is_running():
@@ -189,10 +262,38 @@ async def _persist_completed_candle(symbol: str, candle: dict):
         logger.error("[TICK] Failed to persist candle: %s", exc)
 
 
+async def _broadcast_signal_update(symbol: str):
+    """Compute and push latest prediction for a symbol after candle close."""
+    try:
+        from app.services.bundle_service import get_history, get_prediction, get_snapshot
+
+        history = await get_history(symbol=symbol, interval="1m", limit=200)
+        snapshot = await get_snapshot(symbol=symbol)
+        prediction = await get_prediction(
+            symbol=symbol,
+            horizon="15m",
+            history=history,
+            snapshot=snapshot,
+        )
+
+        payload = {
+            **prediction,
+            "data_source": prediction.get(
+                "data_source",
+                snapshot.get("data_source", history.get("data_source", "UNKNOWN")),
+            ),
+        }
+        await broadcast_signal(symbol, payload)
+    except Exception as exc:
+        logger.warning("[WS] Signal update failed for %s: %s", symbol, exc)
+
+
 async def _run_live_executor(symbol: str):
     # Live trading execution requires explicit user context and is handled via
     # authenticated trading routes, not anonymous market-feed callbacks.
-    logger.debug("[EXECUTOR] Skipping feed-triggered execution for %s (no user context)", symbol)
+    logger.debug(
+        "[EXECUTOR] Skipping feed-triggered execution for %s (no user context)", symbol
+    )
 
 
 def _on_smartapi_tick(msg):
@@ -210,7 +311,9 @@ def _on_smartapi_tick(msg):
         if not symbol:
             symbol = str(msg.get("tradingsymbol", token)).replace("-EQ", "")
 
-        raw_ltp = float(msg.get("ltp", msg.get("last_traded_price", msg.get("lastprice", 0))))
+        raw_ltp = float(
+            msg.get("ltp", msg.get("last_traded_price", msg.get("lastprice", 0)))
+        )
         vol = int(msg.get("volume", msg.get("volume_trade_for_the_day", 0)) or 0)
         ref_price = _last_known_prices.get(symbol)
         ltp = _normalize_watchlist_price(symbol, raw_ltp, float(ref_price or 0.0))
@@ -256,6 +359,7 @@ def _on_smartapi_tick(msg):
         if completed_candle:
             _schedule_async(broadcast_candle(symbol, completed_candle))
             _schedule_async(_persist_completed_candle(symbol, completed_candle))
+            _schedule_async(_broadcast_signal_update(symbol))
 
         if completed_15m:
             _schedule_async(_run_live_executor(symbol))
@@ -305,7 +409,7 @@ def start_smartapi_ws(symbols_list: list[str]):
 
 async def _retry_ws_connect(symbols_list: list[str]):
     """Retry WebSocket connection with exponential backoff and circuit breaker.
-    
+
     Uses exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s (max)
     Circuit breaker: After max retries, wait 5 minutes before trying again.
     """
@@ -313,38 +417,45 @@ async def _retry_ws_connect(symbols_list: list[str]):
 
     while not _smartapi_ws_started:
         _ws_reconnect_attempt += 1
-        
+
         # Circuit breaker: if max retries reached, wait longer before resetting
         if _ws_reconnect_attempt > _WS_MAX_RETRY_ATTEMPTS:
             logger.error(
                 "[WS] Max retry attempts (%d) reached. Circuit breaker activated. "
                 "Waiting %ds before resetting.",
                 _WS_MAX_RETRY_ATTEMPTS,
-                _WS_CIRCUIT_BREAKER_RESET_TIME
+                _WS_CIRCUIT_BREAKER_RESET_TIME,
             )
             _set_ws_state("FAILED")
             await asyncio.sleep(_WS_CIRCUIT_BREAKER_RESET_TIME)
             _ws_reconnect_attempt = 0  # Reset counter after waiting
             logger.info("[WS] Circuit breaker reset. Resuming reconnection attempts.")
             continue
-        
+
         # Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s
-        wait_s = min(_WS_BASE_BACKOFF_SECONDS * (2 ** (_ws_reconnect_attempt - 1)), _WS_MAX_BACKOFF_SECONDS)
+        wait_s = min(
+            _WS_BASE_BACKOFF_SECONDS * (2 ** (_ws_reconnect_attempt - 1)),
+            _WS_MAX_BACKOFF_SECONDS,
+        )
         logger.warning(
             "[WS] Reconnect attempt %d/%d in %.1fs (exponential backoff)",
             _ws_reconnect_attempt,
             _WS_MAX_RETRY_ATTEMPTS,
-            wait_s
+            wait_s,
         )
         await asyncio.sleep(wait_s)
-        
+
         try:
             start_smartapi_ws(symbols_list)
             if _smartapi_ws_started:
-                logger.info("[WS] Reconnection successful on attempt %d", _ws_reconnect_attempt)
+                logger.info(
+                    "[WS] Reconnection successful on attempt %d", _ws_reconnect_attempt
+                )
                 return
         except Exception as exc:
-            logger.error("[WS] Reconnection attempt %d failed: %s", _ws_reconnect_attempt, exc)
+            logger.error(
+                "[WS] Reconnection attempt %d failed: %s", _ws_reconnect_attempt, exc
+            )
 
 
 def _schedule_reconnect(symbols_list: list[str]) -> None:
@@ -353,59 +464,25 @@ def _schedule_reconnect(symbols_list: list[str]) -> None:
         return
     if not _event_loop or not _event_loop.is_running():
         return
-    _ws_reconnect_task = asyncio.run_coroutine_threadsafe(_retry_ws_connect(symbols_list), _event_loop)
+    _ws_reconnect_task = asyncio.run_coroutine_threadsafe(
+        _retry_ws_connect(symbols_list), _event_loop
+    )
 
 
 async def auto_start_ws():
     """Scheduler callback to ensure WS stream is running."""
-    if not _smartapi_ws_started or _ws_state in {"DISCONNECTED", "FAILED", "RECONNECTING"}:
+    if not _smartapi_ws_started or _ws_state in {
+        "DISCONNECTED",
+        "FAILED",
+        "RECONNECTING",
+    }:
         logger.info("[SCHEDULER] Auto-starting WebSocket")
         start_smartapi_ws(DEFAULT_WATCHLIST)
 
 
-async def mock_ws_data_job():
-    """Fallback: emit stale/static prices when feed is idle or market is closed."""
-    if not config.ENABLE_MOCK_DATA:
-        return
-
-    idle_time = get_last_tick_age_seconds()
-
-    if not is_market_open():
-        for symbol in DEFAULT_WATCHLIST[:10]:
-            base_price, seeded = _resolve_mock_base_price(symbol)
-            tick_data = {
-                "ltp": base_price,
-                "volume": 0,
-                "bid": base_price,
-                "ask": base_price,
-                "signal": "HOLD",
-                "is_mock": True,
-                "unavailable": True,
-                "mock_reason": "OFF_HOURS_SEEDED" if seeded else "OFF_HOURS_STALE",
-                "data_source": "MOCK",
-            }
-            await broadcast_tick(symbol, tick_data)
-        return
-
-    if idle_time > 10:
-        logger.warning("WARNING: Using mock data - SmartAPI connection idle for %.1fs", idle_time)
-        for symbol in DEFAULT_WATCHLIST[:10]:
-            base_price, seeded = _resolve_mock_base_price(symbol)
-            tick_data = {
-                "ltp": base_price,
-                "volume": 0,
-                "bid": base_price,
-                "ask": base_price,
-                "signal": "HOLD",
-                "is_mock": True,
-                "unavailable": seeded,
-                "mock_reason": "IDLE_FEED_SEEDED" if seeded else "IDLE_FEED_STALE",
-                "data_source": "MOCK",
-            }
-            await broadcast_tick(symbol, tick_data)
-
-
-async def websocket_live(websocket: WebSocket, token: Optional[str] = Query(default=None)):
+async def websocket_live(
+    websocket: WebSocket, token: Optional[str] = Query(default=None)
+):
     """Authenticated websocket endpoint: /ws?token=<jwt> (legacy alias: /live)."""
     client_host = websocket.client.host if websocket.client else "unknown"
 
@@ -423,7 +500,9 @@ async def websocket_live(websocket: WebSocket, token: Optional[str] = Query(defa
 
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(UserModel).where(UserModel.id == user_id, UserModel.is_active == True)
+                select(UserModel).where(
+                    UserModel.id == user_id, UserModel.is_active
+                )
             )
             user = result.scalars().first()
 
@@ -459,20 +538,24 @@ async def _handle_ws_connection(websocket: WebSocket, user_id: int):
                 raw = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
                 msg = json.loads(raw)
                 if not isinstance(msg, dict):
-                    await websocket.send_json({"type": "error", "message": "Payload must be a JSON object."})
+                    await websocket.send_json(
+                        {"type": "error", "message": "Payload must be a JSON object."}
+                    )
                     continue
                 await _process_ws_message(msg, client_id, user_id, websocket)
 
             except asyncio.TimeoutError:
                 await websocket.send_json(
                     {
-                        "type": "ping",
+                        "type": "heartbeat",
                         "connection_state": get_ws_state(),
                         "timestamp": datetime.utcnow().isoformat(),
                     }
                 )
             except json.JSONDecodeError:
-                await websocket.send_json({"type": "error", "message": "Invalid JSON payload."})
+                await websocket.send_json(
+                    {"type": "error", "message": "Invalid JSON payload."}
+                )
             except WebSocketDisconnect:
                 break
 
@@ -480,7 +563,9 @@ async def _handle_ws_connection(websocket: WebSocket, user_id: int):
         await socket_manager.disconnect(client_id)
 
 
-async def _process_ws_message(msg: dict, client_id: str, user_id: int, websocket: WebSocket):
+async def _process_ws_message(
+    msg: dict, client_id: str, user_id: int, websocket: WebSocket
+):
     action = msg.get("action")
 
     if action == "subscribe":
@@ -508,19 +593,35 @@ async def _process_ws_message(msg: dict, client_id: str, user_id: int, websocket
                 "timestamp": datetime.utcnow().isoformat(),
             }
         )
-        logger.info("[WS] user_id=%d client_id=%s subscribed=%s", user_id, client_id, valid)
+        logger.info(
+            "[WS] user_id=%d client_id=%s subscribed=%s", user_id, client_id, valid
+        )
 
     elif action == "unsubscribe":
         symbols = msg.get("symbols", [])
-        normalized = [s.strip().upper() for s in symbols if isinstance(s, str)] if isinstance(symbols, list) else []
+        normalized = (
+            [s.strip().upper() for s in symbols if isinstance(s, str)]
+            if isinstance(symbols, list)
+            else []
+        )
         await socket_manager.unsubscribe(client_id, normalized)
         await websocket.send_json({"type": "unsubscribed", "symbols": normalized})
 
     elif action == "pong":
         return
 
+    elif action == "ping":
+        await websocket.send_json(
+            {
+                "type": "pong",
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        )
+
     else:
-        await websocket.send_json({"type": "error", "message": f"Unknown action: {action}"})
+        await websocket.send_json(
+            {"type": "error", "message": f"Unknown action: {action}"}
+        )
 
 
 def setup_websocket_routes(app: FastAPI) -> None:

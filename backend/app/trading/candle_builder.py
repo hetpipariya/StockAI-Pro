@@ -2,12 +2,13 @@
 15-Minute Candle Builder — aggregates raw LTP ticks into OHLCV candles.
 Designed for live intraday trading signal generation.
 """
+
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class LiveCandle:
     """Single OHLCV candle being built from ticks."""
+
     open: float = 0.0
     high: float = 0.0
     low: float = float("inf")
@@ -37,7 +39,9 @@ class LiveCandle:
 
     def to_dict(self) -> dict:
         return {
-            "time": self.start_time.strftime("%Y-%m-%d %H:%M:%S") if self.start_time else "",
+            "time": (
+                self.start_time.strftime("%Y-%m-%d %H:%M:%S") if self.start_time else ""
+            ),
             "open": self.open,
             "high": self.high,
             "low": self.low,
@@ -68,7 +72,9 @@ class CandleBuilder15m:
         minute = (dt.minute // 15) * 15
         return dt.replace(minute=minute, second=0, microsecond=0)
 
-    def process_tick(self, symbol: str, price: float, volume: int = 0) -> Optional[dict]:
+    def process_tick(
+        self, symbol: str, price: float, volume: int = 0
+    ) -> Optional[dict]:
         """
         Feed a tick. Returns a completed 15m candle dict if a boundary was crossed,
         otherwise returns None.
@@ -88,8 +94,17 @@ class CandleBuilder15m:
                     self._history[symbol] = []
                 self._history[symbol].append(completed)
                 if len(self._history[symbol]) > self._history_limit:
-                    self._history[symbol] = self._history[symbol][-self._history_limit:]
-                logger.info(f"[CANDLE-15m] Completed candle for {symbol}: O={completed['open']:.2f} H={completed['high']:.2f} L={completed['low']:.2f} C={completed['close']:.2f}")
+                    self._history[symbol] = self._history[symbol][
+                        -self._history_limit:
+                    ]
+                logger.info(
+                    "[CANDLE-15m] Completed candle for %s: O=%.2f H=%.2f L=%.2f C=%.2f",
+                    symbol,
+                    completed["open"],
+                    completed["high"],
+                    completed["low"],
+                    completed["close"],
+                )
             # Start fresh candle
             candle = None
 

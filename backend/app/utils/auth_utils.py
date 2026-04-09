@@ -2,6 +2,7 @@
 Auth utility functions — password hashing and JWT operations.
 Single source of truth for all auth logic.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -10,8 +11,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import jwt
-from passlib.context import CryptContext
 from fastapi import HTTPException, status
+from passlib.context import CryptContext
 
 from app import config
 
@@ -44,14 +45,15 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 
 # ── JWT Token Generation ──────────────────────────────────────────────
-_ALGORITHM = config.JWT_ALGORITHM          # "HS256"
+_ALGORITHM = config.JWT_ALGORITHM  # "HS256"
 _SECRET = config.JWT_SECRET
-_ACCESS_EXPIRE = config.ACCESS_TOKEN_EXPIRE_MINUTES   # 1440 = 24h
-_REFRESH_EXPIRE = config.REFRESH_TOKEN_EXPIRE_DAYS    # 7 days
+_ACCESS_EXPIRE = config.ACCESS_TOKEN_EXPIRE_MINUTES  # 1440 = 24h
+_REFRESH_EXPIRE = config.REFRESH_TOKEN_EXPIRE_DAYS  # 7 days
 
 
-def create_access_token(user_id: int, username: str,
-                        extra_claims: Optional[dict] = None) -> str:
+def create_access_token(
+    user_id: int, username: str, extra_claims: Optional[dict] = None
+) -> str:
     """
     Create a short-lived access token (24 hours default).
     Contains: user_id, username, token type, expiry.

@@ -3,17 +3,18 @@ Candle Store — persists OHLCV candles to the database.
 Uses bulk upsert (INSERT ... ON CONFLICT DO UPDATE) for PostgreSQL,
 falls back to row-by-row for SQLite dev environments.
 """
+
 from __future__ import annotations
 
 import logging
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select, and_, func
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.services.db import async_session, CandleModel
 from app.config import DATABASE_URL
+from app.services.db import CandleModel, async_session
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +33,7 @@ def _parse_time(t) -> Optional[datetime]:
             "%Y-%m-%d %H:%M",
         ):
             try:
-                return datetime.strptime(
-                    t.split("+")[0].strip(), fmt.replace("%z", "")
-                )
+                return datetime.strptime(t.split("+")[0].strip(), fmt.replace("%z", ""))
             except ValueError:
                 continue
     return None
@@ -55,16 +54,18 @@ async def store_candles(symbol: str, timeframe: str, candles: list[dict]) -> int
         ts = _parse_time(c.get("time"))
         if not ts:
             continue
-        rows.append({
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "open": float(c["open"]),
-            "high": float(c["high"]),
-            "low": float(c["low"]),
-            "close": float(c["close"]),
-            "volume": int(c.get("volume", 0)),
-            "timestamp": ts,
-        })
+        rows.append(
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "open": float(c["open"]),
+                "high": float(c["high"]),
+                "low": float(c["low"]),
+                "close": float(c["close"]),
+                "volume": int(c.get("volume", 0)),
+                "timestamp": ts,
+            }
+        )
 
     if not rows:
         return 0
@@ -114,7 +115,7 @@ async def _upsert_sqlite(session, rows: list[dict]) -> int:
     stored = 0
     # Batch in chunks of 100 to avoid excessively large statements
     for i in range(0, len(rows), 100):
-        chunk = rows[i : i + 100]
+        chunk = rows[i: i + 100]
         stmt = sqlite_insert(CandleModel).values(chunk)
         stmt = stmt.on_conflict_do_update(
             index_elements=["symbol", "timeframe", "timestamp"],

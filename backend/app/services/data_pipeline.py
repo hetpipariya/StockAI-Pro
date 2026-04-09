@@ -32,7 +32,7 @@ try:
 except ImportError:
     raise ImportError("yfinance is required: pip install yfinance")
 
-from backend.app.services.ticker_map import TICKERS, TICKER_NAMES, WATCHLIST
+from backend.app.services.ticker_map import TICKERS
 
 # ── logging ───────────────────────────────────────────────────────────────────
 LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
@@ -49,34 +49,53 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── config ────────────────────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).resolve().parents[1]          # backend/app/
-RAW_DIR  = BASE_DIR / "cache" / "raw_data"
+BASE_DIR = Path(__file__).resolve().parents[1]  # backend/app/
+RAW_DIR = BASE_DIR / "cache" / "raw_data"
 FEAT_DIR = BASE_DIR / "cache" / "features"
-YEARS    = int(os.getenv("PIPELINE_YEARS", "5"))
-WORKERS  = int(os.getenv("PIPELINE_WORKERS", "6"))
+YEARS = int(os.getenv("PIPELINE_YEARS", "5"))
+WORKERS = int(os.getenv("PIPELINE_WORKERS", "6"))
 
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 FEAT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Canonical feature column order (ensures alignment across all CSVs)
 FEATURE_COLUMNS = [
-    "open", "high", "low", "close", "volume",
-    "ema9", "ema15", "rsi",
-    "macd", "macd_signal", "macd_hist",
-    "vwap", "supertrend_dir", "adx",
-    "bb_upper", "bb_mid", "bb_lower", "bb_width",
-    "atr", "obv",
-    "stoch_k", "stoch_d",
-    "ich_tenkan", "ich_kijun", "ich_senkou_a", "ich_senkou_b",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "ema9",
+    "ema15",
+    "rsi",
+    "macd",
+    "macd_signal",
+    "macd_hist",
+    "vwap",
+    "supertrend_dir",
+    "adx",
+    "bb_upper",
+    "bb_mid",
+    "bb_lower",
+    "bb_width",
+    "atr",
+    "obv",
+    "stoch_k",
+    "stoch_d",
+    "ich_tenkan",
+    "ich_kijun",
+    "ich_senkou_a",
+    "ich_senkou_b",
     "target",
 ]
 
-MIN_ROWS_REQUIRED = 200   # skip tickers with too little history
+MIN_ROWS_REQUIRED = 200  # skip tickers with too little history
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 0. TICKER VALIDATION
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def validate_ticker(ticker: str) -> bool:
     """Quick check: does yfinance return any info for this ticker?"""
@@ -90,12 +109,14 @@ def validate_ticker(ticker: str) -> bool:
         return False
 
 
-def validate_all_tickers(tickers: list[str], workers: int = WORKERS) -> tuple[list[str], list[str]]:
+def validate_all_tickers(
+    tickers: list[str], workers: int = WORKERS
+) -> tuple[list[str], list[str]]:
     """Validate tickers in parallel. Returns (valid, invalid) lists."""
     log.info("Validating %d tickers …", len(tickers))
     with multiprocessing.Pool(processes=workers) as pool:
         results = pool.map(validate_ticker, tickers)
-    valid   = [t for t, ok in zip(tickers, results) if ok]
+    valid = [t for t, ok in zip(tickers, results) if ok]
     invalid = [t for t, ok in zip(tickers, results) if not ok]
     if invalid:
         log.warning("INVALID/DELISTED tickers (%d): %s", len(invalid), invalid)
@@ -107,6 +128,7 @@ def validate_all_tickers(tickers: list[str], workers: int = WORKERS) -> tuple[li
 # 1. DOWNLOADER
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def download_ticker(ticker: str, years: int = YEARS) -> bool:
     """Download daily OHLCV for one ticker. Idempotent — skips if file < 12 h old."""
     out_path = RAW_DIR / f"{ticker}.csv"
@@ -117,7 +139,7 @@ def download_ticker(ticker: str, years: int = YEARS) -> bool:
             log.info("SKIP  %s – cached (%.1f h old)", ticker, age_hours)
             return True
 
-    end   = datetime.today()
+    end = datetime.today()
     start = end - timedelta(days=years * 365)
 
     try:
@@ -136,7 +158,9 @@ def download_ticker(ticker: str, years: int = YEARS) -> bool:
             return False
 
         if len(df) < MIN_ROWS_REQUIRED:
-            log.warning("SHORT %s – only %d rows (min %d)", ticker, len(df), MIN_ROWS_REQUIRED)
+            log.warning(
+                "SHORT %s – only %d rows (min %d)", ticker, len(df), MIN_ROWS_REQUIRED
+            )
             return False
 
         # Flatten MultiIndex columns if present (yfinance >= 0.2.x)
@@ -167,14 +191,15 @@ def download_all(tickers: list[str], workers: int = WORKERS) -> dict[str, bool]:
 # 2. INDICATOR ENGINEERING (pure pandas/numpy — no external TA library needed)
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def _ema(s: pd.Series, span: int) -> pd.Series:
     return s.ewm(span=span, adjust=False).mean()
 
 
 def _rsi(s: pd.Series, period: int = 14) -> pd.Series:
     delta = s.diff()
-    gain  = delta.clip(lower=0)
-    loss  = -delta.clip(upper=0)
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
     avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
     rs = avg_gain / (avg_loss + 1e-10)
@@ -182,11 +207,11 @@ def _rsi(s: pd.Series, period: int = 14) -> pd.Series:
 
 
 def _macd(s: pd.Series, fast=12, slow=26, signal=9):
-    ema_fast   = _ema(s, fast)
-    ema_slow   = _ema(s, slow)
-    macd_line  = ema_fast - ema_slow
+    ema_fast = _ema(s, fast)
+    ema_slow = _ema(s, slow)
+    macd_line = ema_fast - ema_slow
     signal_line = _ema(macd_line, signal)
-    histogram  = macd_line - signal_line
+    histogram = macd_line - signal_line
     return macd_line, signal_line, histogram
 
 
@@ -196,8 +221,8 @@ def _vwap(df: pd.DataFrame) -> pd.Series:
 
 
 def _bollinger_bands(s: pd.Series, period: int = 20, std_dev: float = 2.0):
-    sma   = s.rolling(period).mean()
-    std   = s.rolling(period).std()
+    sma = s.rolling(period).mean()
+    std = s.rolling(period).std()
     upper = sma + std_dev * std
     lower = sma - std_dev * std
     return upper, sma, lower
@@ -205,11 +230,14 @@ def _bollinger_bands(s: pd.Series, period: int = 20, std_dev: float = 2.0):
 
 def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     prev_close = df["close"].shift(1)
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - prev_close).abs(),
-        (df["low"]  - prev_close).abs(),
-    ], axis=1).max(axis=1)
+    tr = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
     return tr.ewm(com=period - 1, adjust=False).mean()
 
 
@@ -219,72 +247,74 @@ def _obv(df: pd.DataFrame) -> pd.Series:
 
 
 def _adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    plus_dm  = (df["high"].diff()).clip(lower=0)
+    plus_dm = (df["high"].diff()).clip(lower=0)
     minus_dm = (-df["low"].diff()).clip(lower=0)
     mask = plus_dm >= minus_dm
-    plus_dm  = plus_dm.where(mask, 0)
+    plus_dm = plus_dm.where(mask, 0)
     minus_dm = minus_dm.where(~mask, 0)
-    atr_s    = _atr(df, period)
-    plus_di  = 100 * _ema(plus_dm, period)  / (atr_s + 1e-10)
+    atr_s = _atr(df, period)
+    plus_di = 100 * _ema(plus_dm, period) / (atr_s + 1e-10)
     minus_di = 100 * _ema(minus_dm, period) / (atr_s + 1e-10)
     dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
     return dx.ewm(com=period - 1, adjust=False).mean()
 
 
 def _stochastic(df: pd.DataFrame, k_period: int = 14, d_period: int = 3):
-    low_min  = df["low"].rolling(k_period).min()
+    low_min = df["low"].rolling(k_period).min()
     high_max = df["high"].rolling(k_period).max()
-    stoch_k  = 100 * (df["close"] - low_min) / (high_max - low_min + 1e-10)
-    stoch_d  = stoch_k.rolling(d_period).mean()
+    stoch_k = 100 * (df["close"] - low_min) / (high_max - low_min + 1e-10)
+    stoch_d = stoch_k.rolling(d_period).mean()
     return stoch_k, stoch_d
 
 
-def _supertrend(df: pd.DataFrame, period: int = 7, multiplier: float = 3.0) -> pd.Series:
+def _supertrend(
+    df: pd.DataFrame, period: int = 7, multiplier: float = 3.0
+) -> pd.Series:
     """SuperTrend direction: +1 (bullish) / -1 (bearish)."""
-    hl2   = (df["high"] + df["low"]) / 2
+    hl2 = (df["high"] + df["low"]) / 2
     atr_s = _atr(df, period)
     upper = hl2 + multiplier * atr_s
     lower = hl2 - multiplier * atr_s
 
     supertrend = pd.Series(index=df.index, dtype=float)
-    direction  = pd.Series(index=df.index, dtype=float)
+    direction = pd.Series(index=df.index, dtype=float)
 
     for i in range(1, len(df)):
         cl = df["close"].iloc[i]
         prev_st = supertrend.iloc[i - 1]
         prev_cl = df["close"].iloc[i - 1]
-        _up  = upper.iloc[i]
-        _lo  = lower.iloc[i]
+        _up = upper.iloc[i]
+        _lo = lower.iloc[i]
         prev_up = upper.iloc[i - 1]
         prev_lo = lower.iloc[i - 1]
         _final_up = min(_up, prev_up) if prev_cl > prev_up else _up
         _final_lo = max(_lo, prev_lo) if prev_cl < prev_lo else _lo
         if pd.isna(prev_st):
             supertrend.iloc[i] = _final_up
-            direction.iloc[i]  = -1
+            direction.iloc[i] = -1
         elif prev_st == prev_up:
             if cl <= _final_up:
                 supertrend.iloc[i] = _final_up
-                direction.iloc[i]  = -1
+                direction.iloc[i] = -1
             else:
                 supertrend.iloc[i] = _final_lo
-                direction.iloc[i]  =  1
+                direction.iloc[i] = 1
         else:
             if cl >= _final_lo:
                 supertrend.iloc[i] = _final_lo
-                direction.iloc[i]  =  1
+                direction.iloc[i] = 1
             else:
                 supertrend.iloc[i] = _final_up
-                direction.iloc[i]  = -1
+                direction.iloc[i] = -1
 
     return direction.fillna(-1)
 
 
 def _ichimoku(df: pd.DataFrame):
     high = df["high"]
-    low  = df["low"]
-    tenkan   = (high.rolling(9).max()  + low.rolling(9).min())  / 2
-    kijun    = (high.rolling(26).max() + low.rolling(26).min()) / 2
+    low = df["low"]
+    tenkan = (high.rolling(9).max() + low.rolling(9).min()) / 2
+    kijun = (high.rolling(26).max() + low.rolling(26).min()) / 2
     senkou_a = ((tenkan + kijun) / 2).shift(26)
     senkou_b = ((high.rolling(52).max() + low.rolling(52).min()) / 2).shift(26)
     # NOTE: chikou (shift -26) creates NaN at tail — we exclude it to keep more rows
@@ -295,9 +325,9 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Add all technical indicators to a raw OHLCV DataFrame."""
     df = df.copy()
 
-    df["ema9"]  = _ema(df["close"], 9)
+    df["ema9"] = _ema(df["close"], 9)
     df["ema15"] = _ema(df["close"], 15)
-    df["rsi"]   = _rsi(df["close"], 14)
+    df["rsi"] = _rsi(df["close"], 14)
 
     df["macd"], df["macd_signal"], df["macd_hist"] = _macd(df["close"])
     df["vwap"] = _vwap(df)
@@ -307,13 +337,15 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["bb_upper"], df["bb_mid"], df["bb_lower"] = _bollinger_bands(df["close"])
     df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / (df["bb_mid"] + 1e-10)
 
-    df["atr"]  = _atr(df)
-    df["obv"]  = _obv(df)
-    df["adx"]  = _adx(df)
+    df["atr"] = _atr(df)
+    df["obv"] = _obv(df)
+    df["adx"] = _adx(df)
 
     df["stoch_k"], df["stoch_d"] = _stochastic(df)
 
-    df["ich_tenkan"], df["ich_kijun"], df["ich_senkou_a"], df["ich_senkou_b"] = _ichimoku(df)
+    df["ich_tenkan"], df["ich_kijun"], df["ich_senkou_a"], df["ich_senkou_b"] = (
+        _ichimoku(df)
+    )
 
     return df
 
@@ -322,9 +354,10 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # 3. TARGET + SAVE
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def build_features(ticker: str) -> bool:
     """Load raw CSV → indicators → target → save aligned feature CSV."""
-    raw_path  = RAW_DIR  / f"{ticker}.csv"
+    raw_path = RAW_DIR / f"{ticker}.csv"
     feat_path = FEAT_DIR / f"{ticker}_features.csv"
 
     if not raw_path.exists():
@@ -362,8 +395,13 @@ def build_features(ticker: str) -> bool:
             return False
 
         df.to_csv(feat_path)
-        log.info("FEAT  %s – %d rows, %d cols → %s",
-                 ticker, len(df), len(df.columns), feat_path.name)
+        log.info(
+            "FEAT  %s – %d rows, %d cols → %s",
+            ticker,
+            len(df),
+            len(df.columns),
+            feat_path.name,
+        )
         return True
 
     except Exception as exc:
@@ -382,6 +420,7 @@ def build_all_features(tickers: list[str], workers: int = WORKERS) -> dict[str, 
 # ══════════════════════════════════════════════════════════════════════════════
 # 4. FULL PIPELINE
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 def run_pipeline(
     tickers: list[str] | None = None,
@@ -403,14 +442,16 @@ def run_pipeline(
     if not skip_validation and len(tickers) > 10:
         valid_tickers, invalid_tickers = validate_all_tickers(tickers, workers)
         if invalid_tickers:
-            log.warning("Skipping %d invalid tickers: %s", len(invalid_tickers), invalid_tickers)
+            log.warning(
+                "Skipping %d invalid tickers: %s", len(invalid_tickers), invalid_tickers
+            )
         tickers = valid_tickers
     else:
         log.info("Skipping ticker validation (small list or --skip-validation)")
 
     # Step 1: Download
     dl_results = download_all(tickers, workers)
-    ok_dl   = [t for t, v in dl_results.items() if v]
+    ok_dl = [t for t, v in dl_results.items() if v]
     fail_dl = [t for t, v in dl_results.items() if not v]
     log.info("Download: %d OK, %d FAILED", len(ok_dl), len(fail_dl))
     if fail_dl:
@@ -418,7 +459,7 @@ def run_pipeline(
 
     # Step 2: Feature engineering
     feat_results = build_all_features(ok_dl, workers)
-    ok_feat   = [t for t, v in feat_results.items() if v]
+    ok_feat = [t for t, v in feat_results.items() if v]
     fail_feat = [t for t, v in feat_results.items() if not v]
 
     elapsed = time.time() - t0
@@ -444,16 +485,29 @@ def run_pipeline(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="StockAI Pro – ML Data Pipeline")
-    parser.add_argument("--ticker", nargs="*", default=None,
-                        help="One or more tickers (e.g. INFY.NS BEL.NS). Default: full 100-stock universe.")
-    parser.add_argument("--workers", type=int, default=WORKERS,
-                        help=f"Multiprocessing workers (default: {WORKERS})")
-    parser.add_argument("--years",   type=int, default=YEARS,
-                        help=f"Years of history (default: {YEARS})")
-    parser.add_argument("--validate", action="store_true",
-                        help="Only validate tickers, don't download/build")
-    parser.add_argument("--skip-validation", action="store_true",
-                        help="Skip ticker validation step")
+    parser.add_argument(
+        "--ticker",
+        nargs="*",
+        default=None,
+        help="One or more tickers (e.g. INFY.NS BEL.NS). Default: full 100-stock universe.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=WORKERS,
+        help=f"Multiprocessing workers (default: {WORKERS})",
+    )
+    parser.add_argument(
+        "--years", type=int, default=YEARS, help=f"Years of history (default: {YEARS})"
+    )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Only validate tickers, don't download/build",
+    )
+    parser.add_argument(
+        "--skip-validation", action="store_true", help="Skip ticker validation step"
+    )
     args = parser.parse_args()
 
     YEARS = args.years

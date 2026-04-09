@@ -17,7 +17,7 @@ from app.inference.models import load_models
 from app.routes.auth import get_current_user
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/backtest", tags=["backtest"])
+router = APIRouter(prefix="/api/v1/backtest", tags=["backtest"])
 
 # Risk configurations
 SLIPPAGE_BPS = 0.02 / 100
@@ -121,7 +121,10 @@ def _execute_backtest_sync(
     if df_symbol.empty:
         raise ValueError(f"No data available for symbol {target_symbol}")
 
-    feature_df = compute_features(df_symbol[["open", "high", "low", "close", "volume"]])
+    feature_df = compute_features(
+        df_symbol[["open", "high", "low", "close", "volume"]],
+        include_legacy=True,
+    )
     if feature_df.empty:
         raise ValueError("Unable to compute canonical features for backtest window.")
 

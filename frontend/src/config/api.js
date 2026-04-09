@@ -1,9 +1,18 @@
 const IS_PROD = Boolean(import.meta.env.PROD);
 const IS_DEV = Boolean(import.meta.env.DEV);
 
-export const API_BASE = 'https://api.stockai-pro.in';
-export const API_URL = 'https://api.stockai-pro.in/api';
-export const WS_URL = 'wss://api.stockai-pro.in/live';
+const DEFAULT_API_BASE = IS_DEV ? 'http://localhost:8000' : 'https://api.stockai-pro.in';
+const DEFAULT_WS_URL = IS_DEV ? 'ws://localhost:8000/live' : 'wss://api.stockai-pro.in/live';
+
+const normalizeOrigin = (value, fallback) => {
+  const raw = String(value || '').trim();
+  if (!raw) return fallback;
+  return raw.replace(/\/$/, '');
+};
+
+export const API_BASE = normalizeOrigin(import.meta.env.VITE_API_BASE_URL, DEFAULT_API_BASE);
+export const API_URL = `${API_BASE}/api`;
+export const WS_URL = normalizeOrigin(import.meta.env.VITE_WS_URL, DEFAULT_WS_URL);
 
 export const API_FALLBACK_BASE = '';
 

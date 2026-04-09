@@ -1,0 +1,35 @@
+{
+  "timeframe": "1h",
+  "feature_version": "v2.0",
+  "feature_columns": [
+    "price_change",
+    "volume_change",
+    "high_low_diff",
+    "open_close_diff",
+    "rolling_mean_5",
+    "rolling_std_5",
+    "rolling_mean_10",
+    "rolling_std_10",
+    "momentum",
+    "rsi",
+    "ema_12",
+    "ema_26",
+    "macd",
+    "bollinger_upper",
+    "bollinger_lower",
+    "volatility",
+    "lag_1",
+    "lag_2",
+    "lag_3"
+  ],
+  "horizon": 2,
+  "threshold": {
+    "base_return_threshold": 0.006,
+    "vol_multiplier": 0.6
+  },
+  "rows": {
+    "dataset": 1735896,
+    "train": 1388811,
+    "validation": 347085
+  }
+}
