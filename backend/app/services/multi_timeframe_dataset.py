@@ -274,10 +274,11 @@ def _aggregate_1m_features(
     vol_spike_flag = (df_1m["volume"] > vol_ma_1m * 2.0).astype(float)
 
     for ts in df_5m.index:
-        # window: (ts - 5 min, ts] inclusive
-        window_end = ts
-        window_start = ts - pd.Timedelta(minutes=4, seconds=59)
-        mask = (df_1m.index >= window_start) & (df_1m.index <= window_end)
+        # window: strictly past 5 minutes — half-open interval (ts-5min, ts]
+        # This captures exactly the five 1m bars that compose the 5m bar
+        # ending at ts, without including bars from the previous 5m period.
+        window_start = ts - pd.Timedelta(minutes=5)
+        mask = (df_1m.index > window_start) & (df_1m.index <= ts)
         bars_1m = df_1m[mask]
 
         if len(bars_1m) == 0:
