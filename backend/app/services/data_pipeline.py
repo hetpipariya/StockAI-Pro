@@ -381,8 +381,23 @@ def build_features(ticker: str) -> bool:
 
         df = compute_indicators(df)
 
-        # target: 1 if next-day close > today close, else 0
-        df["target"] = (df["close"].shift(-1) > df["close"]).astype(int)
+        # ── ATR-based 3-class labeling ─────────────────────────────────
+        # Label = 1 (BUY) if future return > atr_barrier
+        # Label = -1 (SELL) if future return < -atr_barrier
+        # Label = 0 (HOLD) otherwise
+        #
+        # barrier is sized as: ATR_BARRIER_MULT * atr / close
+        # This adapts to each symbol's actual volatility regime.
+        #
+        # Only future close (shift(-1)) is used for the label;
+        # atr is computed from past data only — no look-ahead.
+        _horizon = 1
+        _barrier_mult = 0.5
+        _future_ret = df["close"].shift(-_horizon) / df["close"] - 1
+        _barrier = _barrier_mult * df["atr"] / (df["close"] + 1e-9)
+        df["target"] = 0  # HOLD by default
+        df.loc[_future_ret > _barrier, "target"] = 1   # BUY
+        df.loc[_future_ret < -_barrier, "target"] = -1  # SELL
 
         df = df.dropna()
 
