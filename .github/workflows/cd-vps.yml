@@ -1,0 +1,247 @@
+name: CD VPS
+
+on:
+  workflow_call:
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: true
+      DOCKERHUB_TOKEN:
+        required: true
+      VPS_HOST:
+        required: true
+      VPS_SSH_USER:
+        required: true
+      VPS_SSH_KEY:
+        required: true
+      VPS_APP_DIR:
+        required: true
+      VPS_SSH_PORT:
+        required: false
+      BACKEND_HEALTH_URL:
+        required: false
+      FRONTEND_HEALTH_URL:
+        required: false
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Optional commit SHA to deploy. Defaults to current workflow SHA.
+        required: false
+        type: string
+      run_migrations:
+        description: Run alembic migrations before restarting services.
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: cd-vps-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Resolve VPS Deploy Target
+    runs-on: ubuntu-latest
+    outputs:
+      should_deploy: ${{ steps.resolve.outputs.should_deploy }}
+      commit_sha: ${{ steps.resolve.outputs.commit_sha }}
+      run_migrations: ${{ steps.resolve.outputs.run_migrations }}
+    steps:
+      - id: resolve
+        name: Resolve event to deploy intent
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            if [ "${{ github.event.workflow_run.conclusion }}" != "success" ]; then
+              echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+              echo "commit_sha=" >> "$GITHUB_OUTPUT"
+              echo "run_migrations=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+            echo "commit_sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+            echo "run_migrations=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          TARGET_SHA="${{ github.event.inputs.commit_sha }}"
+          if [ -z "${TARGET_SHA}" ]; then
+            TARGET_SHA="${{ github.sha }}"
+          fi
+
+          echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+          echo "run_migrations=${{ github.event.inputs.run_migrations }}" >> "$GITHUB_OUTPUT"
+
+  validate-vps-secrets:
+    name: Validate VPS Deployment Secrets
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: needs.preflight.outputs.should_deploy == 'true'
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_SSH_USER: ${{ secrets.VPS_SSH_USER }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      VPS_APP_DIR: ${{ secrets.VPS_APP_DIR }}
+    steps:
+      - name: Check required secrets
+        run: |
+          set -euo pipefail
+
+          missing=0
+          for key in DOCKERHUB_USERNAME DOCKERHUB_TOKEN VPS_HOST VPS_SSH_USER VPS_SSH_KEY VPS_APP_DIR; do
+            if [ -z "${!key:-}" ]; then
+              echo "Missing required GitHub secret: $key"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "VPS CD aborted due to missing secrets."
+            exit 1
+          fi
+
+  build-and-push-images:
+    name: Build and Push Docker Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [preflight, validate-vps-secrets]
+    if: needs.preflight.outputs.should_deploy == 'true'
+    outputs:
+      backend_image: ${{ steps.meta.outputs.backend_image }}
+      frontend_image: ${{ steps.meta.outputs.frontend_image }}
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - name: Checkout deployment commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.commit_sha }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: meta
+        name: Compute image tags
+        run: |
+          set -euo pipefail
+
+          SHORT_SHA="$(echo "${{ needs.preflight.outputs.commit_sha }}" | cut -c1-12)"
+          echo "backend_image=${DOCKERHUB_USERNAME}/stockai-pro-backend:sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=${DOCKERHUB_USERNAME}/stockai-pro-frontend:sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.backend_image }}
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.frontend_image }}
+
+  deploy-vps:
+    name: Deploy to VPS via Docker Compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [preflight, validate-vps-secrets, build-and-push-images]
+    if: needs.preflight.outputs.should_deploy == 'true'
+    steps:
+      - name: Execute remote deployment
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT || '22' }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+
+            export BACKEND_IMAGE='${{ needs.build-and-push-images.outputs.backend_image }}'
+            export FRONTEND_IMAGE='${{ needs.build-and-push-images.outputs.frontend_image }}'
+
+            if [ -n '${{ secrets.DOCKERHUB_TOKEN }}' ]; then
+              echo '${{ secrets.DOCKERHUB_TOKEN }}' | docker login -u '${{ secrets.DOCKERHUB_USERNAME }}' --password-stdin
+            fi
+
+            cd '${{ secrets.VPS_APP_DIR }}'
+            docker compose -f infra/docker-compose.prod.yml pull
+
+            if [ '${{ needs.preflight.outputs.run_migrations }}' = 'true' ]; then
+              docker compose -f infra/docker-compose.prod.yml run --rm backend alembic upgrade head
+            fi
+
+            docker compose -f infra/docker-compose.prod.yml up -d --remove-orphans
+            docker compose -f infra/docker-compose.prod.yml ps
+
+  verify-health:
+    name: Verify VPS Health
+    runs-on: ubuntu-latest
+    needs: [deploy-vps]
+    if: success()
+    env:
+      BACKEND_HEALTH_URL: ${{ secrets.BACKEND_HEALTH_URL }}
+      FRONTEND_HEALTH_URL: ${{ secrets.FRONTEND_HEALTH_URL }}
+    steps:
+      - name: Verify backend health endpoint
+        run: |
+          set -euo pipefail
+
+          URL="${BACKEND_HEALTH_URL:-https://api.stockai-pro.in/api/v1/health}"
+          for attempt in $(seq 1 20); do
+            if curl -fsS --max-time 10 "${URL}" >/dev/null; then
+              echo "Backend health check passed"
+              exit 0
+            fi
+            echo "Backend health retry ${attempt}/20"
+            sleep 10
+          done
+
+          echo "Backend health check failed"
+          exit 1
+
+      - name: Verify frontend health endpoint
+        run: |
+          set -euo pipefail
+
+          URL="${FRONTEND_HEALTH_URL:-https://stockai-pro.in}"
+          for attempt in $(seq 1 20); do
+            if curl -fsS --max-time 10 "${URL}" >/dev/null; then
+              echo "Frontend health check passed"
+              exit 0
+            fi
+            echo "Frontend health retry ${attempt}/20"
+            sleep 10
+          done
+
+          echo "Frontend health check failed"
+          exit 1

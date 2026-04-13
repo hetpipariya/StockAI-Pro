@@ -31,6 +31,7 @@ concurrency:
 
 permissions:
   contents: read
+  statuses: read
 
 jobs:
   preflight:
@@ -42,6 +43,8 @@ jobs:
     steps:
       - id: resolve
         name: Check CI result and resolve commit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -58,11 +61,27 @@ jobs:
           fi
 
           MANUAL_SHA="${{ github.event.inputs.commit_sha }}"
-          if [ -n "$MANUAL_SHA" ]; then
-            echo "commit_sha=$MANUAL_SHA" >> "$GITHUB_OUTPUT"
-          else
-            echo "commit_sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          TARGET_SHA="$MANUAL_SHA"
+          if [ -z "$TARGET_SHA" ]; then
+            TARGET_SHA="${{ github.sha }}"
           fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            STATUS_JSON="$(curl -fsSL \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/commits/${TARGET_SHA}/status")"
+
+            COMBINED_STATE="$(echo "${STATUS_JSON}" | jq -r '.state // "unknown"')"
+            if [ "${COMBINED_STATE}" != "success" ]; then
+              echo "Manual deploy blocked: commit ${TARGET_SHA} does not have successful checks (state=${COMBINED_STATE})."
+              echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+              echo "commit_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+          fi
+
+          echo "commit_sha=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
           echo "should_deploy=true" >> "$GITHUB_OUTPUT"
 
   validate-cd-secrets:
@@ -104,7 +123,7 @@ jobs:
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
       RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
       DEPLOY_COMMIT_SHA: ${{ needs.preflight.outputs.commit_sha }}
-      BACKEND_HEALTH_URL: https://api.stockai-pro.in/api/health
+      BACKEND_HEALTH_URL: https://api.stockai-pro.in/api/v1/health
     steps:
       - name: Trigger Render deploy for CI commit
         id: trigger
@@ -179,7 +198,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          HEALTH_URL="${BACKEND_HEALTH_URL:-https://api.stockai-pro.in/api/health}"
+          HEALTH_URL="${BACKEND_HEALTH_URL:-https://api.stockai-pro.in/api/v1/health}"
           echo "Using backend health URL: ${HEALTH_URL}"
 
           for attempt in $(seq 1 30); do

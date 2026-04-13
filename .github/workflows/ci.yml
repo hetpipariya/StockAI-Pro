@@ -14,6 +14,20 @@ permissions:
   contents: read
 
 jobs:
+  dependency-review:
+    name: Dependency Review (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@v4
+
   backend:
     name: Backend (lint + tests)
     runs-on: ubuntu-latest
@@ -53,6 +67,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r backend/requirements-dev.txt
+          pip check
+
+      - name: Backend dependency audit (report only)
+        working-directory: backend
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt
 
       - name: Validate env templates
         run: python scripts/validate_env.py --project-root .
@@ -111,9 +133,51 @@ jobs:
         working-directory: frontend
         run: npm run lint
 
+      - name: Run frontend tests when available
+        working-directory: frontend
+        run: |
+          if npm run | grep -Eq '^\s*test\b'; then
+            npm test
+          else
+            echo "No frontend test script configured; skipping test step."
+          fi
+
+      - name: Frontend dependency audit (production deps)
+        working-directory: frontend
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Build frontend
         working-directory: frontend
         env:
           VITE_API_BASE_URL: https://api.stockai-pro.in
           VITE_WS_URL: wss://api.stockai-pro.in/live
         run: npm run build
+
+  docker-smoke:
+    name: Docker Build Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs: [backend, frontend]
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: false
+          load: false
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: false
+          load: false

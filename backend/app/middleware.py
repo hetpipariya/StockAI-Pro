@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any
@@ -17,9 +18,10 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
-from app.config import API_RATE_LIMIT
+from app.config import API_RATE_LIMIT, SLOW_REQUEST_LOG_MS
 from app.config import FRONTEND_URL as _FRONTEND_URL
 from app.utils.auth_utils import decode_access_token
+from app.utils.request_context import reset_request_id, set_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,7 @@ _LOGIN_RATE_LIMIT = 5
 _LOGIN_RATE_WINDOW = 300.0
 _RATE_WINDOW = 60.0
 _RATE_LIMIT = API_RATE_LIMIT
+_SLOW_REQUEST_LOG_MS = max(50, SLOW_REQUEST_LOG_MS)
 _CLEANUP_EVERY = 300.0
 _last_cleanup = time.monotonic()
 
@@ -57,6 +60,11 @@ def _extract_rate_key(request: Request, client_ip: str) -> str:
             except Exception:
                 pass
     return f"ip:{client_ip}"
+
+
+def _attach_request_id_header(response: Response, request_id: str) -> Response:
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 
 def _normalize_payload(payload: Any, status_code: int) -> dict[str, Any]:
@@ -109,14 +117,16 @@ def _normalize_payload(payload: Any, status_code: int) -> dict[str, Any]:
     }
 
 
-async def _normalize_json_response(request: Request, response: Response) -> Response:
+async def _normalize_json_response(
+    request: Request, response: Response, request_id: str
+) -> Response:
     path = request.url.path
     if (
         path.startswith("/docs")
         or path.startswith("/openapi")
         or path.startswith("/redoc")
     ):
-        return response
+        return _attach_request_id_header(response, request_id)
 
     body = b""
     if getattr(response, "body", None) is not None:
@@ -138,6 +148,7 @@ async def _normalize_json_response(request: Request, response: Response) -> Resp
     except Exception:
         headers = dict(response.headers)
         headers.pop("content-length", None)
+        headers["X-Request-ID"] = request_id
         return Response(
             content=body,
             status_code=response.status_code,
@@ -150,6 +161,7 @@ async def _normalize_json_response(request: Request, response: Response) -> Resp
 
     headers = dict(response.headers)
     headers.pop("content-length", None)
+    headers["X-Request-ID"] = request_id
 
     if "gzip" in content_encoding:
         serialized = json.dumps(normalized, separators=(",", ":")).encode("utf-8")
@@ -171,8 +183,13 @@ async def _normalize_json_response(request: Request, response: Response) -> Resp
     )
 
 
-def _corsify_error_response(request: Request, response: JSONResponse) -> JSONResponse:
+def _corsify_error_response(
+    request: Request,
+    response: JSONResponse,
+    request_id: str,
+) -> JSONResponse:
     """Ensure middleware-generated error responses remain visible to browser clients."""
+    response.headers["X-Request-ID"] = request_id
     origin = (request.headers.get("origin") or "").strip()
     if not origin:
         return response
@@ -194,7 +211,6 @@ def configure_cors(app: FastAPI) -> list[str]:
         "https://stockai-pro.in",
         "https://www.stockai-pro.in",
         "https://stockai-pro.pages.dev",
-        "*",  # DEBUG: Allow all origins for Cloudflare/mobile troubleshooting
         _FRONTEND_URL,
         "http://localhost:5173",
         "http://127.0.0.1:5173",
@@ -207,6 +223,13 @@ def configure_cors(app: FastAPI) -> list[str]:
     allowed_origins = sorted(
         {origin.rstrip("/") for origin in [*default_origins, *extra_origins] if origin}
     )
+
+    if "*" in allowed_origins:
+        # Wildcard origins plus allow_credentials=True weakens cross-origin protections.
+        allowed_origins = [origin for origin in allowed_origins if origin != "*"]
+        logger.warning(
+            "[CORS] Removed wildcard origin because credentialed requests are enabled"
+        )
 
     logger.info(
         "[CORS] Allowed origins (%d): %s",
@@ -262,108 +285,116 @@ def add_production_middleware(app: FastAPI) -> None:
     async def production_middleware(request: Request, call_next):
         path = request.url.path
         client_ip = request.client.host if request.client else "unknown"
+        request_id = (
+            (request.headers.get("X-Request-ID") or "").strip() or uuid.uuid4().hex
+        )
+        context_token = set_request_id(request_id)
         rate_key = _extract_rate_key(request, client_ip)
         now = time.monotonic()
 
-        if request.method == "POST" and path in (
-            "/api/auth/login",
-            "/api/auth/token",
-            "/api/v1/auth/login",
-            "/api/v1/auth/token",
-        ):
-            if rate_key not in _login_attempts:
-                _login_attempts[rate_key] = deque()
-            attempts = _login_attempts[rate_key]
-            cutoff = now - _LOGIN_RATE_WINDOW
-            while attempts and attempts[0] < cutoff:
-                attempts.popleft()
-            if len(attempts) >= _LOGIN_RATE_LIMIT:
+        try:
+            if request.method == "POST" and path in (
+                "/api/v1/auth/login",
+                "/api/v1/auth/token",
+            ):
+                if rate_key not in _login_attempts:
+                    _login_attempts[rate_key] = deque()
+                attempts = _login_attempts[rate_key]
+                cutoff = now - _LOGIN_RATE_WINDOW
+                while attempts and attempts[0] < cutoff:
+                    attempts.popleft()
+                if len(attempts) >= _LOGIN_RATE_LIMIT:
+                    response = JSONResponse(
+                        status_code=429,
+                        content={
+                            "success": False,
+                            "status": "error",
+                            "error": "Too many login attempts. Wait 5 minutes.",
+                            "message": "Too many login attempts. Wait 5 minutes.",
+                            "data": None,
+                            "timestamp": _utc_now_iso(),
+                        },
+                    )
+                    return _corsify_error_response(request, response, request_id)
+                attempts.append(now)
+
+            if path.startswith("/api/") and not _check_rate_limit(rate_key):
                 response = JSONResponse(
                     status_code=429,
                     content={
                         "success": False,
                         "status": "error",
-                        "error": "Too many login attempts. Wait 5 minutes.",
-                        "message": "Too many login attempts. Wait 5 minutes.",
+                        "error": f"Rate limit exceeded ({_RATE_LIMIT}/min). Slow down.",
+                        "message": f"Rate limit exceeded ({_RATE_LIMIT}/min). Slow down.",
                         "data": None,
                         "timestamp": _utc_now_iso(),
                     },
                 )
-                return _corsify_error_response(request, response)
-            attempts.append(now)
+                return _corsify_error_response(request, response, request_id)
 
-        if path.startswith("/api/") and not _check_rate_limit(rate_key):
-            response = JSONResponse(
-                status_code=429,
-                content={
-                    "success": False,
-                    "status": "error",
-                    "error": f"Rate limit exceeded ({_RATE_LIMIT}/min). Slow down.",
-                    "message": f"Rate limit exceeded ({_RATE_LIMIT}/min). Slow down.",
-                    "data": None,
-                    "timestamp": _utc_now_iso(),
-                },
-            )
-            return _corsify_error_response(request, response)
+            start_time = time.perf_counter()
+            try:
+                response = await asyncio.wait_for(call_next(request), timeout=45.0)
+            except asyncio.TimeoutError:
+                elapsed = time.perf_counter() - start_time
+                logger.error(
+                    "[TIMEOUT] %s %s timed out after %.1fs",
+                    request.method,
+                    path,
+                    elapsed,
+                )
+                response = JSONResponse(
+                    status_code=504,
+                    content={
+                        "success": False,
+                        "status": "error",
+                        "error": "Request timed out",
+                        "message": "Request timed out",
+                        "data": None,
+                        "timestamp": _utc_now_iso(),
+                    },
+                )
+                return _corsify_error_response(request, response, request_id)
+            except Exception as exc:
+                elapsed = time.perf_counter() - start_time
+                logger.error(
+                    "[ERROR] %s %s failed after %.1fs: %s",
+                    request.method,
+                    path,
+                    elapsed,
+                    exc,
+                )
+                response = JSONResponse(
+                    status_code=500,
+                    content={
+                        "success": False,
+                        "status": "error",
+                        "error": "Internal server error",
+                        "message": "Internal server error",
+                        "data": None,
+                        "timestamp": _utc_now_iso(),
+                    },
+                )
+                return _corsify_error_response(request, response, request_id)
 
-        start_time = time.perf_counter()
-        try:
-            response = await asyncio.wait_for(call_next(request), timeout=45.0)
-        except asyncio.TimeoutError:
             elapsed = time.perf_counter() - start_time
-            logger.error(
-                "[TIMEOUT] %s %s timed out after %.1fs from %s",
-                request.method,
-                path,
-                elapsed,
-                client_ip,
-            )
-            response = JSONResponse(
-                status_code=504,
-                content={
-                    "success": False,
-                    "status": "error",
-                    "error": "Request timed out",
-                    "message": "Request timed out",
-                    "data": None,
-                    "timestamp": _utc_now_iso(),
-                },
-            )
-            return _corsify_error_response(request, response)
-        except Exception as exc:
-            elapsed = time.perf_counter() - start_time
-            logger.error(
-                "[ERROR] %s %s failed after %.1fs: %s",
-                request.method,
-                path,
-                elapsed,
-                exc,
-            )
-            response = JSONResponse(
-                status_code=500,
-                content={
-                    "success": False,
-                    "status": "error",
-                    "error": "Internal server error",
-                    "message": "Internal server error",
-                    "data": None,
-                    "timestamp": _utc_now_iso(),
-                },
-            )
-            return _corsify_error_response(request, response)
+            elapsed_ms = elapsed * 1000.0
+            if path.startswith("/api/") and elapsed_ms >= _SLOW_REQUEST_LOG_MS:
+                logger.warning(
+                    "[SLOW_API] method=%s path=%s status=%d duration_ms=%.1f",
+                    request.method,
+                    path,
+                    response.status_code,
+                    elapsed_ms,
+                )
 
-        elapsed = time.perf_counter() - start_time
-        if path.startswith("/api/") and elapsed > 0.5:
-            logger.info(
-                "[API] %s %s -> %d (%.2fs) from %s",
-                request.method,
-                path,
-                response.status_code,
-                elapsed,
-                client_ip,
+            return await _normalize_json_response(
+                request,
+                response,
+                request_id=request_id,
             )
-
-        return await _normalize_json_response(request, response)
+        finally:
+            reset_request_id(context_token)
 
 
 def add_exception_handlers(app: FastAPI) -> None:

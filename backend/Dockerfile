@@ -1,42 +1,85 @@
-# Stage 1: Build
-FROM python:3.9-slim as builder
+# ====================================================================
+# STOCKAI PRO - Backend Dockerfile (FastAPI + Python)
+# Optimized for production with multi-stage build
+# ====================================================================
+
+# ========== STAGE 1: BUILD WHEELS ==========
+# Compile dependencies to wheels for faster installation
+FROM python:3.11-slim as builder
 
 WORKDIR /app
 
-# Install system dependencies
+# Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy requirements
 COPY requirements.txt .
+
+# Build wheels (this caches the expensive compilation step)
 RUN pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.txt
 
-# Stage 2: Runtime
-FROM python:3.9-slim
+
+# ========== STAGE 2: RUNTIME ==========
+# Minimal runtime image with only necessary dependencies
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install runtime dependencies for psycopg2 and curl for healthcheck
+# ========== Set metadata ==========
+LABEL maintainer="StockAI Pro Team"
+LABEL description="StockAI Pro Backend - FastAPI with async workers"
+LABEL version="1.0.0"
+
+# ========== Install runtime dependencies only ==========
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# ========== Copy wheels and requirements ==========
 COPY --from=builder /app/wheels /wheels
 COPY --from=builder /app/requirements.txt .
 
-RUN pip install --no-cache /wheels/*
+ENV PIP_DEFAULT_TIMEOUT=100 \
+    PIP_RETRIES=10
 
+# ========== Install Python dependencies from wheels ==========
+RUN pip install --no-cache-dir /wheels/*
+
+# ========== Copy application ==========
 COPY . .
-# Ensure ML models available at /app/models
-COPY models/ ./models/
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-# Set model path for the application
-ENV MODEL_PATH=/app/models
+# ========== Set environment variables ==========
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+  PORT=8000 \
+  RUN_MIGRATIONS_ON_START=true \
+  ALLOW_START_WITH_FAILED_MIGRATIONS=false \
+  FORWARDED_ALLOW_IPS=*
 
-# Container-level health probe used by Docker/Render-style runtimes.
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -fsS "http://localhost:${PORT:-8000}/api/health" || exit 1
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh && \
+  useradd --create-home --home-dir /home/appuser --shell /usr/sbin/nologin appuser && \
+  chown -R appuser:appuser /app
 
-# Run alembic migrations (PostgreSQL only) and start uvicorn
-CMD ["sh", "-c", "set -e; echo '[DOCKER] Model files:'; ls -la /app/models/*.pkl 2>/dev/null || echo 'WARNING: No model files found'; if python -c \"from app.config import DATABASE_URL; exit(0 if DATABASE_URL.startswith('sqlite') else 1)\"; then echo '[STARTUP] SQLite - skipping migrations'; else echo '[STARTUP] PostgreSQL - running migrations'; alembic upgrade head; fi; exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips='*'"]
+USER appuser
+
+# ========== Verify models directory ==========
+RUN mkdir -p /app/models && \
+    echo "[DOCKER] Models directory structure:" && \
+    ls -la /app/models/ 2>/dev/null || echo "Models directory (may be empty - loaded at runtime)"
+
+# ========== Health check ==========
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS "http://localhost:${PORT}/api/v1/health" || exit 1
+
+# ========== Expose port ==========
+EXPOSE 8000
+
+# ========== Start command ==========
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
