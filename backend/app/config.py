@@ -26,6 +26,7 @@ def _as_bool(value: Optional[str], default: bool = False) -> bool:
         return default
     return normalized in {"1", "true", "yes", "on"}
 
+
 SMARTAPI_API_KEY = os.getenv("SMARTAPI_API_KEY", "")
 SMARTAPI_CLIENT_ID = os.getenv("SMARTAPI_CLIENT_ID", "")
 SMARTAPI_CLIENT_PWD = os.getenv("SMARTAPI_CLIENT_PWD", "")

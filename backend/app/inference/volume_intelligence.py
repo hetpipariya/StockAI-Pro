@@ -33,7 +33,6 @@ def _normalize_frame(df: pd.DataFrame) -> pd.DataFrame:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
     out.replace([np.inf, -np.inf], np.nan, inplace=True)
-    out.bfill(inplace=True)
     out.ffill(inplace=True)
     out.fillna(0, inplace=True)
     return out
@@ -102,7 +101,7 @@ def _augment_with_derived_ai_features(
 
     close_series = _to_numeric(close).fillna(0.0)
     if len(close_series) != len(out):
-        close_series = close_series.reindex(range(len(out))).ffill().bfill().fillna(0.0)
+        close_series = close_series.reindex(range(len(out))).ffill().fillna(0.0)
         close_series.index = idx
     else:
         close_series.index = idx
@@ -163,7 +162,6 @@ def _augment_with_derived_ai_features(
     out = pd.concat([out, norm_block, z_block, smooth_block], axis=1)
 
     out.replace([np.inf, -np.inf], np.nan, inplace=True)
-    out.bfill(inplace=True)
     out.ffill(inplace=True)
     out.fillna(0.0, inplace=True)
     return out
@@ -381,7 +379,7 @@ def build_enhanced_feature_vector(
     ]
     merged[numeric_cols] = merged[numeric_cols].apply(pd.to_numeric, errors="coerce")
     merged[numeric_cols] = merged[numeric_cols].replace([np.inf, -np.inf], np.nan)
-    merged[numeric_cols] = merged[numeric_cols].bfill().ffill().fillna(0.0)
+    merged[numeric_cols] = merged[numeric_cols].ffill().fillna(0.0)
 
     merged["volume_ratio_flag"] = merged["volume_ratio_flag"].fillna("NORMAL")
     merged["vwap_bias"] = merged["vwap_bias"].fillna("NEUTRAL")

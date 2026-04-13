@@ -120,7 +120,11 @@ def compute_liquidity_order_flow(
     frame = ohlcv_df[frame_cols].copy()
     for col in ("open", "high", "low", "close", "volume"):
         frame[col] = pd.to_numeric(frame[col], errors="coerce")
-    frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=["open", "high", "low", "close", "volume"]).reset_index(drop=True)
+    frame = (
+        frame.replace([np.inf, -np.inf], np.nan)
+        .dropna(subset=["open", "high", "low", "close", "volume"])
+        .reset_index(drop=True)
+    )
 
     if len(frame) < 3:
         return _fallback("insufficient_candles")

@@ -9,10 +9,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 if __name__ == "__main__":
     import uvicorn
+    from app.config import (BACKEND_HOST, BACKEND_PORT, LOG_LEVEL,
+                            UVICORN_ACCESS_LOG, UVICORN_LOOP,
+                            UVICORN_TIMEOUT_KEEP_ALIVE, UVICORN_WORKERS)
+
     uvicorn.run(
         "app.main:app",
-        host="0.0.0.0",
-        port=8000,
-        log_level="info",
+        host=BACKEND_HOST,
+        port=BACKEND_PORT,
+        log_level=str(LOG_LEVEL).lower(),
         reload=False,
+        workers=UVICORN_WORKERS,
+        timeout_keep_alive=UVICORN_TIMEOUT_KEEP_ALIVE,
+        loop=UVICORN_LOOP,
+        access_log=UVICORN_ACCESS_LOG,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )

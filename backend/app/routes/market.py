@@ -5,27 +5,25 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
-from app.config import (CACHE_TTL_CANDLES_SECONDS, CACHE_TTL_SNAPSHOT_SECONDS,
-                        SMARTAPI_EXCHANGE)
-from app.connectors import (SmartAPIConnector, get_symbol_token,
-                            get_tradingsymbol)
-from app.services.candle_store import (get_candles, get_last_candle,
-                                       store_candles)
+from app.config import SMARTAPI_EXCHANGE
+from app.connectors import SmartAPIConnector, get_tradingsymbol
+from app.services.candle_store import get_last_candle
 from app.services.bundle_service import (get_history as get_history_service,
                                          get_market_status as get_market_status_service,
                                          get_snapshot as get_snapshot_service)
-from app.services.instrument_master import get_token
+from app.services.instrument_service import get_token_by_symbol
 from app.services.market_state import get_market_status
 from app.services.redis_client import get_cache, set_cache
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/market", tags=["market"])
+router = APIRouter(prefix="/api/v1/market", tags=["market"])
 
 # Lazy singleton connector
 _connector: SmartAPIConnector | None = None
+
 
 def _parse_candle_row(r) -> dict | None:
     """Parse SmartAPI candle row (array or dict)."""
@@ -72,8 +70,8 @@ async def _fetch_snapshot(symbol: str) -> dict:
     """Fetch live price snapshot via SmartAPI."""
     import asyncio
 
-    token = get_token(symbol) or get_symbol_token(symbol)
-    ts = get_tradingsymbol(symbol)
+    token = get_token_by_symbol(symbol, exchange=SMARTAPI_EXCHANGE)
+    ts = get_tradingsymbol(symbol, exchange=SMARTAPI_EXCHANGE)
     conn = await asyncio.to_thread(get_connector)
     data = await asyncio.to_thread(conn.get_ltp, token, SMARTAPI_EXCHANGE, ts)
     if not data:
@@ -128,17 +126,22 @@ async def market_status():
     }
 
 
-# Deprecated: replaced by /api/bundle
+# Deprecated: replaced by /api/v1/bundle
 @router.get("/snapshot", deprecated=True)
 async def get_snapshot(symbol: str = Query(..., description="e.g. RELIANCE")):
     """Current LTP from live feed with DB fallback."""
-    out = await get_snapshot_service(symbol)
+    try:
+        out = await get_snapshot_service(symbol)
+    except KeyError as exc:
+        message = str(exc.args[0]) if exc.args else str(exc)
+        raise HTTPException(status_code=404, detail=message) from exc
+
     market_status_payload = await get_market_status_service()
     out["market_status"] = market_status_payload.get("state", "CLOSED")
     return {"status": "success", "data": out, "message": "Snapshot"}
 
 
-# Deprecated: replaced by /api/bundle
+# Deprecated: replaced by /api/v1/bundle
 @router.get("/history", deprecated=True)
 async def get_history(
     symbol: str = Query(...),
@@ -149,7 +152,12 @@ async def get_history(
     OHLCV candle history — DB-first with SmartAPI gap-fill.
     Pipeline: Check DB → If insufficient, fetch from SmartAPI → Store in DB → Return
     """
-    out = await get_history_service(symbol=symbol, interval=interval, limit=limit)
+    try:
+        out = await get_history_service(symbol=symbol, interval=interval, limit=limit)
+    except KeyError as exc:
+        message = str(exc.args[0]) if exc.args else str(exc)
+        raise HTTPException(status_code=404, detail=message) from exc
+
     return {"status": "success", "data": out, "message": "History"}
 
 

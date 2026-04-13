@@ -51,7 +51,7 @@ async def test_bundle_endpoint_success_contract(client, monkeypatch):
 
     monkeypatch.setattr("app.routes.bundle.get_bundle_data", _mock_bundle)
 
-    response = await client.get("/api/bundle/RELIANCE")
+    response = await client.get("/api/v1/bundle/RELIANCE")
     assert response.status_code == 200
 
     body = response.json()
@@ -73,7 +73,7 @@ async def test_bundle_endpoint_timeout_contract(client, monkeypatch):
 
     monkeypatch.setattr("app.routes.bundle.get_bundle_data", _mock_timeout)
 
-    response = await client.get("/api/bundle/RELIANCE")
+    response = await client.get("/api/v1/bundle/RELIANCE")
     assert response.status_code == 504
 
     body = response.json()
@@ -83,13 +83,30 @@ async def test_bundle_endpoint_timeout_contract(client, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_bundle_endpoint_unknown_symbol_contract(client, monkeypatch):
+    async def _mock_missing_symbol(*_args, **_kwargs):
+        raise KeyError("Instrument token not found for symbol: UNKNOWN")
+
+    monkeypatch.setattr("app.routes.bundle.get_bundle_data", _mock_missing_symbol)
+
+    response = await client.get("/api/v1/bundle/UNKNOWN")
+    assert response.status_code == 404
+
+    body = response.json()
+    assert body["success"] is False
+    assert body["data"] is None
+    assert body["error"]["code"] == "SYMBOL_NOT_FOUND"
+    assert "UNKNOWN" in body["error"]["message"]
+
+
+@pytest.mark.anyio
 async def test_legacy_routes_are_deprecated(app_with_overrides):
     openapi = app_with_overrides.openapi()
 
-    history_deprecated = openapi["paths"]["/api/market/history"]["get"]["deprecated"]
-    snapshot_deprecated = openapi["paths"]["/api/market/snapshot"]["get"]["deprecated"]
-    predict_deprecated = openapi["paths"]["/api/predict"]["get"]["deprecated"]
-    indicators_deprecated = openapi["paths"]["/api/indicators"]["get"]["deprecated"]
+    history_deprecated = openapi["paths"]["/api/v1/market/history"]["get"]["deprecated"]
+    snapshot_deprecated = openapi["paths"]["/api/v1/market/snapshot"]["get"]["deprecated"]
+    predict_deprecated = openapi["paths"]["/api/v1/predict"]["get"]["deprecated"]
+    indicators_deprecated = openapi["paths"]["/api/v1/indicators"]["get"]["deprecated"]
 
     assert history_deprecated is True
     assert snapshot_deprecated is True

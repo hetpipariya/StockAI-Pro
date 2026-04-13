@@ -95,7 +95,7 @@ def _ensure_model_feature_columns(
         series = pd.to_numeric(raw[name], errors="coerce")
         if not series.index.equals(out.index):
             series = series.reindex(out.index)
-        return series.bfill().ffill().fillna(0.0)
+        return series.ffill().fillna(0.0)
 
     close_series = _raw_series("close")
     open_series = _raw_series("open")
@@ -428,6 +428,88 @@ FINAL_FUSION_WEIGHTS: dict[str, float] = {
     "risk_score": 0.04,
     "ai_score": 0.03,
 }
+
+
+DIRECTIONAL_SCORE_WEIGHTS: dict[str, float] = {
+    "ml": 0.30,
+    "fusion": 0.20,
+    "trend": 0.14,
+    "momentum": 0.10,
+    "indicator": 0.10,
+    "volume": 0.07,
+    "volatility": 0.04,
+    "mtf": 0.03,
+    "structure": 0.02,
+}
+
+FILTER_CONFIDENCE_PENALTIES: dict[str, float] = {
+    "regime_sideways": 0.12,
+    "volatility_too_low": 0.10,
+    "volume_too_low": 0.08,
+    "mtf_misalignment": 0.15,
+    "conflicting_timeframes": 0.10,
+    "rr_below_threshold": 0.15,
+    "price_action_weak_or_doji": 0.10,
+    "expiry_conflicting_signals": 0.25,
+    "outside_trading_hours": 0.20,
+}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.getenv(name, str(default))).strip()
+    try:
+        return float(raw)
+    except Exception:
+        return float(default)
+
+
+MIN_EXECUTION_CONFIDENCE = float(
+    np.clip(_env_float("MIN_EXECUTION_CONFIDENCE", 0.55), 0.45, 0.75)
+)
+DIRECTIONAL_ACTION_THRESHOLD = float(
+    np.clip(_env_float("DIRECTIONAL_ACTION_THRESHOLD", 0.57), 0.50, 0.75)
+)
+MIN_DIRECTIONAL_EDGE = float(np.clip(_env_float("MIN_DIRECTIONAL_EDGE", 0.04), 0.01, 0.20))
+MAX_FILTER_PENALTY = float(np.clip(_env_float("MAX_FILTER_PENALTY", 0.45), 0.20, 0.70))
+
+
+def _get_signal_decision_mode() -> str:
+    mode = str(os.getenv("SIGNAL_DECISION_MODE", "weighted")).strip().lower()
+    if mode in {"legacy", "weighted"}:
+        return mode
+    return "weighted"
+
+
+def _build_decision_penalties(
+    advisory_filters: list[str],
+    final_hard_filters: list[str],
+    rr_probe: float,
+) -> list[tuple[str, float]]:
+    penalties: list[tuple[str, float]] = []
+    seen: set[str] = set()
+
+    for reason in list(advisory_filters) + list(final_hard_filters):
+        key = str(reason)
+        if key in seen:
+            continue
+        seen.add(key)
+        value = float(FILTER_CONFIDENCE_PENALTIES.get(key, 0.0) or 0.0)
+        if value > 0:
+            penalties.append((key, value))
+
+    if advisory_filters:
+        penalties.append(
+            (
+                "filter_friction",
+                float(np.clip(0.015 * len(set(advisory_filters)), 0.0, 0.12)),
+            )
+        )
+
+    if rr_probe > 0 and rr_probe < 1.5:
+        rr_shortfall = float(np.clip((1.5 - rr_probe) / 1.5, 0.0, 1.0))
+        penalties.append(("rr_soft_penalty", 0.15 * rr_shortfall))
+
+    return penalties
 
 
 def _numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -1788,22 +1870,22 @@ def _compute_indicator_fusion_engine(
         rsi_series = _series_or_default("rsi", pd.Series(np.nan, index=indicators.index))
     if rsi_series.isna().all():
         rsi_series = rsi_default
-    rsi_series = rsi_series.bfill().ffill().fillna(50.0).clip(lower=0.0, upper=100.0)
+    rsi_series = rsi_series.ffill().fillna(50.0).clip(lower=0.0, upper=100.0)
 
     macd_line = _series_or_default("macd", macd_default)
-    macd_line = macd_line.bfill().ffill().fillna(0.0)
+    macd_line = macd_line.ffill().fillna(0.0)
 
     macd_signal = _series_or_default("macd_signal", macd_signal_default)
-    macd_signal = macd_signal.bfill().ffill().fillna(0.0)
+    macd_signal = macd_signal.ffill().fillna(0.0)
 
     macd_hist = _series_or_default("macd_hist", macd_line - macd_signal)
-    macd_hist = macd_hist.bfill().ffill().fillna(0.0)
+    macd_hist = macd_hist.ffill().fillna(0.0)
 
     ema_fast = _series_or_default("ema_9", close.ewm(span=9, adjust=False).mean())
-    ema_fast = ema_fast.bfill().ffill().fillna(close)
+    ema_fast = ema_fast.ffill().fillna(close)
 
     ema_slow = _series_or_default("ema_21", close.ewm(span=21, adjust=False).mean())
-    ema_slow = ema_slow.bfill().ffill().fillna(close)
+    ema_slow = ema_slow.ffill().fillna(close)
 
     rsi_now = float(rsi_series.iloc[-1])
     macd_line_now = float(macd_line.iloc[-1])
@@ -2465,11 +2547,8 @@ class ModelEnsemble:
         volume_score = float(volume_info.get("volume_score", 0.5))
         volume_ratio = float(volume_info.get("volume_ratio", 1.0))
         volume_spike = bool(volume_info.get("volume_spike", False))
-        volume_trend_direction = str(volume_info.get("volume_trend_direction", "FLAT"))
         vwap_bias = str(volume_info.get("vwap_bias", "NEUTRAL"))
         price_action_score = float(price_action_info.get("price_action_score", 0.5))
-        bullish_engulfing = bool(price_action_info.get("bullish_engulfing", 0))
-        bearish_engulfing = bool(price_action_info.get("bearish_engulfing", 0))
         strong_green_candle = bool(price_action_info.get("strong_green_candle", False))
         strong_red_candle = bool(price_action_info.get("strong_red_candle", False))
         candle_type = str(price_action_info.get("candle_type", "NEUTRAL"))
@@ -2535,8 +2614,6 @@ class ModelEnsemble:
         range_or_trend = str(structure_info.get("range_or_trend", "RANGE"))
         near_support = bool(structure_info.get("near_support", False))
         near_resistance = bool(structure_info.get("near_resistance", False))
-        higher_high = bool(structure_info.get("higher_high", False))
-        lower_low = bool(structure_info.get("lower_low", False))
 
         raw_close = _numeric_series(ohlcv_df, "close")
         raw_high = _numeric_series(ohlcv_df, "high")
@@ -2689,47 +2766,225 @@ class ModelEnsemble:
         if doji or price_action_score < 0.45 or body_strength_score < 0.30:
             final_hard_filters.append("price_action_weak_or_doji")
 
-        hold_filters = list(dict.fromkeys(list(hold_filters) + final_hard_filters))
+        advisory_filters = list(dict.fromkeys(list(hold_filters) + final_hard_filters))
 
-        if hold_filters:
-            final_signal = "HOLD"
-            decision_reason = f"HOLD filter triggered: {', '.join(hold_filters)}"
+        # Keep legacy decision for transparent diagnostics/comparison.
+        legacy_hold_filters = list(advisory_filters)
+        if legacy_hold_filters:
+            legacy_signal = "HOLD"
+            legacy_reason = f"HOLD filter triggered: {', '.join(legacy_hold_filters)}"
         elif (
             fusion_score > 0.70
             and trend_score > 0.60
             and buy_mtf_aligned
             and (breakout_confirmed or support_bounce)
         ):
-            final_signal = "BUY"
+            legacy_signal = "BUY"
             if breakout_confirmed:
-                decision_reason = "Strong multi-engine alignment with breakout confirmation"
+                legacy_reason = "Strong multi-engine alignment with breakout confirmation"
             else:
-                decision_reason = "Strong multi-engine alignment with support-bounce confirmation"
+                legacy_reason = "Strong multi-engine alignment with support-bounce confirmation"
         elif fusion_score < 0.30 and trend_score < 0.40 and sell_mtf_aligned:
-            final_signal = "SELL"
-            decision_reason = "Bearish multi-engine alignment with MTF confirmation"
+            legacy_signal = "SELL"
+            legacy_reason = "Bearish multi-engine alignment with MTF confirmation"
         else:
-            final_signal = "HOLD"
-            decision_reason = "Final fusion thresholds not met"
+            legacy_signal = "HOLD"
+            legacy_reason = "Final fusion thresholds not met"
 
-        if final_signal == "BUY":
-            confidence_score = _clip01(fusion_score)
-        elif final_signal == "SELL":
-            confidence_score = _clip01(1.0 - fusion_score)
+        if legacy_signal == "BUY":
+            legacy_confidence_score = _clip01(fusion_score)
+        elif legacy_signal == "SELL":
+            legacy_confidence_score = _clip01(1.0 - fusion_score)
         else:
-            confidence_score = _clip01(0.35 + (0.30 * (1.0 - abs(fusion_score - 0.5) * 2.0)))
-            confidence_score = min(confidence_score, 0.59)
+            legacy_confidence_score = _clip01(
+                0.35 + (0.30 * (1.0 - abs(fusion_score - 0.5) * 2.0))
+            )
+            legacy_confidence_score = min(legacy_confidence_score, 0.59)
 
         if volatility_state in {"HIGH_VOLATILITY", "BREAKOUT"} or volatility_score > 0.80:
-            confidence_score = _clip01(confidence_score * 0.94)
+            legacy_confidence_score = _clip01(legacy_confidence_score * 0.94)
         if volume_score > 0.72 and volume_spike and (structure_breakout or breakout_detected):
-            confidence_score = _clip01(confidence_score + 0.04)
+            legacy_confidence_score = _clip01(legacy_confidence_score + 0.04)
+        if legacy_signal != "HOLD" and expiry_flag:
+            legacy_confidence_score = _clip01(legacy_confidence_score * 0.90)
+            legacy_reason = f"{legacy_reason} | expiry risk-adjusted"
+        legacy_confidence_pct = int(round(legacy_confidence_score * 100.0))
 
-        if final_signal != "HOLD" and expiry_flag:
-            confidence_score = _clip01(confidence_score * 0.90)
-            decision_reason = f"{decision_reason} | expiry risk-adjusted"
+        # Weighted directional model: filters reduce confidence/score instead of forcing HOLD.
+        indicator_bias_signed = _clip_signed(
+            (0.45 * _clip_signed(float(rsi_macd_signal)))
+            + (0.35 * _clip_signed(float(ema_crossover_signal)))
+            + (0.15 * _clip_signed(float(macd_histogram_trend)))
+            + (0.05 * _clip_signed(float(rsi_divergence)))
+        )
+        indicator_signal_buy_score = _clip01(0.5 + (0.5 * indicator_bias_signed))
+        indicator_fusion_norm = _clip01((indicator_fusion_score + 1.0) / 2.0)
+        indicator_buy_score = _clip01(
+            (0.65 * indicator_signal_buy_score) + (0.35 * indicator_fusion_norm)
+        )
+        indicator_sell_score = _clip01(1.0 - indicator_buy_score)
 
-        confidence_pct = int(round(confidence_score * 100.0))
+        ml_buy_score = _clip01(ml_prob_up)
+        ml_sell_score = _clip01(ml_prob_down)
+        fusion_buy_score = _clip01(fusion_score)
+        fusion_sell_score = _clip01(1.0 - fusion_score)
+        trend_buy_score = _clip01(trend_score)
+        trend_sell_score = _clip01(1.0 - trend_score)
+        momentum_buy_score = _clip01(momentum_score)
+        momentum_sell_score = _clip01(1.0 - momentum_score)
+        volume_buy_score = _clip01(directional_volume_score)
+        volume_sell_score = _clip01(1.0 - directional_volume_score)
+        structure_buy_score = _clip01(directional_structure_score)
+        structure_sell_score = _clip01(1.0 - directional_structure_score)
+
+        volatility_tradeability = _clip01(1.0 - abs(volatility_score - 0.60) * 1.5)
+
+        if mtf_direction == "BULLISH":
+            mtf_buy_score = _clip01(mtf_score)
+            mtf_sell_score = _clip01(1.0 - mtf_score)
+        elif mtf_direction == "BEARISH":
+            mtf_buy_score = _clip01(1.0 - mtf_score)
+            mtf_sell_score = _clip01(mtf_score)
+        else:
+            mtf_buy_score = 0.5
+            mtf_sell_score = 0.5
+
+        buy_components = {
+            "ml": ml_buy_score,
+            "fusion": fusion_buy_score,
+            "trend": trend_buy_score,
+            "momentum": momentum_buy_score,
+            "indicator": indicator_buy_score,
+            "volume": volume_buy_score,
+            "volatility": volatility_tradeability,
+            "mtf": mtf_buy_score,
+            "structure": structure_buy_score,
+        }
+        sell_components = {
+            "ml": ml_sell_score,
+            "fusion": fusion_sell_score,
+            "trend": trend_sell_score,
+            "momentum": momentum_sell_score,
+            "indicator": indicator_sell_score,
+            "volume": volume_sell_score,
+            "volatility": volatility_tradeability,
+            "mtf": mtf_sell_score,
+            "structure": structure_sell_score,
+        }
+
+        buy_score_raw = sum(
+            float(DIRECTIONAL_SCORE_WEIGHTS[name]) * float(buy_components[name])
+            for name in DIRECTIONAL_SCORE_WEIGHTS
+        )
+        sell_score_raw = sum(
+            float(DIRECTIONAL_SCORE_WEIGHTS[name]) * float(sell_components[name])
+            for name in DIRECTIONAL_SCORE_WEIGHTS
+        )
+
+        penalty_items = _build_decision_penalties(
+            advisory_filters=advisory_filters,
+            final_hard_filters=final_hard_filters,
+            rr_probe=rr_probe,
+        )
+        total_penalty = float(
+            min(MAX_FILTER_PENALTY, sum(float(value) for _, value in penalty_items))
+        )
+
+        buy_score = _clip01(float(buy_score_raw) - total_penalty)
+        sell_score = _clip01(float(sell_score_raw) - total_penalty)
+        directional_edge = float(abs(buy_score - sell_score))
+
+        if buy_score >= sell_score:
+            weighted_signal = "BUY"
+            winning_score = buy_score
+            winning_raw_score = float(buy_score_raw)
+        else:
+            weighted_signal = "SELL"
+            winning_score = sell_score
+            winning_raw_score = float(sell_score_raw)
+
+        dynamic_action_threshold = _clip01(
+            max(DIRECTIONAL_ACTION_THRESHOLD, confirmation_threshold - 0.05)
+        )
+        if winning_score >= dynamic_action_threshold and directional_edge >= MIN_DIRECTIONAL_EDGE:
+            weighted_reason = (
+                f"Weighted score {weighted_signal}={winning_score:.2f} "
+                f"edge={directional_edge:.2f} penalties={total_penalty:.2f}"
+            )
+        else:
+            weighted_signal = "HOLD"
+            weighted_reason = (
+                f"Weighted scores inconclusive (buy={buy_score:.2f}, sell={sell_score:.2f}, "
+                f"penalty={total_penalty:.2f})"
+            )
+
+        if weighted_signal in {"BUY", "SELL"}:
+            weighted_confidence_score = _clip01(
+                winning_score + (0.15 * directional_edge)
+            )
+        else:
+            hold_base = 0.38 + (0.16 * (1.0 - directional_edge))
+            weighted_confidence_score = _clip01(hold_base - (0.40 * total_penalty))
+            weighted_confidence_score = min(weighted_confidence_score, 0.59)
+
+        if volatility_state in {"HIGH_VOLATILITY", "BREAKOUT"} or volatility_score > 0.80:
+            weighted_confidence_score = _clip01(weighted_confidence_score * 0.94)
+        if volume_score > 0.72 and volume_spike and (structure_breakout or breakout_detected):
+            weighted_confidence_score = _clip01(weighted_confidence_score + 0.04)
+        if weighted_signal != "HOLD" and expiry_flag:
+            weighted_confidence_score = _clip01(weighted_confidence_score * 0.90)
+            weighted_reason = f"{weighted_reason} | expiry risk-adjusted"
+
+        weighted_confidence_pct = int(round(weighted_confidence_score * 100.0))
+
+        decision_mode = _get_signal_decision_mode()
+        if decision_mode == "legacy":
+            final_signal = legacy_signal
+            decision_reason = legacy_reason
+            confidence_score = legacy_confidence_score
+            confidence_pct = legacy_confidence_pct
+            hold_filters = legacy_hold_filters
+        else:
+            final_signal = weighted_signal
+            decision_reason = weighted_reason
+            confidence_score = weighted_confidence_score
+            confidence_pct = weighted_confidence_pct
+            hold_filters = advisory_filters
+
+        decision_score_breakdown = {
+            "weights": dict(DIRECTIONAL_SCORE_WEIGHTS),
+            "buy_components": {k: round(float(v), 4) for k, v in buy_components.items()},
+            "sell_components": {k: round(float(v), 4) for k, v in sell_components.items()},
+            "buy_raw_score": round(float(buy_score_raw), 4),
+            "sell_raw_score": round(float(sell_score_raw), 4),
+            "buy_score": round(float(buy_score), 4),
+            "sell_score": round(float(sell_score), 4),
+            "winning_raw_score": round(float(winning_raw_score), 4),
+            "winning_score": round(float(winning_score), 4),
+            "directional_edge": round(float(directional_edge), 4),
+            "dynamic_action_threshold": round(float(dynamic_action_threshold), 4),
+            "total_penalty": round(float(total_penalty), 4),
+            "penalties": [
+                {"name": name, "penalty": round(float(value), 4)}
+                for name, value in penalty_items
+            ],
+        }
+
+        legacy_decision_payload = {
+            "signal": legacy_signal,
+            "confidence": round(float(legacy_confidence_score), 4),
+            "confidence_pct": int(legacy_confidence_pct),
+            "reason": legacy_reason,
+            "filters": legacy_hold_filters,
+        }
+        weighted_decision_payload = {
+            "signal": weighted_signal,
+            "confidence": round(float(weighted_confidence_score), 4),
+            "confidence_pct": int(weighted_confidence_pct),
+            "reason": weighted_reason,
+            "filters": advisory_filters,
+            "score_breakdown": decision_score_breakdown,
+        }
 
         confidence_boost = 0.6 + (confidence_score * 1.4)
         move_ratio = float(
@@ -2767,13 +3022,22 @@ class ModelEnsemble:
         position_size = int(risk_info.get("position_size", 0) or 0)
         risk_position_size_factor = float(risk_info.get("position_size_factor", 0.0) or 0.0)
 
-        if final_signal in {"BUY", "SELL"} and (
-            rr_value < 1.5 or bool(risk_info.get("risk_filter_fail", False))
-        ):
-            if "rr_below_threshold" not in hold_filters:
-                hold_filters.append("rr_below_threshold")
-            final_signal = "HOLD"
-            decision_reason = f"HOLD filter triggered: rr_below_threshold (RR={rr_value:.2f})"
+        risk_filter_fail = bool(risk_info.get("risk_filter_fail", False))
+        if final_signal in {"BUY", "SELL"}:
+            if rr_value < 1.10 or risk_filter_fail:
+                if "rr_below_threshold" not in hold_filters:
+                    hold_filters.append("rr_below_threshold")
+                final_signal = "HOLD"
+                decision_reason = (
+                    f"Safety hold: rr_below_threshold (RR={rr_value:.2f})"
+                    if rr_value < 1.10
+                    else "Safety hold: rr_below_threshold (risk filter fail)"
+                )
+            elif rr_value < 1.5:
+                rr_shortfall = float(np.clip((1.5 - rr_value) / 1.5, 0.0, 1.0))
+                confidence_score = _clip01(confidence_score * (1.0 - (0.20 * rr_shortfall)))
+                confidence_pct = int(round(confidence_score * 100.0))
+                decision_reason = f"{decision_reason} | rr soft-penalty (RR={rr_value:.2f})"
 
         risk_score = _compute_risk_score(rr_value, risk_position_size_factor, volatility_score)
         engine_scores["risk_score"] = _clip01(0.5 + ((risk_score - 0.5) * 0.30))
@@ -2843,7 +3107,9 @@ class ModelEnsemble:
                 f"zone={range_or_trend} breakout={structure_breakout}"
             ),
             (
-                f"Fusion score={fusion_score:.2f} indicator_fusion={indicator_fusion_score:.2f} rsi_macd={rsi_macd_signal} "
+                f"Fusion score={fusion_score:.2f} "
+                f"indicator_fusion={indicator_fusion_score:.2f} "
+                f"rsi_macd={rsi_macd_signal} "
                 f"ema_cross={ema_crossover_signal} divergence={rsi_divergence} "
                 f"macd_trend={macd_histogram_trend}"
             ),
@@ -2860,6 +3126,10 @@ class ModelEnsemble:
             "signal": final_signal,
             "confidence": round(confidence_score, 4),
             "confidence_pct": confidence_pct,
+            "decision_mode": decision_mode,
+            "score_buy": round(float(decision_score_breakdown.get("buy_score", 0.0)), 4),
+            "score_sell": round(float(decision_score_breakdown.get("sell_score", 0.0)), 4),
+            "score_penalty": round(float(decision_score_breakdown.get("total_penalty", 0.0)), 4),
             "momentum_score": round(momentum_score, 4),
             "trend_score": round(trend_score, 4),
             "volatility_score": round(volatility_score, 4),
@@ -2906,7 +3176,9 @@ class ModelEnsemble:
             "obv_slope": float(volume_info.get("obv_slope", 0.0)),
             "obv_divergence": bool(volume_info.get("obv_divergence", False)),
             "volume_trend_slope": float(volume_info.get("volume_trend_slope", 0.0)),
-            "volume_trend_direction": str(volume_info.get("volume_trend_direction", "FLAT")),
+            "volume_trend_direction": str(
+                volume_info.get("volume_trend_direction", "FLAT")
+            ),
             "position_size_factor": round(position_size_factor, 4),
             "mtf_alignment": mtf_alignment,
             "mtf_score": round(mtf_score, 4),
@@ -3044,6 +3316,10 @@ class ModelEnsemble:
                 "timeframe_trend": trend_info.get("timeframes", {}),
                 "filters": hold_filters,
                 "final_hard_filters": final_hard_filters,
+                "decision_mode": decision_mode,
+                "legacy_decision": legacy_decision_payload,
+                "weighted_decision": weighted_decision_payload,
+                "decision_scores": decision_score_breakdown,
                 "engine_scores": {
                     key: round(float(value), 4) for key, value in engine_scores.items()
                 },
@@ -3095,9 +3371,11 @@ class ModelEnsemble:
             result["confidence"] = 0.0
             result["confidence_pct"] = 0
 
-        if result["signal"] != "HOLD" and result["confidence"] < 0.60:
+        if result["signal"] != "HOLD" and result["confidence"] < MIN_EXECUTION_CONFIDENCE:
             result["signal"] = "HOLD"
-            result["reason"] = "Confidence below execution threshold"
+            result["reason"] = (
+                f"Confidence below execution threshold ({MIN_EXECUTION_CONFIDENCE:.2f})"
+            )
             result["explanation"] = result["reason"]
 
         if result["signal"] == "BUY" and (result["target"] <= effective_ltp or result["stop"] >= effective_ltp):
@@ -3120,47 +3398,52 @@ class ModelEnsemble:
         result["RR"] = round(float(result.get("RR", 0.0) or 0.0), 4)
         result["position_size"] = int(max(0, result.get("position_size", 0) or 0))
 
-        log_payload = {
-            "event": "prediction",
-            "symbol": symbol,
-            "timestamp": datetime.utcnow().isoformat(),
-            "signal": result["signal"],
-            "confidence": result["confidence"],
-            "confidence_pct": result["confidence_pct"],
-            "momentum_score": result["momentum_score"],
-            "trend_score": result["trend_score"],
-            "volatility_score": result["volatility_score"],
-            "volatility_state": result["volatility_state"],
-            "volume_score": result["volume_score"],
-            "price_action_score": result["price_action_score"],
-            "structure_score": result["structure_score"],
-            "structure": result["structure"],
-            "range_or_trend": result["range_or_trend"],
-            "fusion_score": result["fusion_score"],
-            "rsi_macd_signal": result["rsi_macd_signal"],
-            "volume_ratio": result["volume_ratio"],
-            "mtf_alignment": result["mtf_alignment"],
-            "mtf_score": result["mtf_score"],
-            "session": result["session"],
-            "time_bucket": result["time_bucket"],
-            "time_score": result["time_score"],
-            "liquidity_score": result["liquidity_score"],
-            "regime_score": result.get("regime_score", 0.5),
-            "risk_score": result.get("risk_score", 0.5),
-            "ai_score": result.get("ai_score", 0.5),
-            "regime_state": result.get("regime_state", "UNKNOWN"),
-            "RR": result["RR"],
-            "position_size": result["position_size"],
-            "jump_flag": result["jump_flag"],
-            "gap_flag": result["gap_flag"],
-            "expiry_flag": result["expiry_flag"],
-            "feature_version": FEATURE_VERSION,
-            "model_version": _model_version or "unknown",
-        }
-        logger.info(json.dumps(log_payload))
+        if logger.isEnabledFor(logging.DEBUG):
+            log_payload = {
+                "event": "prediction",
+                "symbol": symbol,
+                "timestamp": datetime.utcnow().isoformat(),
+                "signal": result["signal"],
+                "confidence": result["confidence"],
+                "confidence_pct": result["confidence_pct"],
+                "momentum_score": result["momentum_score"],
+                "trend_score": result["trend_score"],
+                "volatility_score": result["volatility_score"],
+                "volatility_state": result["volatility_state"],
+                "volume_score": result["volume_score"],
+                "price_action_score": result["price_action_score"],
+                "structure_score": result["structure_score"],
+                "structure": result["structure"],
+                "range_or_trend": result["range_or_trend"],
+                "fusion_score": result["fusion_score"],
+                "rsi_macd_signal": result["rsi_macd_signal"],
+                "volume_ratio": result["volume_ratio"],
+                "mtf_alignment": result["mtf_alignment"],
+                "mtf_score": result["mtf_score"],
+                "session": result["session"],
+                "time_bucket": result["time_bucket"],
+                "time_score": result["time_score"],
+                "liquidity_score": result["liquidity_score"],
+                "regime_score": result.get("regime_score", 0.5),
+                "risk_score": result.get("risk_score", 0.5),
+                "ai_score": result.get("ai_score", 0.5),
+                "regime_state": result.get("regime_state", "UNKNOWN"),
+                "RR": result["RR"],
+                "position_size": result["position_size"],
+                "jump_flag": result["jump_flag"],
+                "gap_flag": result["gap_flag"],
+                "expiry_flag": result["expiry_flag"],
+                "feature_version": FEATURE_VERSION,
+                "model_version": _model_version or "unknown",
+            }
+            logger.debug(json.dumps(log_payload))
 
         logger.debug(
-            "[PREDICT] Signal computed: %s %s conf=%s momentum=%s trend=%s volatility=%s volume=%s price_action=%s structure=%s fusion=%s liquidity=%s time=%s session=%s",
+            (
+                "[PREDICT] Signal computed: %s %s conf=%s momentum=%s trend=%s "
+                "volatility=%s volume=%s price_action=%s structure=%s fusion=%s "
+                "liquidity=%s time=%s session=%s"
+            ),
             symbol,
             result["signal"],
             result["confidence"],

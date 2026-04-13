@@ -11,7 +11,7 @@ const normalizeOrigin = (value, fallback) => {
 };
 
 export const API_BASE = normalizeOrigin(import.meta.env.VITE_API_BASE_URL, DEFAULT_API_BASE);
-export const API_URL = `${API_BASE}/api`;
+export const API_URL = `${API_BASE}/api/v1`;
 export const WS_URL = normalizeOrigin(import.meta.env.VITE_WS_URL, DEFAULT_WS_URL);
 
 export const API_FALLBACK_BASE = '';

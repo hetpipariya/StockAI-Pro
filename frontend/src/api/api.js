@@ -404,7 +404,7 @@ export const api = {
   },
 
   signup: async ({ username, email, password }) => {
-    const payload = await apiFetch('/auth/signup', {
+    const payload = await apiFetch('/auth/register', {
       method: 'POST',
       body: JSON.stringify({ username, email, password }),
     });

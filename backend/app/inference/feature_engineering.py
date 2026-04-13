@@ -183,7 +183,6 @@ def _add_legacy_aliases(feature_df: pd.DataFrame, raw_df: pd.DataFrame) -> pd.Da
     close = raw_df["close"]
     high = raw_df["high"]
     low = raw_df["low"]
-    open_price = raw_df["open"]
     volume = raw_df["volume"]
 
     out["ema_9"] = close.ewm(span=9, adjust=False).mean()
@@ -219,7 +218,6 @@ def _add_legacy_aliases(feature_df: pd.DataFrame, raw_df: pd.DataFrame) -> pd.Da
     out["doji"] = out["doji_flag"].astype(int)
 
     out.replace([np.inf, -np.inf], 0, inplace=True)
-    out.bfill(inplace=True)
     out.ffill(inplace=True)
     out.fillna(0, inplace=True)
     return out
@@ -236,7 +234,7 @@ def _aligned_raw_series(raw_df: pd.DataFrame, name: str, index: pd.Index) -> pd.
         series = series.iloc[: len(index)]
 
     series.index = index
-    return series.bfill().ffill().fillna(0.0)
+    return series.ffill().fillna(0.0)
 
 
 def apply_feature_compatibility(
@@ -571,7 +569,6 @@ def compute_features(
     features["lag_3"] = close.shift(3)
 
     features.replace([np.inf, -np.inf], np.nan, inplace=True)
-    features.bfill(inplace=True)
     features.ffill(inplace=True)
     features.fillna(0, inplace=True)
 

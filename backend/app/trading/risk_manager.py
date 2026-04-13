@@ -218,6 +218,80 @@ class RiskManager:
             atr=round(atr, 4),
         )
 
+    def calculate_trade_percent(
+        self,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        stop_loss_pct: float,
+        take_profit_pct: float,
+    ) -> Optional[TradeRisk]:
+        """
+        Calculate position sizing with fixed percentage stop-loss/take-profit.
+        Useful for systems that were optimized with percent-based exits.
+        """
+        can, reason = self.can_trade()
+        if not can:
+            logger.info(f"[RISK] Trade rejected for {symbol}: {reason}")
+            return None
+
+        if entry_price <= 0:
+            logger.warning(f"[RISK] Invalid entry ({entry_price}) for {symbol}")
+            return None
+
+        if stop_loss_pct <= 0 or take_profit_pct <= 0:
+            logger.warning(
+                "[RISK] Invalid stop/target pct for %s: stop=%s target=%s",
+                symbol,
+                stop_loss_pct,
+                take_profit_pct,
+            )
+            return None
+
+        stop_dist = entry_price * stop_loss_pct
+        target_dist = entry_price * take_profit_pct
+        if stop_dist <= 0 or target_dist <= 0:
+            return None
+
+        direction = str(direction).upper()
+        if direction == "BUY":
+            stop_price = round(entry_price - stop_dist, 2)
+            target_price = round(entry_price + target_dist, 2)
+        else:
+            stop_price = round(entry_price + stop_dist, 2)
+            target_price = round(entry_price - target_dist, 2)
+
+        risk_amount = self.capital * self.risk_per_trade
+        shares = int(risk_amount / stop_dist)
+
+        if shares <= 0:
+            logger.info(
+                "[RISK] Position size too small for %s (stop_dist=%.4f)",
+                symbol,
+                stop_dist,
+            )
+            return None
+
+        cost = shares * entry_price
+        if cost > self.capital:
+            shares = int(self.capital / entry_price)
+            if shares <= 0:
+                return None
+
+        reward_amount = shares * target_dist
+
+        return TradeRisk(
+            symbol=symbol,
+            direction=direction,
+            entry_price=round(entry_price, 2),
+            stop_price=stop_price,
+            target_price=target_price,
+            position_size=shares,
+            risk_amount=round(risk_amount, 2),
+            reward_amount=round(reward_amount, 2),
+            atr=0.0,
+        )
+
     def on_trade_opened(self):
         """Called when a trade is actually placed."""
         self._trades_today += 1

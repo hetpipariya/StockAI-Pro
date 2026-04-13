@@ -7,7 +7,7 @@ from app.services.bundle_service import get_prediction as get_prediction_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["predict"])
+router = APIRouter(prefix="/api/v1", tags=["predict"])
 
 
 def _path_hold_fallback(symbol: str, reason: str) -> dict:
@@ -30,7 +30,7 @@ def _path_hold_fallback(symbol: str, reason: str) -> dict:
     }
 
 
-# Deprecated: replaced by /api/bundle
+# Deprecated: replaced by /api/v1/bundle
 @router.get("/predict/{symbol}", deprecated=True)
 async def get_predict_by_path(symbol: str):
     """Path alias for prediction endpoint; delegates to the main runner pipeline."""
@@ -47,7 +47,7 @@ async def get_predict_by_path(symbol: str):
         return _path_hold_fallback(normalized_symbol, reason=f"HOLD fallback: {exc}")
 
 
-# Deprecated: replaced by /api/bundle
+# Deprecated: replaced by /api/v1/bundle
 @router.get("/predict", deprecated=True)
 async def get_predict(
     symbol: str = Query(...),
@@ -85,13 +85,13 @@ async def get_predict(
 async def get_signal(symbol: str):
     """Get AI trading signal for a specific symbol (path-based)."""
     normalized_symbol = symbol.strip().upper()
-    
+
     try:
         result = await get_prediction_service(
             symbol=normalized_symbol,
             horizon="15m",
         )
-        
+
         # Extract just the signal data in the format the frontend expects
         signal_data = {
             "symbol": normalized_symbol,
@@ -105,11 +105,15 @@ async def get_signal(symbol: str):
             "stopLoss": result.get("stopLoss", 0.0),
             "regime": result.get("regime", "Unknown"),
             "explanation": result.get("explanation", ""),
-            "timestamp": result.get("timestamp", 
-                datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            "timestamp": result.get(
+                "timestamp",
+                datetime.now(tz=timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
             ),
         }
-        
+
         return {
             "status": "success",
             "data": signal_data,

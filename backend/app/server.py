@@ -12,11 +12,14 @@ from fastapi.middleware.gzip import GZipMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.config import DATABASE_URL
+from app.core.database import healthcheck as db_healthcheck
+from app.logging_setup import configure_logging
 from app.middleware import (add_exception_handlers, add_production_middleware,
                             configure_cors)
-from app.routes import (auth, backtest, bundle, indicators, market, news,
-                        predict, sentiment, symbols, trading)
-from app.services.db import check_db_connection
+from app.routes import (auth, backtest, bundle, indicators, instruments, market, news,
+                        portfolio, predict, sentiment, signals, symbols,
+                        trades, trading)
+from app.services.redis_client import get_cache, set_cache
 from app.websocket.handler import (get_last_tick_age_seconds, get_ws_state,
                                    is_ws_streaming, setup_websocket_routes)
 from app.websocket.relay import get_client_count
@@ -40,13 +43,13 @@ except ModuleNotFoundError:
             yield
             _bootstrap_logger.info("[SHUTDOWN] Minimal lifecycle fallback complete")
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(name)s - %(message)s",
-    datefmt="%H:%M:%S",
-)
+configure_logging()
 logger = logging.getLogger(__name__)
+
+_HEALTH_CACHE_TTL_SECONDS = 3
+_HEALTH_CACHE_KEY = "health:detailed:v1"
+_DB_PING_CACHE_TTL_SECONDS = 2
+_DB_PING_CACHE_KEY = "health:db-ping:v1"
 
 _DB_BACKEND = "SQLite" if DATABASE_URL.startswith("sqlite") else "PostgreSQL"
 try:
@@ -72,9 +75,7 @@ configure_cors(app)
 add_exception_handlers(app)
 Instrumentator().instrument(app).expose(app)
 
-app.include_router(auth.compat_router)
 app.include_router(auth.router)
-app.include_router(auth.v1_router)
 app.include_router(news.router)
 app.include_router(sentiment.router)
 app.include_router(backtest.router)
@@ -83,7 +84,12 @@ app.include_router(predict.router)
 app.include_router(bundle.router)
 app.include_router(indicators.router)
 app.include_router(symbols.router)
+app.include_router(instruments.router)
+app.include_router(instruments.legacy_router)
 app.include_router(trading.router)
+app.include_router(trades.router)
+app.include_router(portfolio.router)
+app.include_router(signals.router)
 setup_websocket_routes(app)
 
 
@@ -96,31 +102,37 @@ def _list_api_routes() -> list[str]:
     return sorted(paths)
 
 
-@app.get("/api")
+@app.get("/api/v1")
 async def api_index():
     endpoints = _list_api_routes()
     return {
         "status": "ok",
         "service": "stockai-pro",
-        "base": "/api",
+        "base": "/api/v1",
         "count": len(endpoints),
         "endpoints": endpoints,
         "docs": "/docs",
     }
 
 
-@app.get("/api/system/db-ping")
+@app.get("/api/v1/system/db-ping")
 async def api_db_ping():
-    db_ok = await check_db_connection(retries=1, delay=0.0)
-    return {
+    cached = await get_cache(_DB_PING_CACHE_KEY)
+    if isinstance(cached, dict):
+        return cached
+
+    db_ok = await db_healthcheck(retries=1, delay=0.0)
+    payload = {
         "status": "ok" if db_ok else "degraded",
         "database": "connected" if db_ok else "unreachable",
         "database_backend": _DB_BACKEND,
         "database_location": _DB_LOCATION,
     }
+    await set_cache(_DB_PING_CACHE_KEY, payload, ttl=_DB_PING_CACHE_TTL_SECONDS)
+    return payload
 
 
-@app.get("/api/health")
+@app.get("/api/v1/health")
 async def health():
     return {
         "success": True,
@@ -139,17 +151,38 @@ async def ping():
     return {"status": "pong"}
 
 
-@app.get("/api/health/detailed")
+@app.get("/api/v1/health/detailed")
 async def detailed_health():
     """Detailed health check with component status."""
-    db_ok = await check_db_connection(retries=1, delay=0.0)
+    cached = await get_cache(_HEALTH_CACHE_KEY)
+    if isinstance(cached, dict):
+        return cached
+
+    db_ok = await db_healthcheck(retries=1, delay=0.0)
     ws_state = get_ws_state()
     ws_streaming = is_ws_streaming()
     last_tick_age = get_last_tick_age_seconds()
 
-    return {
+    # Check broker token status
+    broker_status = "unknown"
+    broker_session_age_minutes = None
+    try:
+        from app.connectors.smartapi_connector import SmartAPIConnector
+        connector = SmartAPIConnector()
+        is_logged_in = connector.is_logged_in
+        session_age = connector.session_age_minutes
+        broker_session_age_minutes = round(session_age, 1) if session_age != float("inf") else None
+        broker_status = "connected" if is_logged_in else "disconnected"
+    except Exception as e:
+        broker_status = f"error: {str(e)[:50]}"
+
+    payload = {
         "status": "ok" if db_ok else "degraded",
         "database": "connected" if db_ok else "unreachable",
+        "broker": {
+            "status": broker_status,
+            "session_age_minutes": broker_session_age_minutes,
+        },
         "websocket": {
             "state": ws_state,
             "streaming": ws_streaming,
@@ -160,38 +193,8 @@ async def detailed_health():
         "clients": get_client_count(),
         "timestamp": datetime.now(tz=timezone.utc).isoformat(),
     }
-
-
-@app.get("/predict/{symbol}")
-async def predict_alias(symbol: str):
-    """Compatibility prediction endpoint: returns signal payload with fallback fields."""
-    try:
-        from app.inference.quant_predictor import predict_signal
-    except ModuleNotFoundError:
-        from .inference.quant_predictor import predict_signal
-
-    try:
-        return predict_signal(symbol.strip().upper())
-    except Exception as exc:
-        logger.error("/predict alias failed for %s: %s", symbol, exc)
-        return {
-            "symbol": symbol.strip().upper(),
-            "signal": "HOLD",
-            "confidence": 0,
-            "prediction": 0.0,
-            "currentPrice": 0.0,
-            "target_price": 0.0,
-            "stop_loss": 0.0,
-            "target": 0.0,
-            "stopLoss": 0.0,
-            "regime": "Unknown",
-            "explanation": f"HOLD fallback: {exc}",
-            "timestamp": datetime.now(tz=timezone.utc)
-            .replace(microsecond=0)
-            .isoformat()
-            .replace("+00:00", "Z"),
-        }
-
+    await set_cache(_HEALTH_CACHE_KEY, payload, ttl=_HEALTH_CACHE_TTL_SECONDS)
+    return payload
 
 @app.get("/")
 async def root_status():
@@ -199,8 +202,8 @@ async def root_status():
         "status": "ok",
         "service": "stockai-pro",
         "docs": "/docs",
-        "health": "/api/health",
+        "health": "/api/v1/health",
         "ws": "/ws",
         "ws_legacy": "/live",
-        "api": "/api",
+        "api": "/api/v1",
     }

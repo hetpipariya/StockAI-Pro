@@ -9,6 +9,11 @@ const FALLBACK_TRENDING_SYMBOLS = ['RELIANCE', 'HDFCBANK', 'ICICIBANK', 'TCS', '
 
 const normalize = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
+const sanitizeQueryForApi = (query) => {
+  const raw = String(query || '').trim().toUpperCase();
+  return raw.replace(/^NSE[:\-\s]*/i, '').trim();
+};
+
 const toNumber = (value) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -118,6 +123,7 @@ const SmartSearchBar = React.memo(function SmartSearchBar({
   const [remoteLoading, setRemoteLoading] = useState(false);
 
   const rootRef = useRef(null);
+  const searchCacheRef = useRef(new Map());
   const liveQuery = query.trim();
 
   useEffect(() => {
@@ -136,17 +142,33 @@ const SmartSearchBar = React.memo(function SmartSearchBar({
     let cancelled = false;
 
     const run = async () => {
-      if (!debouncedQuery || debouncedQuery.length < 2) {
+      const requestQuery = sanitizeQueryForApi(debouncedQuery);
+
+      if (!requestQuery || requestQuery.length < 2) {
         setRemoteMatches([]);
+        setRemoteLoading(false);
+        return;
+      }
+
+      if (searchCacheRef.current.has(requestQuery)) {
+        setRemoteMatches(searchCacheRef.current.get(requestQuery));
         setRemoteLoading(false);
         return;
       }
 
       setRemoteLoading(true);
       try {
-        const rows = await searchMarketSymbols(debouncedQuery, 30);
+        const rows = await searchMarketSymbols(requestQuery, 100);
         if (cancelled) return;
-        setRemoteMatches(Array.isArray(rows) ? rows : []);
+
+        const normalizedRows = Array.isArray(rows) ? rows : [];
+        setRemoteMatches(normalizedRows);
+
+        searchCacheRef.current.set(requestQuery, normalizedRows);
+        if (searchCacheRef.current.size > 80) {
+          const oldestKey = searchCacheRef.current.keys().next().value;
+          searchCacheRef.current.delete(oldestKey);
+        }
       } catch {
         if (cancelled) return;
         setRemoteMatches([]);
@@ -337,7 +359,7 @@ const SmartSearchBar = React.memo(function SmartSearchBar({
             setQuery(event.target.value);
             setIsOpen(true);
           }}
-          placeholder="Search symbol, company, alias (rel / reliance / relaince)"
+          placeholder="Search all stocks by symbol/company"
           className="w-full bg-stockai-bg border border-white/10 rounded-full py-2.5 pl-11 pr-12 text-sm focus:outline-none focus:border-stockai-neon focus:ring-1 focus:ring-stockai-neon/40 transition-all"
         />
         <button
@@ -452,7 +474,7 @@ const SmartSearchBar = React.memo(function SmartSearchBar({
               )}
 
               {liveQuery && remoteLoading && (
-                <div className="px-4 pb-3 text-xs text-stockai-muted">Searching live symbols...</div>
+                <div className="px-4 pb-3 text-xs text-stockai-muted">Searching all stocks...</div>
               )}
             </div>
           </motion.div>

@@ -6,10 +6,10 @@ from app.services.bundle_service import get_history as get_history_service
 from app.services.indicators import IndicatorEngine
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/indicators", tags=["indicators"])
+router = APIRouter(prefix="/api/v1/indicators", tags=["indicators"])
 
 
-# Deprecated: replaced by /api/bundle
+# Deprecated: replaced by /api/v1/bundle
 @router.get("", deprecated=True)
 async def get_indicators(
     symbol: str = Query(...),

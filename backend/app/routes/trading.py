@@ -21,8 +21,9 @@ from app import config
 from app.routes.auth import get_current_user
 from app.services.db import (OrderModel, PositionModel, TradeLogModel,
                              UserModel, get_async_session)
-from app.trading.candle_builder import candle_builder_15m
+from app.trading.candle_builder import candle_builder_15m, candle_builder_5m
 from app.trading.live_executor import get_executor
+from app.trading.live_executor_5m import get_executor_5m
 from app.trading.user_state import UserPosition, trading_manager
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,25 @@ async def trading_status(current_user: UserModel = Depends(get_current_user)):
     return summary
 
 
+@router.get("/status-5m")
+async def trading_status_5m(current_user: UserModel = Depends(get_current_user)):
+    """5m executor status for the authenticated user."""
+    state = await trading_manager.get_state(user_id=current_user.id)
+    summary = state.get_summary()
+
+    executor = await asyncio.to_thread(
+        get_executor_5m,
+        user_id=current_user.id,
+        mode=current_user.trading_mode or config.TRADING_MODE,
+        capital=current_user.starting_capital,
+    )
+    summary["live_5m"] = executor.get_status(user_id=current_user.id)
+    summary["live_5m_auto_execution_enabled"] = bool(
+        config.LIVE_5M_AUTO_EXECUTION_ENABLED
+    )
+    return summary
+
+
 @router.get("/signal")
 async def evaluate_signal(
     symbol: str = Query(..., description="Stock symbol e.g. RELIANCE"),
@@ -72,6 +92,32 @@ async def evaluate_signal(
         "has_signal": False,
         "symbol": symbol.upper(),
         "message": "No trade signal at this time",
+    }
+
+
+@router.get("/signal-5m")
+async def evaluate_signal_5m(
+    symbol: str = Query(..., description="Stock symbol e.g. RELIANCE"),
+    current_user: UserModel = Depends(get_current_user),
+):
+    """Evaluate 5m signal + regime filters for the given symbol."""
+    executor = await asyncio.to_thread(
+        get_executor_5m,
+        user_id=current_user.id,
+        mode=current_user.trading_mode or config.TRADING_MODE,
+        capital=current_user.starting_capital,
+    )
+    signal = await asyncio.to_thread(
+        executor.evaluate_signal,
+        symbol.upper(),
+        current_user.id,
+    )
+    if signal:
+        return {"has_signal": True, **signal}
+    return {
+        "has_signal": False,
+        "symbol": symbol.upper(),
+        "message": "No 5m trade signal at this time",
     }
 
 
@@ -114,6 +160,74 @@ async def execute_trade(
             "executed": False,
             "symbol": symbol.upper(),
             "message": "No actionable signal",
+        }
+
+    exec_result = await asyncio.to_thread(
+        executor.execute_signal,
+        signal_data,
+        current_user.id,
+    )
+
+    if exec_result.get("status") in ("FILLED", "COMPLETED"):
+        pos = UserPosition(
+            user_id=current_user.id,
+            symbol=signal_data["symbol"],
+            direction=signal_data["signal"],
+            quantity=signal_data["quantity"],
+            entry_price=signal_data["entry"],
+            stop_loss=signal_data["stop_loss"],
+            target=signal_data["target"],
+            confidence=signal_data.get("confidence", 0),
+            mode=state.mode,
+            reason=signal_data.get("reason", ""),
+            order_id=exec_result.get("order_id", ""),
+        )
+        await state.open_position(pos)
+
+    return {
+        "executed": True,
+        "user_id": current_user.id,
+        **signal_data,
+        **exec_result,
+    }
+
+
+@router.post("/execute-5m")
+async def execute_trade_5m(
+    symbol: str = Query(...),
+    current_user: UserModel = Depends(get_current_user),
+):
+    """Evaluate and execute 5m strategy signal for the given symbol."""
+    state = await trading_manager.get_state(user_id=current_user.id)
+
+    can, reason = state.can_trade()
+    if not can:
+        return {"executed": False, "symbol": symbol.upper(), "message": reason}
+
+    if state.has_position(symbol.upper()):
+        return {
+            "executed": False,
+            "symbol": symbol.upper(),
+            "message": f"Position already open for {symbol.upper()}",
+        }
+
+    executor = await asyncio.to_thread(
+        get_executor_5m,
+        user_id=current_user.id,
+        mode=current_user.trading_mode or config.TRADING_MODE,
+        capital=current_user.starting_capital,
+    )
+    signal_data = await asyncio.to_thread(
+        executor.evaluate_signal,
+        symbol.upper(),
+        current_user.id,
+    )
+
+    if not signal_data:
+        return {
+            "executed": False,
+            "symbol": symbol.upper(),
+            "message": "No actionable 5m signal",
         }
 
     exec_result = await asyncio.to_thread(
@@ -233,6 +347,23 @@ async def live_candles(
     """Get the 15m candle history being built from live ticks."""
     history = candle_builder_15m.get_history(symbol.upper(), limit)
     current = candle_builder_15m.get_current_candle(symbol.upper())
+    return {
+        "symbol": symbol.upper(),
+        "completed": history,
+        "in_progress": current,
+        "total_completed": len(history),
+    }
+
+
+@router.get("/candles-5m")
+async def live_candles_5m(
+    symbol: str = Query(...),
+    limit: int = Query(100, ge=1, le=300),
+    current_user: UserModel = Depends(get_current_user),
+):
+    """Get the 5m candle history being built from live ticks."""
+    history = candle_builder_5m.get_history(symbol.upper(), limit)
+    current = candle_builder_5m.get_current_candle(symbol.upper())
     return {
         "symbol": symbol.upper(),
         "completed": history,

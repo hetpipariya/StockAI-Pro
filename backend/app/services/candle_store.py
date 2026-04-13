@@ -19,6 +19,7 @@ from app.services.db import CandleModel, async_session
 logger = logging.getLogger(__name__)
 
 _is_postgres = "postgresql" in DATABASE_URL or "postgres" in DATABASE_URL
+_MAX_DB_VOLUME = 2_147_483_647
 
 
 def _parse_time(t) -> Optional[datetime]:
@@ -50,10 +51,19 @@ async def store_candles(symbol: str, timeframe: str, candles: list[dict]) -> int
 
     # Parse and validate all candle data first
     rows = []
+    clamped_volume_count = 0
     for c in candles:
         ts = _parse_time(c.get("time"))
         if not ts:
             continue
+
+        raw_volume = int(c.get("volume", 0) or 0)
+        if raw_volume < 0:
+            raw_volume = 0
+        volume = min(raw_volume, _MAX_DB_VOLUME)
+        if volume != raw_volume:
+            clamped_volume_count += 1
+
         rows.append(
             {
                 "symbol": symbol,
@@ -62,13 +72,21 @@ async def store_candles(symbol: str, timeframe: str, candles: list[dict]) -> int
                 "high": float(c["high"]),
                 "low": float(c["low"]),
                 "close": float(c["close"]),
-                "volume": int(c.get("volume", 0)),
+                "volume": volume,
                 "timestamp": ts,
             }
         )
 
     if not rows:
         return 0
+
+    if clamped_volume_count:
+        logger.warning(
+            "[DB] Clamped %d candle volume value(s) to int32 max for %s/%s",
+            clamped_volume_count,
+            symbol,
+            timeframe,
+        )
 
     try:
         async with async_session() as session:

@@ -2,16 +2,74 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Awaitable, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app import config
-from app.services.instrument_master import load_instruments
+from app.services.instrument_service import refresh_instruments_daily
 from app.websocket.handler import auto_start_ws, get_or_create_ws_connector
 
 logger = logging.getLogger(__name__)
 
-scheduler = AsyncIOScheduler()
+scheduler = AsyncIOScheduler(
+    job_defaults={
+        "coalesce": True,
+        "max_instances": max(1, config.SCHEDULER_JOB_MAX_INSTANCES),
+        "misfire_grace_time": 45,
+    }
+)
+
+
+async def _run_job_with_retry(
+    job_name: str,
+    runner: Callable[[], Awaitable[None]],
+    retries: int = 3,
+) -> None:
+    timeout_seconds = max(10.0, float(config.SCHEDULER_JOB_TIMEOUT_SECONDS))
+    for attempt in range(1, retries + 1):
+        try:
+            await asyncio.wait_for(runner(), timeout=timeout_seconds)
+            if attempt > 1:
+                logger.info("[SCHEDULER] %s recovered on attempt %d", job_name, attempt)
+            return
+        except asyncio.TimeoutError:
+            if attempt < retries:
+                logger.info(
+                    "[SCHEDULER] %s timed out on attempt %d/%d (%.1fs)",
+                    job_name,
+                    attempt,
+                    retries,
+                    timeout_seconds,
+                )
+            else:
+                logger.error(
+                    "[SCHEDULER] %s timed out on final attempt %d/%d (%.1fs)",
+                    job_name,
+                    attempt,
+                    retries,
+                    timeout_seconds,
+                )
+        except Exception as exc:
+            if attempt < retries:
+                logger.info(
+                    "[SCHEDULER] %s failed on attempt %d/%d: %s",
+                    job_name,
+                    attempt,
+                    retries,
+                    exc,
+                )
+            else:
+                logger.error(
+                    "[SCHEDULER] %s failed on final attempt %d/%d: %s",
+                    job_name,
+                    attempt,
+                    retries,
+                    exc,
+                )
+
+        if attempt < retries:
+            await asyncio.sleep(min(2 ** (attempt - 1), 10))
 
 
 def start_scheduler() -> None:
@@ -19,15 +77,47 @@ def start_scheduler() -> None:
     if scheduler.running:
         return
 
-    scheduler.add_job(regen_token, "cron", hour=8, minute=30)
-    scheduler.add_job(refresh_instruments, "cron", hour=8, minute=0)
-    scheduler.add_job(prewarm_predictions, "cron", minute="*/15")
+    scheduler.add_job(
+        regen_token,
+        "cron",
+        id="regen_token",
+        hour=8,
+        minute=30,
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        refresh_instruments,
+        "cron",
+        id="refresh_instruments",
+        hour=max(0, min(23, int(config.INSTRUMENT_REFRESH_HOUR))),
+        minute=max(0, min(59, int(config.INSTRUMENT_REFRESH_MINUTE))),
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        prewarm_predictions,
+        "cron",
+        id="prewarm_predictions",
+        minute="*/15",
+        replace_existing=True,
+    )
     if config.ENABLE_WS:
-        scheduler.add_job(auto_start_ws, "cron", minute="*/1")
+        scheduler.add_job(
+            auto_start_ws,
+            "cron",
+            id="auto_start_ws",
+            minute="*/1",
+            replace_existing=True,
+        )
     else:
         logger.info("[SCHEDULER] ENABLE_WS=false; skipping websocket jobs")
     scheduler.add_job(
-        sync_broker_positions, "cron", minute="*/5", hour="9-15", day_of_week="mon-fri"
+        sync_broker_positions,
+        "cron",
+        id="sync_broker_positions",
+        minute="*/5",
+        hour="9-15",
+        day_of_week="mon-fri",
+        replace_existing=True,
     )
     scheduler.start()
     logger.info("[SCHEDULER] Started recurring jobs")
@@ -43,28 +133,57 @@ async def regen_token():
     """Re-login SmartAPI every morning at 08:30 IST."""
     logger.info("[SCHEDULER] Regenerating SmartAPI token")
     connector = get_or_create_ws_connector()
-    try:
-        connector.login(force=True)
-    except Exception as e:
-        logger.error("[SCHEDULER] Token regen failed: %s", e)
+    await _run_job_with_retry(
+        "regen_token",
+        lambda: asyncio.to_thread(connector.login, force=True),
+        retries=3,
+    )
 
 
 async def refresh_instruments():
-    """Reload instrument master daily at 08:00 IST."""
+    """Refresh instrument cache daily from OpenAPI with persistence fallback."""
     logger.info("[SCHEDULER] Refreshing instrument master")
-    load_instruments(force=True)
+
+    async def _refresh_runner() -> None:
+        count = await refresh_instruments_daily(force=True)
+        logger.info("[SCHEDULER] Instrument refresh complete: %d symbols", count)
+
+    await _run_job_with_retry(
+        "refresh_instruments",
+        _refresh_runner,
+        retries=3,
+    )
 
 
 async def prewarm_predictions():
     """Pre-compute predictions every 15 minutes."""
-    from app.routes.predict import get_predict
+    from app.services.bundle_service import (DEFAULT_PREWARM_SYMBOLS,
+                                             get_prediction,
+                                             prewarm_bundle_cache)
 
     logger.info("[SCHEDULER] Pre-warming predictions")
-    for symbol in ["RELIANCE", "TCS", "INFY", "HDFCBANK"]:
-        try:
-            await get_predict(symbol=symbol, horizon="15m")
-        except Exception as e:
-            logger.warning("[SCHEDULER] Pre-warm failed for %s: %s", symbol, e)
+    concurrency = max(1, min(config.BUNDLE_PREWARM_CONCURRENCY, 6))
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _prewarm_prediction_symbol(symbol: str) -> None:
+        async with sem:
+            await _run_job_with_retry(
+                f"prediction_prewarm:{symbol}",
+                lambda: get_prediction(symbol=symbol, horizon="15m"),
+                retries=2,
+            )
+
+    symbol_tasks = [
+        asyncio.create_task(_prewarm_prediction_symbol(symbol))
+        for symbol in ["RELIANCE", "TCS", "INFY", "HDFCBANK"]
+    ]
+    await asyncio.gather(*symbol_tasks, return_exceptions=True)
+
+    await _run_job_with_retry(
+        "bundle_prewarm",
+        lambda: prewarm_bundle_cache(list(DEFAULT_PREWARM_SYMBOLS)),
+        retries=2,
+    )
 
 
 async def sync_broker_positions():
@@ -79,30 +198,45 @@ async def sync_broker_positions():
         from app.trading.user_state import trading_manager
 
         summaries = trading_manager.get_all_summaries()
-        for summary in summaries:
-            try:
-                raw_user_id = summary.get("user_id")
-                if raw_user_id is None:
-                    logger.warning("[SYNC] Skipping summary without user_id: %s", summary)
-                    continue
+        concurrency = max(1, min(config.BUNDLE_PREWARM_CONCURRENCY, 4))
+        sem = asyncio.Semaphore(concurrency)
 
-                user_id = int(raw_user_id)
-                executor = await asyncio.to_thread(
-                    get_executor,
-                    user_id=user_id,
-                    mode=summary.get("mode", _cfg.TRADING_MODE),
-                    capital=float(summary.get("starting_capital", _cfg.STARTING_CAPITAL)),
-                )
-                report = await asyncio.to_thread(
-                    executor.router.sync_positions_with_broker,
-                    user_id=user_id,
-                )
+        async def _sync_user(summary: dict) -> None:
+            async with sem:
+                try:
+                    raw_user_id = summary.get("user_id")
+                    if raw_user_id is None:
+                        logger.warning("[SYNC] Skipping summary without user_id: %s", summary)
+                        return
 
-                if report.get("mismatches"):
-                    logger.warning(
-                        "[SYNC] user_id=%d mismatches: %s", user_id, report["mismatches"]
+                    user_id = int(raw_user_id)
+                    executor = await asyncio.to_thread(
+                        get_executor,
+                        user_id=user_id,
+                        mode=summary.get("mode", _cfg.TRADING_MODE),
+                        capital=float(summary.get("starting_capital", _cfg.STARTING_CAPITAL)),
                     )
-            except Exception as user_exc:
-                logger.warning("[SYNC] Per-user sync skipped due to error: %s", user_exc)
+                    report = await asyncio.to_thread(
+                        executor.router.sync_positions_with_broker,
+                        user_id=user_id,
+                    )
+
+                    if report.get("mismatches"):
+                        logger.warning(
+                            "[SYNC] user_id=%d mismatches: %s",
+                            user_id,
+                            report["mismatches"],
+                        )
+                except Exception as user_exc:
+                    logger.warning("[SYNC] Per-user sync skipped due to error: %s", user_exc)
+
+        await _run_job_with_retry(
+            "sync_broker_positions",
+            lambda: asyncio.gather(
+                *[asyncio.create_task(_sync_user(summary)) for summary in summaries],
+                return_exceptions=True,
+            ),
+            retries=2,
+        )
     except Exception as e:
         logger.error("[SYNC] Broker sync job failed: %s", e)

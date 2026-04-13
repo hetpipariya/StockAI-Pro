@@ -1,7 +1,12 @@
 import axios from 'axios'
 import { useAuthStore } from '@/store/authStore'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const rawApiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/$/, '')
+const API_BASE_URL = rawApiBase.endsWith('/api/v1')
+  ? rawApiBase
+  : rawApiBase.endsWith('/api')
+    ? `${rawApiBase}/v1`
+    : `${rawApiBase}/api/v1`
 
 export const apiClient = axios.create({
   baseURL: API_BASE_URL,
@@ -64,7 +69,7 @@ apiClient.interceptors.response.use(
 
       try {
         const refreshResponse = await axios.post(
-          `${API_BASE_URL}/api/auth/refresh`,
+          `${API_BASE_URL}/auth/refresh`,
           { refresh_token: authState.refreshToken },
           { timeout: 30000 }
         )
@@ -92,31 +97,31 @@ apiClient.interceptors.response.use(
 // AUTH API
 export const authAPI = {
   signup: (username, password, email) =>
-    apiClient.post('/api/auth/signup', { username, password, email }),
+    apiClient.post('/auth/register', { username, password, email }),
 
   login: (username, password) =>
-    apiClient.post('/api/auth/login', { username, password }),
+    apiClient.post('/auth/login', { username, password }),
 
   logout: () =>
-    apiClient.post('/api/auth/logout'),
+    apiClient.post('/auth/logout'),
 
   getCurrentUser: () =>
-    apiClient.get('/api/auth/me'),
+    apiClient.get('/auth/me'),
 
   refreshToken: (refresh_token) =>
-    apiClient.post('/api/auth/refresh', { refresh_token }),
+    apiClient.post('/auth/refresh', { refresh_token }),
 }
 
 // MARKET API
 export const marketAPI = {
   getSymbols: (limit = 50) =>
-    apiClient.get('/api/market/symbols', { params: { limit } }),
+    apiClient.get('/market/symbols', { params: { limit } }),
 }
 
 // BUNDLE API - single endpoint for dashboard data
 export const bundleAPI = {
   getBundle: (symbol, interval = '1m', limit = 100, horizon = '15m') =>
-    apiClient.get(`/api/bundle/${symbol}`, {
+    apiClient.get(`/bundle/${symbol}`, {
       params: { interval, limit, horizon },
     }),
 }
@@ -124,16 +129,16 @@ export const bundleAPI = {
 // TRADING API
 export const tradingAPI = {
   getPositions: () =>
-    apiClient.get('/api/trading/positions'),
+    apiClient.get('/trading/positions'),
 
   getOrders: () =>
-    apiClient.get('/api/trading/orders'),
+    apiClient.get('/trading/orders'),
 
   placeOrder: (symbol, quantity, price, side = 'BUY') =>
-    apiClient.post('/api/trading/orders', { symbol, quantity, price, side }),
+    apiClient.post('/trading/orders', { symbol, quantity, price, side }),
 
   cancelOrder: (orderId) =>
-    apiClient.delete(`/api/trading/orders/${orderId}`),
+    apiClient.delete(`/trading/orders/${orderId}`),
 }
 
 export default apiClient

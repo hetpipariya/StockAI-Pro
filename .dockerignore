@@ -1,0 +1,180 @@
+# =========================
+
+# CORE IGNORE (CRITICAL)
+
+# =========================
+
+.git
+.gitignore
+.gitattributes
+.github
+
+# =========================
+
+# ENV & SECRETS
+
+# =========================
+
+.env
+.env.*
+!.env.example
+
+# =========================
+
+# NODE / FRONTEND
+
+# =========================
+
+frontend/node_modules
+frontend/dist
+frontend/build
+frontend/.next
+frontend/.nuxt
+frontend/coverage
+frontend/*.log
+
+# =========================
+
+# PYTHON / BACKEND
+
+# =========================
+
+backend/**pycache**
+backend/*.pyc
+backend/*.pyo
+backend/*.pyd
+backend/.pytest_cache
+backend/.mypy_cache
+backend/.ruff_cache
+backend/.tox
+backend/.coverage
+backend/htmlcov
+backend/build
+backend/dist
+backend/*.egg-info
+backend/.venv
+backend/venv
+
+# =========================
+
+# GLOBAL PYTHON CACHE
+
+# =========================
+
+**pycache**/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+
+# =========================
+
+# LARGE DATA FILES (VERY IMPORTANT 🔥)
+
+# =========================
+
+*.csv
+*.json
+*.parquet
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.onnx
+data/
+datasets/
+models/
+checkpoints/
+
+# =========================
+
+# EXPERIMENT / RESEARCH
+
+# =========================
+
+experiments/
+experiments_v2/
+research/
+backtest_engine/
+
+# =========================
+
+# DATABASE FILES
+
+# =========================
+
+*.db
+*.sqlite
+*.sqlite3
+
+# =========================
+
+# LOGS
+
+# =========================
+
+logs/
+*.log
+*.pid
+
+# =========================
+
+# IDE / EDITOR
+
+# =========================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+
+# OS FILES
+
+# =========================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+
+# DOCS (OPTIONAL)
+
+# =========================
+
+docs/
+*.md
+!README.md
+
+# =========================
+
+# ARCHIVES
+
+# =========================
+
+*.zip
+*.tar
+*.tar.gz
+*.rar
+
+# =========================
+
+# TEMP FILES
+
+# =========================
+
+tmp/
+temp/
+*.tmp
+
+# =========================
+
+# CI/CD
+
+# =========================
+
+.gitlab-ci.yml
+.travis.yml
+azure-pipelines.yml

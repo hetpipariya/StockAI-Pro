@@ -58,8 +58,11 @@ async def place_order(
             "mode": "paper",
         }
     else:
-        token = get_symbol_token(req.symbol)
-        ts = get_tradingsymbol(req.symbol)
+        try:
+            token = get_symbol_token(req.symbol, exchange=SMARTAPI_EXCHANGE)
+            ts = get_tradingsymbol(req.symbol, exchange=SMARTAPI_EXCHANGE)
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         payload = {
             "variety": req.variety,
             "tradingsymbol": ts,

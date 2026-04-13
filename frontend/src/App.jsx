@@ -1,32 +1,106 @@
-import React from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import React, { useEffect, useState } from 'react';
+import { BrowserRouter, Navigate, Routes, Route } from 'react-router-dom';
+import ErrorBoundary from './components/ErrorBoundary';
+import { ToastProvider } from './components/Toast';
+import ProtectedRoute from './components/ProtectedRoute';
+import { AppInitializer } from './components/AppInitializer';
+import Dashboard from './pages/Dashboard';
+import Signals from './pages/Signals';
+import Trades from './pages/Trades';
+import Settings from './pages/Settings';
+import Login from './pages/Login';
+import ForgotPassword from './pages/ForgotPassword';
+import Landing from './pages/Landing';
+import DesktopLayout from './layouts/DesktopLayout';
 
-import Landing from './pages/Landing'
-import Login from './pages/Login'
-import Dashboard from './pages/Dashboard'
-import { useAuthStore } from './store/useAuthStore'
+const MOBILE_BREAKPOINT = 768;
 
-const queryClient = new QueryClient();
+function LandingEntry() {
+  const [isMobile, setIsMobile] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.innerWidth < MOBILE_BREAKPOINT;
+  });
 
-const ProtectedRoute = ({ children }) => {
-  const isAuth = useAuthStore(state => state.isAuthenticated) || localStorage.getItem('stockai_auth') === 'true';
-  return isAuth ? children : <Navigate to="/login" replace />;
-};
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
 
-function App() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Landing />} />
-          <Route path="/login" element={<Login />} />
-          <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </BrowserRouter>
-    </QueryClientProvider>
-  )
+    const mediaQuery = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`);
+    const onChange = (event) => setIsMobile(event.matches);
+
+    setIsMobile(mediaQuery.matches);
+
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', onChange);
+      return () => mediaQuery.removeEventListener('change', onChange);
+    }
+
+    mediaQuery.addListener(onChange);
+    return () => mediaQuery.removeListener(onChange);
+  }, []);
+
+  if (isMobile) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <Landing />;
 }
 
-export default App;
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <ToastProvider>
+        <AppInitializer>
+          <BrowserRouter>
+            <Routes>
+              <Route path="/" element={<LandingEntry />} />
+              <Route path="/landing" element={<LandingEntry />} />
+              <Route path="/login" element={<Login />} />
+              <Route path="/forgot-password" element={<ForgotPassword />} />
+              <Route
+                path="/dashboard"
+                element={
+                  <ProtectedRoute>
+                    <DesktopLayout>
+                      <Dashboard />
+                    </DesktopLayout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/signals"
+                element={
+                  <ProtectedRoute>
+                    <DesktopLayout>
+                      <Signals />
+                    </DesktopLayout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/trades"
+                element={
+                  <ProtectedRoute>
+                    <DesktopLayout>
+                      <Trades />
+                    </DesktopLayout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/settings"
+                element={
+                  <ProtectedRoute>
+                    <DesktopLayout>
+                      <Settings />
+                    </DesktopLayout>
+                  </ProtectedRoute>
+                }
+              />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </BrowserRouter>
+        </AppInitializer>
+      </ToastProvider>
+    </ErrorBoundary>
+  );
+}

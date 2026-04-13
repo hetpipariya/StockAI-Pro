@@ -387,15 +387,21 @@ class OrderRouter:
 
         try:
             from app.connectors.smartapi_connector import SmartAPIConnector
-            from app.services.instrument_master import get_token
+            from app.services.instrument_service import (get_token_by_symbol,
+                                                         get_tradingsymbol)
 
             connector = SmartAPIConnector()
             connector._ensure_login()
 
-            token = get_token(order.symbol)
-            if not token:
+            try:
+                token = get_token_by_symbol(order.symbol, exchange=config.SMARTAPI_EXCHANGE)
+                tradingsymbol = get_tradingsymbol(
+                    order.symbol,
+                    exchange=config.SMARTAPI_EXCHANGE,
+                )
+            except KeyError as exc:
                 order.status = "REJECTED"
-                order.error = f"Cannot resolve token for {order.symbol}"
+                order.error = str(exc)
                 self._log_state(session, order.order_id, "REJECTED")
                 session.commit()
                 log_trade(
@@ -412,10 +418,10 @@ class OrderRouter:
 
             order_payload = {
                 "variety": "NORMAL",
-                "tradingsymbol": f"{order.symbol}-EQ",
+                "tradingsymbol": tradingsymbol,
                 "symboltoken": token,
                 "transactiontype": order.transaction_type,
-                "exchange": "NSE",
+                "exchange": config.SMARTAPI_EXCHANGE,
                 "ordertype": "LIMIT",
                 "producttype": "INTRADAY",
                 "duration": "DAY",

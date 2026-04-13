@@ -1,69 +1,106 @@
 import { create } from 'zustand';
-import axios from 'axios';
+import { AuthService } from '../api/services/auth.service.js';
 
-const rawBaseUrl = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
-const apiBaseUrl = rawBaseUrl.endsWith('/api') ? rawBaseUrl : `${rawBaseUrl}/api`;
+const pickAuthData = (payload) => {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.data && typeof payload.data === 'object') return payload.data;
+  return payload;
+};
 
-const api = axios.create({
-  baseURL: apiBaseUrl
-});
+const pickUser = (payload) => {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.user && typeof payload.user === 'object') return payload.user;
+  if (payload.data && typeof payload.data === 'object') {
+    if (payload.data.user && typeof payload.data.user === 'object') return payload.data.user;
+    return payload.data;
+  }
+  return payload;
+};
 
 export const useAuthStore = create((set) => ({
-  isAuthenticated: false,
+  user: null,
   error: null,
-  login: async (credentials) => {
-    const normalizedPayload = (() => {
-      if (typeof credentials === 'string') {
-        return { username: '', password: credentials };
-      }
-      if (credentials && typeof credentials === 'object') {
-        return credentials;
-      }
-      return { username: '', password: '' };
-    })();
+  isAuthenticated: false,
+  isLoading: false,
 
-    const username = String(normalizedPayload.username || '').trim();
-    const password = String(normalizedPayload.password || '').trim();
+  clearError: () => set({ error: null }),
 
-    if (!username || !password) {
-      set({ error: 'Username and password are required.' });
+  login: async (credentials, passwordArg) => {
+    const username = typeof credentials === 'object'
+      ? credentials?.username || credentials?.email || ''
+      : credentials;
+    const password = typeof credentials === 'object'
+      ? credentials?.password || ''
+      : passwordArg;
+
+    const normalizedUsername = String(username || '').trim().toLowerCase();
+
+    if (!normalizedUsername || !password) {
+      set({ error: 'Username and password are required', isAuthenticated: false });
       return false;
+    }
+
+    set({ isLoading: true });
+    try {
+      const payload = await AuthService.login(normalizedUsername, password);
+      const authData = pickAuthData(payload) || {};
+
+      const accessToken = authData.access_token || authData.accessToken || authData.token;
+      const refreshToken = authData.refresh_token || authData.refreshToken || null;
+      const user = pickUser(authData);
+
+      if (!accessToken) {
+        throw new Error('Invalid login response from server');
+      }
+
+      localStorage.setItem('access_token', accessToken);
+      if (refreshToken) {
+        localStorage.setItem('refresh_token', refreshToken);
+      } else {
+        localStorage.removeItem('refresh_token');
+      }
+
+      set({ user, isAuthenticated: true, isLoading: false, error: null });
+      return true;
+    } catch (error) {
+      const rawMessage = String(error?.message || 'Login failed');
+      let message = rawMessage;
+
+      if (/not found/i.test(rawMessage)) {
+        message = 'Login API not found. Please check backend URL or restart backend server.';
+      } else if (/network|unreachable|refused|failed to fetch|timeout/i.test(rawMessage)) {
+        message = 'Cannot connect to authentication service. Please check backend availability and API URL configuration.';
+      }
+
+      set({ isLoading: false, isAuthenticated: false, error: message });
+      return false;
+    }
+  },
+
+  logout: async () => {
+    try { await AuthService.logout(); } finally {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      set({ user: null, isAuthenticated: false, error: null });
+    }
+  },
+
+  checkAuth: async () => {
+    const token = localStorage.getItem('access_token');
+    if (!token) {
+      set({ isAuthenticated: false, user: null, error: null });
+      return;
     }
 
     try {
-      const response = await api.post('/v1/auth/login', { username, password });
-      const accessToken = response.data?.access_token || response.data?.data?.access_token;
-      if (accessToken) {
-        set({ isAuthenticated: true, error: null });
-        localStorage.setItem('stockai_auth', 'true');
-        localStorage.setItem('stockai_token', accessToken);
-        localStorage.setItem('stockai_username', username);
-        return true;
-      }
-
-      set({ error: 'Login failed. Token missing in response.' });
-      return false;
-    } catch (err) {
-      const statusCode = err?.response?.status;
-      const backendMessage = err?.response?.data?.message || err?.response?.data?.detail;
-
-      if (statusCode === 422) {
-        set({ error: 'Login request is invalid. Enter both username and password.' });
-      } else if (statusCode === 401) {
-        set({ error: 'Auth Denied. Invalid username or password.' });
-      } else {
-        set({ error: backendMessage || 'Unable to login right now. Please try again.' });
-      }
-      return false;
+      set({ isLoading: true });
+      const payload = await AuthService.me();
+      const user = pickUser(payload);
+      set({ user, isAuthenticated: true, isLoading: false, error: null });
+    } catch {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      set({ user: null, isAuthenticated: false, isLoading: false, error: null });
     }
   },
-  logout: () => {
-    localStorage.removeItem('stockai_auth');
-    localStorage.removeItem('stockai_token');
-    set({ isAuthenticated: false, error: null });
-  },
-  checkAuth: () => {
-    const isAuth = localStorage.getItem('stockai_auth') === 'true';
-    if (isAuth) set({ isAuthenticated: true });
-  }
 }));

@@ -202,10 +202,11 @@ async def broadcast_tick(symbol: str, tick: dict):
 
 
 async def broadcast_candle(symbol: str, candle: dict):
-    """Broadcast a completed 1m candle to subscribed clients."""
+    """Broadcast a completed candle to subscribed clients."""
     msg = {
         "type": "candle_update",
         "symbol": symbol,
+        "timeframe": candle.get("timeframe", "1m"),
         "timestamp": candle.get("time"),
         "open": candle.get("open"),
         "high": candle.get("high"),

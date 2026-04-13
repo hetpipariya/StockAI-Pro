@@ -1,6 +1,6 @@
 """
-15-Minute Candle Builder — aggregates raw LTP ticks into OHLCV candles.
-Designed for live intraday trading signal generation.
+Live Candle Builder — aggregates raw LTP ticks into OHLCV candles.
+Supports multiple timeframes (5m, 15m) for live intraday trading.
 """
 
 from __future__ import annotations
@@ -54,29 +54,33 @@ class LiveCandle:
         return self.tick_count == 0
 
 
-class CandleBuilder15m:
+class CandleBuilder:
     """
-    Accumulates ticks per symbol into 15-minute OHLCV candles.
-    When a 15m boundary is crossed, the completed candle is returned.
+    Accumulates ticks per symbol into timeframe-based OHLCV candles.
+    When the timeframe boundary is crossed, the completed candle is returned.
     Also maintains a rolling history of completed candles per symbol.
     """
 
-    def __init__(self, history_limit: int = 200):
+    def __init__(self, timeframe_minutes: int, history_limit: int = 200):
+        if timeframe_minutes <= 0:
+            raise ValueError("timeframe_minutes must be > 0")
+
+        self._timeframe_minutes = timeframe_minutes
+        self._timeframe_label = f"{timeframe_minutes}m"
         self._active: Dict[str, LiveCandle] = {}
         self._history: Dict[str, List[dict]] = {}
         self._history_limit = history_limit
 
-    @staticmethod
-    def _candle_start(dt: datetime) -> datetime:
-        """Round down to the nearest 15-minute boundary."""
-        minute = (dt.minute // 15) * 15
+    def _candle_start(self, dt: datetime) -> datetime:
+        """Round down to the nearest timeframe boundary."""
+        minute = (dt.minute // self._timeframe_minutes) * self._timeframe_minutes
         return dt.replace(minute=minute, second=0, microsecond=0)
 
     def process_tick(
         self, symbol: str, price: float, volume: int = 0
     ) -> Optional[dict]:
         """
-        Feed a tick. Returns a completed 15m candle dict if a boundary was crossed,
+        Feed a tick. Returns a completed candle dict if a boundary was crossed,
         otherwise returns None.
         """
         now = datetime.now()
@@ -85,10 +89,11 @@ class CandleBuilder15m:
         candle = self._active.get(symbol)
         completed = None
 
-        # If we have an active candle that belongs to an older 15m window, finalize it
+        # If we have an active candle that belongs to an older timeframe window, finalize it
         if candle and candle.start_time and candle.start_time < boundary:
             if not candle.is_empty:
                 completed = candle.to_dict()
+                completed["timeframe"] = self._timeframe_label
                 # Store in history
                 if symbol not in self._history:
                     self._history[symbol] = []
@@ -98,7 +103,8 @@ class CandleBuilder15m:
                         -self._history_limit:
                     ]
                 logger.info(
-                    "[CANDLE-15m] Completed candle for %s: O=%.2f H=%.2f L=%.2f C=%.2f",
+                    "[CANDLE-%s] Completed candle for %s: O=%.2f H=%.2f L=%.2f C=%.2f",
+                    self._timeframe_label,
                     symbol,
                     completed["open"],
                     completed["high"],
@@ -117,7 +123,7 @@ class CandleBuilder15m:
         return completed
 
     def get_history(self, symbol: str, limit: int = 100) -> List[dict]:
-        """Get completed 15m candle history for a symbol."""
+        """Get completed candle history for a symbol."""
         history = self._history.get(symbol, [])
         return history[-limit:]
 
@@ -125,12 +131,25 @@ class CandleBuilder15m:
         """Get the in-progress candle for a symbol."""
         candle = self._active.get(symbol)
         if candle and not candle.is_empty:
-            return candle.to_dict()
+            current = candle.to_dict()
+            current["timeframe"] = self._timeframe_label
+            return current
         return None
 
     def active_symbols(self) -> list:
         return list(self._active.keys())
 
 
-# Singleton instance
+class CandleBuilder15m(CandleBuilder):
+    def __init__(self, history_limit: int = 200):
+        super().__init__(timeframe_minutes=15, history_limit=history_limit)
+
+
+class CandleBuilder5m(CandleBuilder):
+    def __init__(self, history_limit: int = 240):
+        super().__init__(timeframe_minutes=5, history_limit=history_limit)
+
+
+# Singleton instances
 candle_builder_15m = CandleBuilder15m()
+candle_builder_5m = CandleBuilder5m()

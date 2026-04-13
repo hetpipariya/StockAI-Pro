@@ -1,295 +1,398 @@
 import React from 'react';
-import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
-import { ChevronRight, Activity, TrendingUp, ShieldAlert, Zap, BarChart2, Star, CheckCircle, Globe } from 'lucide-react';
+import {
+  Activity,
+  ArrowRight,
+  CheckCircle2,
+  Cpu,
+  Database,
+  Lock,
+  Radar,
+  Rocket,
+  Shield,
+  ShieldCheck,
+  Sparkles,
+  TrendingUp,
+  Workflow,
+  Zap,
+} from 'lucide-react';
+import '../styles/immersive-pages.css';
 
-const Landing = () => {
+const commandStrip = [
+  'Realtime Signal Bus',
+  'Risk Gatekeeper',
+  'Execution Router',
+  'Portfolio Telemetry',
+  'Regime Detection',
+  'Latency-Aware Flow',
+];
+
+const stackCards = [
+  {
+    icon: Cpu,
+    title: 'Signal Intelligence Core',
+    detail:
+      'Processes momentum, volatility structure, and trend context across intraday and swing windows.',
+  },
+  {
+    icon: Radar,
+    title: 'Confidence Scoring',
+    detail:
+      'Ranks each setup so weak opportunities are filtered out before any execution decision is allowed.',
+  },
+  {
+    icon: Shield,
+    title: 'Risk Envelope',
+    detail:
+      'Position size and stop placement are bounded by strict loss thresholds to defend capital first.',
+  },
+  {
+    icon: Workflow,
+    title: 'Order Pipeline',
+    detail:
+      'Normalizes signal-to-order flow with consistent checks before route, send, and post-trade tracking.',
+  },
+  {
+    icon: Database,
+    title: 'Market Data Layer',
+    detail:
+      'Streams normalized symbol snapshots and historical context for deterministic model behavior.',
+  },
+  {
+    icon: Lock,
+    title: 'Secure Control Plane',
+    detail:
+      'Token-secured sessions and guarded actions keep dashboard operations safe under live conditions.',
+  },
+];
+
+const flowCards = [
+  {
+    step: '01',
+    title: 'Configure Command Profile',
+    text: 'Login, set mode, and define risk limits before the engine is armed.',
+  },
+  {
+    step: '02',
+    title: 'Scan and Grade Opportunities',
+    text: 'The model continuously evaluates quality and blocks low-conviction noise.',
+  },
+  {
+    step: '03',
+    title: 'Route with Risk Controls',
+    text: 'Only approved setups move through risk-gated execution routing.',
+  },
+  {
+    step: '04',
+    title: 'Monitor and Adapt',
+    text: 'Live telemetry updates decisions as market state shifts across sessions.',
+  },
+];
+
+const metrics = [
+  { title: 'Profit Factor', value: '1.39', icon: TrendingUp },
+  { title: 'Win Rate', value: '76%', icon: CheckCircle2 },
+  { title: 'Drawdown', value: '< 7%', icon: ShieldCheck },
+  { title: 'Auto Trades', value: '150+', icon: Zap },
+];
+
+const testimonials = [
+  {
+    quote:
+      'I stopped forcing entries. The confidence layer keeps me patient and only surfaces cleaner opportunities.',
+    person: 'Intraday Trader - Mumbai',
+  },
+  {
+    quote:
+      'What changed my process was consistency. Every trade now follows the same risk-first workflow.',
+    person: 'Options Trader - Bengaluru',
+  },
+  {
+    quote:
+      'The dashboard gives full context: conviction, stop map, and route state in one screen.',
+    person: 'Swing Trader - Ahmedabad',
+  },
+];
+
+const faqItems = [
+  {
+    q: 'Can I start in paper mode first?',
+    a: 'Yes. Paper mode is built in so you can validate system behavior and risk settings before live execution.',
+  },
+  {
+    q: 'Does it support Indian market symbols?',
+    a: 'Yes. The workflow is tuned for NSE/BSE style data, with symbol bundle support and intraday updates.',
+  },
+  {
+    q: 'Will this replace my judgement completely?',
+    a: 'No. It gives quantified decision support and disciplined execution controls. Final risk preference remains yours.',
+  },
+];
+
+export default function Landing() {
   const navigate = useNavigate();
+  const goLogin = () => navigate('/login');
 
   return (
-    <div className="min-h-screen bg-stockai-bg text-white overflow-x-hidden relative selection:bg-stockai-neon selection:text-black font-sans">
-      {/* Animated 3D Grid pattern */}
-      <div 
-        className="fixed inset-0 bg-grid-pattern opacity-[0.15] pointer-events-none z-0"
-        style={{ 
-          backgroundSize: '80px 80px', 
-          transform: 'perspective(1000px) rotateX(60deg) translateY(-20px) scale(3)',
-          transformOrigin: 'top center',
-          animation: 'float 20s linear infinite'
-        }}
-        aria-hidden="true"
-      />
+    <div className="landing-vault-page min-h-screen text-slate-100 overflow-x-hidden">
+      <div className="landing-vault-grid" aria-hidden="true" />
+      <div className="landing-vault-glow landing-vault-glow-a" aria-hidden="true" />
+      <div className="landing-vault-glow landing-vault-glow-b" aria-hidden="true" />
+      <div className="landing-vault-glow landing-vault-glow-c" aria-hidden="true" />
 
-      {/* Floating Ambient Orbs */}
-      <div className="fixed top-1/4 left-1/4 w-[500px] h-[500px] bg-stockai-neon/10 rounded-full blur-[140px] mix-blend-screen pointer-events-none z-0" />
-      <div className="fixed bottom-1/4 right-1/4 w-[600px] h-[600px] bg-blue-500/10 rounded-full blur-[150px] mix-blend-screen animate-pulse-slow pointer-events-none z-0" />
+      <nav className="vault-nav sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-6 py-5 flex items-center justify-between gap-4">
+          <button
+            type="button"
+            onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+            className="flex items-center gap-3"
+          >
+            <span className="h-11 w-11 rounded-2xl bg-gradient-to-br from-cyan-400 to-blue-600 flex items-center justify-center shadow-[0_10px_35px_rgba(14,165,233,0.45)]">
+              <TrendingUp className="h-6 w-6 text-white" />
+            </span>
+            <span className="text-2xl font-black tracking-tight text-white">
+              StockAI <span className="text-cyan-300">Pro</span>
+            </span>
+          </button>
 
-      {/* Navigation */}
-      <nav className="relative z-50 flex items-center justify-between px-8 py-6 max-w-7xl mx-auto backdrop-blur-md border-b border-white/5 rounded-b-3xl">
-        <div className="flex items-center gap-2 text-2xl font-bold tracking-tighter">
-          <Activity className="w-8 h-8 text-stockai-neon" />
-          StockAI<span className="text-stockai-neon drop-shadow-[0_0_10px_rgba(0,255,159,0.8)]">Pro</span>
+          <div className="hidden md:flex items-center gap-7 text-sm font-semibold text-slate-400">
+            <a href="#stack" className="hover:text-cyan-300 transition-colors">Stack</a>
+            <a href="#flow" className="hover:text-cyan-300 transition-colors">Flow</a>
+            <a href="#proof" className="hover:text-cyan-300 transition-colors">Proof</a>
+            <a href="#faq" className="hover:text-cyan-300 transition-colors">FAQ</a>
+          </div>
+
+          <button
+            type="button"
+            onClick={goLogin}
+            className="px-6 py-2.5 rounded-xl text-sm font-bold text-white bg-gradient-to-r from-cyan-500 to-blue-600 hover:opacity-95 transition-all flex items-center gap-2 shadow-[0_8px_26px_rgba(14,165,233,0.35)]"
+          >
+            Login
+            <ArrowRight className="h-4 w-4" />
+          </button>
         </div>
-        <div className="hidden md:flex gap-8 text-sm font-medium text-stockai-muted">
-          <a href="#features" className="hover:text-white transition-colors">Features</a>
-          <a href="#demo" className="hover:text-white transition-colors">Platform</a>
-          <a href="#pricing" className="hover:text-white transition-colors">Pricing</a>
-        </div>
-        <button 
-          onClick={() => navigate('/login')}
-          className="px-6 py-2.5 rounded-full border border-stockai-neon/50 text-stockai-neon hover:bg-stockai-neon hover:text-black hover:shadow-[0_0_20px_rgba(0,255,159,0.4)] transition-all duration-300 font-semibold text-sm"
-        >
-          Traders Login
-        </button>
       </nav>
 
-      {/* Hero Section */}
-      <section className="relative z-10 flex flex-col items-center justify-center pt-32 pb-24 text-center px-4 max-w-5xl mx-auto">
-        <motion.div
-          initial={{ opacity: 0, y: -20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, ease: "easeOut" }}
-          className="inline-flex items-center gap-3 px-4 py-2 rounded-full bg-stockai-surface border border-white/10 mb-8 backdrop-blur-sm shadow-[0_4px_24px_rgba(0,0,0,0.4)]"
-        >
-          <span className="relative flex h-3 w-3">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-stockai-neon opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-3 w-3 bg-stockai-neon"></span>
-          </span>
-          <span className="text-sm font-medium text-gray-300 tracking-wide uppercase">Live NSE/BSE Signal Engine Active</span>
-        </motion.div>
-
-        <motion.h1 
-          className="text-5xl md:text-8xl font-extrabold tracking-tighter mb-6 leading-[1.1]"
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.8, delay: 0.1 }}
-        >
-          AI Trading That <br/>
-          <span className="text-transparent bg-clip-text bg-gradient-to-r from-stockai-neon via-emerald-400 to-cyan-400 drop-shadow-[0_0_30px_rgba(0,255,159,0.3)]">
-            Thinks Faster Than You.
-          </span>
-        </motion.h1>
-
-        <motion.p 
-          className="text-lg md:text-2xl text-stockai-muted mb-12 max-w-3xl leading-relaxed"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: 0.8, delay: 0.2 }}
-        >
-          Outsmart the Indian market with institutional-grade AI signals, multi-timeframe analysis, and lightning-fast execution. No fluff, just pure alpha.
-        </motion.p>
-
-        <motion.div 
-          className="flex flex-col sm:flex-row gap-6 w-full sm:w-auto perspective-1000"
-          initial={{ opacity: 0, y: 30 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.8, delay: 0.4 }}
-        >
-          <button 
-            onClick={() => navigate('/login')}
-            className="group flex items-center justify-center gap-2 px-10 py-5 rounded-full bg-stockai-neon text-black font-extrabold text-lg hover:shadow-[0_0_40px_rgba(0,255,159,0.6)] hover:scale-105 transition-all duration-300 w-full sm:w-auto"
-          >
-            Terminal Access 
-            <ChevronRight className="w-6 h-6 group-hover:translate-x-1 transition-transform" />
-          </button>
-          <button className="flex items-center justify-center gap-2 px-10 py-5 rounded-full bg-stockai-surface text-white font-semibold text-lg hover:bg-white/10 border border-white/10 backdrop-blur-md transition-all duration-300 w-full sm:w-auto">
-            View Live Demo
-          </button>
-        </motion.div>
-      </section>
-
-      {/* Live Ticker Marquee */}
-      <section className="relative z-10 w-full border-y border-white/5 bg-black/40 backdrop-blur-xl overflow-hidden py-4">
-        <div className="flex whitespace-nowrap animate-[marquee_20s_linear_infinite]" style={{ animation: "marquee 20s linear infinite" }}>
-          {[...Array(3)].map((_, i) => (
-            <div key={i} className="flex gap-12 px-6 items-center flex-shrink-0">
-              <span className="flex items-center gap-2 font-mono text-lg"><span className="text-white font-bold">RELIANCE</span> <span className="text-stockai-neon">+1.2%</span></span>
-              <span className="text-white/20">•</span>
-              <span className="flex items-center gap-2 font-mono text-lg"><span className="text-white font-bold">HDFCBANK</span> <span className="text-stockai-sell">-0.4%</span></span>
-              <span className="text-white/20">•</span>
-              <span className="flex items-center gap-2 font-mono text-lg"><span className="text-white font-bold">TCS</span> <span className="text-stockai-neon">+0.8%</span></span>
-              <span className="text-white/20">•</span>
-              <span className="flex items-center gap-2 font-mono text-lg"><span className="text-white font-bold">INFY</span> <span className="text-stockai-neon">+2.1%</span></span>
-              <span className="text-white/20">•</span>
-              <span className="flex items-center gap-2 font-mono text-lg"><span className="text-white font-bold">ITC</span> <span className="text-stockai-sell">-0.1%</span></span>
-              <span className="text-white/20">•</span>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* Dashboard Preview Section */}
-      <section id="demo" className="relative z-10 py-24 px-4 max-w-7xl mx-auto">
-        <div className="text-center mb-16">
-          <h2 className="text-3xl md:text-5xl font-bold tracking-tight mb-4">Command Center Perfected</h2>
-          <p className="text-stockai-muted text-lg max-w-2xl mx-auto">Built purely for execution. See multi-timeframe charts and AI sentiment in a single glance.</p>
-        </div>
-        
-        <motion.div 
-          initial={{ opacity: 0, y: 50, rotateX: 10 }}
-          whileInView={{ opacity: 1, y: 0, rotateX: 0 }}
-          viewport={{ once: true, margin: "-100px" }}
-          transition={{ duration: 1, type: "spring" }}
-          className="relative rounded-[2rem] border border-white/10 bg-stockai-card/40 p-2 md:p-3 shadow-[0_0_100px_rgba(0,0,0,0.8)] backdrop-blur-2xl ring-1 ring-white/5"
-          style={{ transformPerspective: 1200 }}
-        >
-          <div className="absolute inset-0 bg-gradient-to-t from-stockai-bg via-transparent to-transparent z-20 rounded-[2.5rem] pointer-events-none md:h-full"></div>
-          <div className="w-full h-[400px] md:h-[600px] bg-[#0A0E14] rounded-3xl border border-white/5 overflow-hidden flex flex-col relative">
-            {/* Fake Dashboard Header */}
-            <div className="h-12 border-b border-white/5 flex items-center px-4 gap-2 bg-gradient-to-r from-black to-transparent">
-              <div className="flex gap-1.5 object-contain">
-                <div className="w-3 h-3 rounded-full bg-stockai-sell" />
-                <div className="w-3 h-3 rounded-full bg-yellow-500" />
-                <div className="w-3 h-3 rounded-full bg-stockai-neon" />
+      <main className="relative z-10">
+        <section className="max-w-7xl mx-auto px-6 pt-20 pb-16 lg:pt-24 lg:pb-20">
+          <div className="grid lg:grid-cols-[1.1fr_1fr] gap-14 items-center">
+            <div className="max-w-2xl">
+              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full border border-cyan-300/30 bg-cyan-400/10 text-cyan-200 text-xs font-bold tracking-[0.16em] uppercase mb-6">
+                <Sparkles className="h-4 w-4" />
+                Complete Trading Command Interface
               </div>
-              <div className="mx-auto bg-white/5 px-8 md:px-32 py-1 rounded-md text-xs text-stockai-muted font-mono tracking-widest hidden md:block">STOCKAI // HFT TERMINAL</div>
-            </div>
-            {/* Fake Dashboard Body */}
-            <div className="flex-1 flex p-2 md:p-4 gap-4">
-              <div className="w-64 bg-white/5 rounded-xl border border-white/5 hidden md:flex flex-col p-4 gap-3">
-                <div className="h-8 bg-white/10 rounded w-full" />
-                <div className="h-12 bg-white/10 rounded w-full mt-4" />
-                <div className="h-12 bg-white/5 rounded w-full" />
-                <div className="h-12 bg-white/5 rounded w-full" />
+
+              <h1 className="text-4xl sm:text-5xl lg:text-6xl font-black tracking-[-0.03em] leading-tight">
+                Algorithmic Command for
+                <span className="block text-transparent bg-clip-text bg-gradient-to-r from-cyan-300 via-blue-300 to-indigo-300 mt-2">
+                  Precision, Speed, and Protection
+                </span>
+              </h1>
+
+              <p className="mt-6 text-slate-300 text-lg leading-relaxed max-w-xl">
+                This is a full-stack decision cockpit: smarter signal grading, strict risk control, and realtime execution context for NSE and BSE-focused workflows.
+              </p>
+
+              <div className="mt-9 flex flex-col sm:flex-row gap-4 sm:items-center">
+                <button
+                  type="button"
+                  onClick={goLogin}
+                  className="px-7 py-3.5 rounded-2xl bg-gradient-to-r from-cyan-500 to-blue-600 text-white font-bold text-base shadow-[0_12px_30px_rgba(14,165,233,0.35)] hover:-translate-y-0.5 transition-transform flex items-center justify-center gap-2"
+                >
+                  Open Login
+                  <Rocket className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => document.getElementById('flow')?.scrollIntoView({ behavior: 'smooth' })}
+                  className="px-7 py-3.5 rounded-2xl border border-white/20 bg-white/5 text-slate-100 font-semibold hover:bg-white/10 transition-colors"
+                >
+                  Explore System Flow
+                </button>
               </div>
-              <div className="flex-1 bg-grid-pattern opacity-60 rounded-xl border border-white/5 relative items-center justify-center flex flex-col gap-4">
-                 <BarChart2 className="w-16 h-16 text-stockai-neon/30" />
-                 <div className="w-full absolute bottom-0 h-1/2 bg-gradient-to-t from-stockai-neon/10 to-transparent" />
-              </div>
-              <div className="w-80 bg-gradient-to-br from-white/10 to-transparent rounded-xl border border-stockai-neon/20 hidden lg:flex flex-col p-4 shadow-[0_0_30px_rgba(0,255,159,0.05)]">
-                 <div className="text-stockai-neon font-bold text-xs tracking-widest mb-4 flex items-center gap-2"><Zap className="w-3 h-3" /> AI SENTIMENT</div>
-                 <div className="text-4xl font-extrabold text-white mb-2">LONG</div>
-                 <div className="text-stockai-muted text-sm mb-4">Probability: 89%</div>
-                 <div className="h-2 bg-white/10 rounded-full overflow-hidden w-full mb-6">
-                    <div className="h-full bg-stockai-neon w-[85%]" />
-                 </div>
-                 <div className="flex-1 bg-white/5 rounded-xl border border-white/5" />
+
+              <div className="mt-8 flex flex-wrap gap-x-6 gap-y-3 text-sm text-slate-400">
+                <span className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4 text-emerald-400" /> Paper and Live Modes</span>
+                <span className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4 text-emerald-400" /> Dynamic Position Guard</span>
+                <span className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4 text-emerald-400" /> Realtime Decision Stream</span>
               </div>
             </div>
-          </div>
-        </motion.div>
-      </section>
 
-      {/* Feature Grid */}
-      <section id="features" className="relative z-10 py-24 bg-black/50 border-y border-white/5 backdrop-blur-xl">
-        <div className="max-w-7xl mx-auto px-4">
-          <div className="text-center mb-16">
-            <h2 className="text-3xl md:text-5xl font-bold tracking-tight mb-4">Unfair Advantage Setup</h2>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8 w-full">
-            {[
-              { icon: <Zap className="text-cyan-400 w-8 h-8 mb-6"/>, title: "Real-time Processing", desc: "100ms market data latency. Our backend practically syncs directly with live ticks." },
-              { icon: <TrendingUp className="text-stockai-neon w-8 h-8 mb-6"/>, title: "Predictive AI Engine", desc: "Random Forest models predicting market setups across 50+ Nifty technical indicators." },
-              { icon: <ShieldAlert className="text-stockai-sell w-8 h-8 mb-6"/>, title: "Dynamic Risk Context", desc: "Every signal arrives with calculated stop-losses, target levels, and real-time liquidity scoring." },
-              { icon: <Globe className="text-purple-400 w-8 h-8 mb-6"/>, title: "Smart Fast Search", desc: "Fuzzy searching with instant typo correction. Type 'RIL' or 'Relaince', we'll snap you to the chart." },
-              { icon: <BarChart2 className="text-pink-400 w-8 h-8 mb-6"/>, title: "TradingView Canvas", desc: "Lightweight chart integration offering smooth panning, zooming, and timeframe swaps." },
-              { icon: <CheckCircle className="text-stockai-neon w-8 h-8 mb-6"/>, title: "Paper Trading", desc: "Test the AI's accuracy with our built-in virtual portfolio before risking actual capital." }
-            ].map((feature, i) => (
-              <motion.div 
-                key={i} 
-                initial={{ opacity: 0, y: 20 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ delay: i * 0.1, duration: 0.5 }}
-                className="p-8 rounded-3xl bg-stockai-card border border-white/5 hover:border-stockai-neon/30 hover:bg-stockai-surface hover:-translate-y-2 transition-all duration-300 text-left group shadow-lg"
-              >
-                <div className="bg-stockai-bg inline-block p-4 rounded-2xl border border-white/5 group-hover:scale-110 group-hover:shadow-[0_0_20px_rgba(20,184,166,0.3)] transition-all">
-                  {feature.icon}
+            <div className="vault-scene" aria-hidden="true">
+              <article className="vault-scene-card vault-card-main">
+                <p className="text-xs uppercase tracking-[0.2em] text-cyan-200/80 font-bold">Execution Grid</p>
+                <h3 className="text-2xl font-black mt-2 text-white">Signal Integrity: HIGH</h3>
+                <div className="mt-4 space-y-3 text-sm text-slate-200">
+                  <div className="flex justify-between">
+                    <span>Model Confidence</span>
+                    <strong className="text-cyan-200">84.3%</strong>
+                  </div>
+                  <div className="h-2 rounded-full bg-cyan-900/40 overflow-hidden">
+                    <span className="block h-full w-[84%] bg-gradient-to-r from-cyan-400 to-blue-500" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 mt-2">
+                    <span>Setup: Trend Continuation</span>
+                    <span className="text-right text-emerald-300">Mode: Paper</span>
+                  </div>
                 </div>
-                <h3 className="text-2xl font-bold mt-6 mb-3">{feature.title}</h3>
-                <p className="text-stockai-muted leading-relaxed text-lg">{feature.desc}</p>
-              </motion.div>
+              </article>
+
+              <article className="vault-scene-card vault-card-side">
+                <p className="text-xs uppercase tracking-[0.16em] text-slate-300">Current Signal</p>
+                <div className="mt-2 text-white font-bold text-lg">BUY - RELIANCE</div>
+                <div className="mt-3 text-sm text-slate-300 space-y-1">
+                  <div className="flex justify-between"><span>Entry</span><span>2,845.20</span></div>
+                  <div className="flex justify-between"><span>Stop</span><span>2,816.80</span></div>
+                  <div className="flex justify-between"><span>Target</span><span>2,911.00</span></div>
+                </div>
+              </article>
+
+              <article className="vault-scene-card vault-card-bottom">
+                <p className="text-xs uppercase tracking-[0.16em] text-slate-300">Risk Envelope</p>
+                <div className="mt-2 text-emerald-200 font-bold">Within Limits</div>
+                <div className="mt-3 text-sm text-slate-300">Capital at Risk: 1.8%</div>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section className="vault-strip-wrap">
+          <div className="vault-strip-track">
+            {commandStrip.concat(commandStrip).map((item, idx) => (
+              <span key={`${item}-${idx}`} className="vault-strip-item">
+                <Activity className="h-4 w-4" />
+                {item}
+              </span>
             ))}
           </div>
-        </div>
-      </section>
+        </section>
 
-      {/* Stats Counter & Proof */}
-      <section className="relative z-10 py-24 px-4 max-w-7xl mx-auto">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-8 text-center divide-x divide-white/10">
-          <div>
-            <div className="text-5xl md:text-6xl font-extrabold text-white mb-2 drop-shadow-[0_0_15px_rgba(255,255,255,0.3)]">87<span className="text-stockai-neon">%</span></div>
-            <div className="text-stockai-muted font-medium tracking-wide">Win Rate (1H)</div>
+        <section id="stack" className="max-w-7xl mx-auto px-6 py-20">
+          <div className="max-w-3xl">
+            <p className="text-xs uppercase tracking-[0.2em] text-cyan-200 font-bold">System Stack</p>
+            <h2 className="text-4xl font-black text-white mt-3">A complete operating layer for systematic trading.</h2>
           </div>
-          <div>
-            <div className="text-5xl md:text-6xl font-extrabold text-white mb-2">150<span className="text-stockai-neon">ms</span></div>
-            <div className="text-stockai-muted font-medium tracking-wide">Data Latency</div>
-          </div>
-          <div>
-            <div className="text-5xl md:text-6xl font-extrabold text-white mb-2">50<span className="text-stockai-neon">+</span></div>
-            <div className="text-stockai-muted font-medium tracking-wide">ML Indicators</div>
-          </div>
-          <div>
-            <div className="text-5xl md:text-6xl font-extrabold text-white mb-2">24<span className="text-stockai-neon">/7</span></div>
-            <div className="text-stockai-muted font-medium tracking-wide">Risk Monitoring</div>
-          </div>
-        </div>
 
-        {/* Testimonials */}
-        <div className="mt-32 grid md:grid-cols-3 gap-6">
-          {[
-            { name: "Rahul S.", role: "Day Trader", quote: "The 5m timeframe signals caught the BankNifty reversal perfectly today. Paid for the year." },
-            { name: "Priya M.", role: "Swing Trader", quote: "No confusing setup. Just type the stock, get the AI sentiment, verify the chart, and execute." },
-            { name: "Vikram K.", role: "Options Buyer", quote: "Better UI than my broker. The risk contexts save me from taking trades in low liquidity zones." }
-          ].map((t, i) => (
-             <div key={i} className="p-8 bg-stockai-card rounded-2xl border border-white/5 relative hover:border-stockai-neon/20 transition-colors">
-               <div className="flex gap-1 mb-6">
-                  {[...Array(5)].map((_, j) => <Star key={j} className="w-5 h-5 fill-stockai-neon text-stockai-neon" />)}
-               </div>
-               <p className="text-white/90 text-lg mb-8 italic">"{t.quote}"</p>
-               <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-full bg-gradient-to-tr from-stockai-neon to-cyan-500 shadow-glow" />
-                  <div>
-                    <div className="font-bold text-white text-lg">{t.name}</div>
-                    <div className="text-stockai-muted">{t.role}</div>
-                  </div>
-               </div>
-             </div>
-          ))}
-        </div>
-      </section>
+          <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5 mt-10">
+            {stackCards.map((card) => (
+              <article key={card.title} className="vault-stack-card">
+                <card.icon className="h-7 w-7 text-cyan-300" />
+                <h3 className="text-xl font-bold text-white mt-4">{card.title}</h3>
+                <p className="text-slate-300 mt-3 leading-relaxed text-sm">{card.detail}</p>
+              </article>
+            ))}
+          </div>
+        </section>
 
-      {/* Pricing / Final CTA */}
-      <section id="pricing" className="relative z-10 py-32 border-t border-white/5 bg-gradient-to-b from-stockai-bg to-[#030508] text-center px-4">
-         <h2 className="text-5xl md:text-7xl font-bold tracking-tight mb-6">Stop Guessing. <br className="hidden md:block"/><span className="text-stockai-neon">Start Trading.</span></h2>
-         <p className="text-xl text-stockai-muted mb-12 max-w-2xl mx-auto">Get exclusive terminal access today. No complicated onboarding. Enter your key, view the signals.</p>
-         
-         <button 
-            onClick={() => navigate('/login')}
-            className="group inline-flex items-center justify-center gap-3 px-12 py-6 rounded-full bg-stockai-neon text-black font-extrabold text-2xl hover:shadow-[0_0_50px_rgba(0,255,159,0.8)] hover:scale-105 transition-all duration-300"
-          >
-            Access Terminal Now
-            <ChevronRight className="w-8 h-8 group-hover:translate-x-2 transition-transform" />
-         </button>
-      </section>
-
-      {/* Footer */}
-      <footer className="relative z-10 border-t border-white/10 bg-[#020305] py-12 px-8 text-center md:text-left">
-         <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-6">
-            <div className="flex items-center gap-4">
-              <Activity className="w-6 h-6 text-stockai-neon" />
-              <div className="text-xl font-bold tracking-tighter">StockAI<span className="text-stockai-neon">Pro</span></div>
+        <section id="flow" className="border-y border-white/10 bg-[#070b13]/85">
+          <div className="max-w-7xl mx-auto px-6 py-20">
+            <div className="max-w-2xl">
+              <p className="text-xs uppercase tracking-[0.2em] text-cyan-200 font-bold">Operational Flow</p>
+              <h2 className="text-4xl font-black text-white mt-3">From login to controlled execution, every stage is explicit.</h2>
             </div>
-            <div className="text-stockai-muted text-sm">
-              &copy; 2026 StockAI Technologies. All rights reserved. <br className="md:hidden" />
-              <span className="md:ml-2 text-white/50">Built for the Indian Markets.</span>
+
+            <div className="grid md:grid-cols-2 gap-5 mt-10">
+              {flowCards.map((row) => (
+                <article key={row.step} className="vault-flow-card">
+                  <div className="vault-flow-step">{row.step}</div>
+                  <h3 className="text-2xl font-bold text-white mt-4">{row.title}</h3>
+                  <p className="text-slate-300 mt-3 leading-relaxed">{row.text}</p>
+                </article>
+              ))}
             </div>
-            <div className="flex gap-6 text-sm font-medium text-stockai-muted">
-              <a href="#" className="hover:text-white transition-colors">Privacy</a>
-              <a href="#" className="hover:text-white transition-colors">Terms</a>
-              <a href="#" className="hover:text-white transition-colors">Contact</a>
+          </div>
+        </section>
+
+        <section id="proof" className="max-w-7xl mx-auto px-6 py-20">
+          <div className="grid lg:grid-cols-[1.05fr_1fr] gap-8">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] text-cyan-200 font-bold">Proof Layer</p>
+              <h2 className="text-4xl font-black text-white mt-3">Metrics and trader feedback in one view.</h2>
+
+              <div className="grid sm:grid-cols-2 gap-4 mt-8">
+                {metrics.map((item) => (
+                  <article key={item.title} className="vault-metric-card">
+                    <item.icon className="h-5 w-5 text-cyan-300" />
+                    <p className="text-4xl font-black text-white mt-2">{item.value}</p>
+                    <p className="text-xs uppercase tracking-[0.15em] text-slate-400 mt-2">{item.title}</p>
+                  </article>
+                ))}
+              </div>
             </div>
-         </div>
+
+            <div className="space-y-4">
+              {testimonials.map((item) => (
+                <article key={item.person} className="vault-quote-card">
+                  <p className="text-slate-200 leading-relaxed">"{item.quote}"</p>
+                  <p className="text-cyan-200 text-sm font-semibold mt-5">{item.person}</p>
+                </article>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section id="faq" className="max-w-5xl mx-auto px-6 py-20">
+          <div className="text-center">
+            <p className="text-xs uppercase tracking-[0.2em] text-cyan-200 font-bold">FAQ</p>
+            <h2 className="text-4xl font-black text-white mt-3">Questions before activation.</h2>
+          </div>
+
+          <div className="mt-10 space-y-4">
+            {faqItems.map((item) => (
+              <details key={item.q} className="vault-faq-item group">
+                <summary className="cursor-pointer list-none flex items-center justify-between gap-4 text-white font-bold">
+                  {item.q}
+                  <ArrowRight className="h-4 w-4 text-cyan-300 group-open:rotate-90 transition-transform" />
+                </summary>
+                <p className="text-slate-300 leading-relaxed mt-3">{item.a}</p>
+              </details>
+            ))}
+          </div>
+
+          <div className="mt-12 text-center">
+            <button
+              type="button"
+              onClick={goLogin}
+              className="px-9 py-4 rounded-full bg-white text-[#0a1220] font-black text-lg shadow-[0_16px_45px_rgba(255,255,255,0.2)] hover:translate-y-[-2px] transition-transform"
+            >
+              Continue to Login
+            </button>
+          </div>
+        </section>
+
+        <section className="max-w-6xl mx-auto px-6 pb-20">
+          <div className="vault-final-card">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] text-cyan-200 font-bold">Ready to deploy</p>
+              <h3 className="text-3xl font-black text-white mt-2">Your execution cockpit is one click away.</h3>
+              <p className="text-slate-300 mt-3 max-w-2xl">
+                Open the login page and start with paper mode, then move to live execution once your settings are validated.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={goLogin}
+              className="vault-final-button"
+            >
+              Open Login
+              <ArrowRight className="h-4 w-4" />
+            </button>
+          </div>
+        </section>
+      </main>
+
+      <footer className="relative z-10 border-t border-white/10 bg-[#06090e]">
+        <div className="max-w-7xl mx-auto px-6 py-10 text-center text-slate-400 text-sm">
+          <div className="flex items-center justify-center gap-2 text-white font-black text-xl">
+            <TrendingUp className="h-5 w-5 text-cyan-300" />
+            StockAI Pro
+          </div>
+          <p className="mt-4 max-w-2xl mx-auto">
+            Trading involves risk. This landing UI demonstrates product experience and workflow presentation.
+          </p>
+          <p className="mt-4 text-xs text-slate-500">© 2026 StockAI Pro</p>
+        </div>
       </footer>
-      
-      <style dangerouslySetInnerHTML={{ __html: `
-        @keyframes marquee {
-          0% { transform: translateX(0%); }
-          100% { transform: translateX(-100%); }
-        }
-      `}} />
     </div>
   );
-};
-
-export default Landing;
+}

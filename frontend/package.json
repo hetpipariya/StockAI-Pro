@@ -12,19 +12,23 @@
   "dependencies": {
     "@tanstack/react-query": "^5.95.2",
     "@tanstack/react-query-devtools": "^5.95.2",
-    "axios": "^1.6.0",
-    "clsx": "^2.0.0",
+    "axios": "^1.15.0",
+    "clsx": "^2.1.1",
     "cmdk": "^0.2.0",
     "framer-motion": "^11.0.0",
+    "jwt-decode": "^4.0.0",
     "lightweight-charts": "^4.2.0",
-    "lucide-react": "^0.263.0",
+    "lucide-react": "^0.263.1",
     "prop-types": "^15.8.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-hook-form": "^7.48.0",
     "react-resizable-panels": "^0.0.55",
-    "react-router-dom": "^7.13.1",
-    "zustand": "^4.4.0"
+    "react-router-dom": "^7.14.0",
+    "recharts": "^3.8.1",
+    "tailwind-merge": "^3.5.0",
+    "uuid": "^13.0.0",
+    "zustand": "^4.5.7"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.1",

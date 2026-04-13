@@ -8,11 +8,14 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
+from app.config import SLOW_REQUEST_LOG_MS
 from app.services.bundle_service import get_bundle as get_bundle_data
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["bundle"])
+_SLOW_BUNDLE_MS = max(50, SLOW_REQUEST_LOG_MS)
+
+router = APIRouter(prefix="/api/v1", tags=["bundle"])
 
 
 def _utc_now_iso() -> str:
@@ -146,13 +149,6 @@ async def get_bundle(
     """Single optimized market bundle endpoint."""
     normalized_symbol = symbol.strip().upper()
     started_at = time.perf_counter()
-    logger.debug(
-        "[BUNDLE] request symbol=%s interval=%s limit=%s horizon=%s",
-        normalized_symbol,
-        interval,
-        limit,
-        horizon,
-    )
 
     try:
         payload = await asyncio.wait_for(
@@ -165,14 +161,32 @@ async def get_bundle(
             timeout=8.0,
         )
         normalized_payload = _normalize_bundle_data(normalized_symbol, payload)
-        logger.info(
-            "[BUNDLE] success symbol=%s interval=%s horizon=%s latency_ms=%.2f",
+        latency_ms = (time.perf_counter() - started_at) * 1000.0
+        if latency_ms >= _SLOW_BUNDLE_MS:
+            logger.warning(
+                "[SLOW_BUNDLE] symbol=%s interval=%s horizon=%s status=200 duration_ms=%.1f",
+                normalized_symbol,
+                interval,
+                horizon,
+                latency_ms,
+            )
+        return _success_response(normalized_payload)
+    except KeyError as exc:
+        message = str(exc.args[0]) if exc.args else str(exc)
+        logger.warning(
+            "[BUNDLE] Unknown symbol=%s interval=%s horizon=%s error=%s",
             normalized_symbol,
             interval,
             horizon,
-            (time.perf_counter() - started_at) * 1000.0,
+            message,
         )
-        return _success_response(normalized_payload)
+        return JSONResponse(
+            status_code=404,
+            content=_error_response(
+                code="SYMBOL_NOT_FOUND",
+                message=message,
+            ),
+        )
     except asyncio.TimeoutError:
         logger.warning(
             "[BUNDLE] Timeout symbol=%s interval=%s horizon=%s",

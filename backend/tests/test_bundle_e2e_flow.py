@@ -104,7 +104,7 @@ async def test_bundle_api_e2e_full_flow(client, monkeypatch):
     monkeypatch.setattr("app.routes.bundle.get_bundle_data", _mock_bundle)
 
     # Simulate dashboard load for RELIANCE on 1m timeframe
-    response = await client.get("/api/bundle/RELIANCE?interval=1m&limit=100&horizon=15m")
+    response = await client.get("/api/v1/bundle/RELIANCE?interval=1m&limit=100&horizon=15m")
 
     # Verify response structure
     assert response.status_code == 200
@@ -212,7 +212,7 @@ async def test_bundle_api_missing_data_fallback(client, monkeypatch):
 
     monkeypatch.setattr("app.routes.bundle.get_bundle_data", _mock_partial_bundle)
 
-    response = await client.get("/api/bundle/TCS?interval=1m&limit=100")
+    response = await client.get("/api/v1/bundle/TCS?interval=1m&limit=100")
     assert response.status_code == 200
 
     body = response.json()
@@ -242,7 +242,7 @@ async def test_bundle_api_handles_timeout_gracefully(client, monkeypatch):
 
     monkeypatch.setattr("app.routes.bundle.get_bundle_data", _mock_timeout)
 
-    response = await client.get("/api/bundle/RELIANCE?interval=1m&horizon=15m")
+    response = await client.get("/api/v1/bundle/RELIANCE?interval=1m&horizon=15m")
 
     assert response.status_code == 504
     body = response.json()
@@ -281,7 +281,7 @@ async def test_bundle_api_parallel_execution(client, monkeypatch):
 
     monkeypatch.setattr("app.routes.bundle.get_bundle_data", _mock_bundle_tracked)
 
-    response = await client.get("/api/bundle/INFY")
+    response = await client.get("/api/v1/bundle/INFY")
     assert response.status_code == 200
 
     payload = response.json()["data"]
@@ -342,7 +342,7 @@ async def test_bundle_api_response_contract_invariants(client, monkeypatch):
 
     monkeypatch.setattr("app.routes.bundle.get_bundle_data", _mock_bundle)
 
-    response = await client.get("/api/bundle/HDFCBANK")
+    response = await client.get("/api/v1/bundle/HDFCBANK")
     assert response.status_code == 200
 
     payload = response.json()["data"]

@@ -1,17 +1,42 @@
 import axios from 'axios';
 
-const rawBaseUrl = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
-const apiBaseUrl = rawBaseUrl.endsWith('/api') ? rawBaseUrl : `${rawBaseUrl}/api`;
+const rawBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+const apiBaseUrl = !rawBaseUrl
+  ? '/api/v1'
+  : rawBaseUrl.endsWith('/api/v1')
+    ? rawBaseUrl
+    : rawBaseUrl.endsWith('/api')
+      ? `${rawBaseUrl}/v1`
+      : `${rawBaseUrl}/api/v1`;
 
 const api = axios.create({
   baseURL: apiBaseUrl,
   timeout: 10000,
 });
 
+api.interceptors.request.use((config) => {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+  if (token) {
+    config.headers = {
+      ...config.headers,
+      Authorization: config.headers?.Authorization || `Bearer ${token}`,
+    };
+  }
+  return config;
+});
+
+const toNumber = (value, fallback = 0) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
 const unwrapPayload = (payload) => {
   if (!payload || typeof payload !== 'object') return payload;
   if (payload.success === true && payload.data !== undefined) return payload.data;
   if (payload.status === 'success' && payload.data !== undefined) return payload.data;
+  if (payload.status === 'ok' && payload.data !== undefined) return payload.data;
+  if (payload.result !== undefined) return payload.result;
+  if (payload.bundle !== undefined) return payload.bundle;
   if (payload.data !== undefined) return payload.data;
   return payload;
 };
@@ -109,25 +134,78 @@ const createEmptyBundle = (symbol) => ({
   },
 });
 
+const normalizePrediction = (symbol, payload = {}, fallbackPrice = 0) => {
+  if (!payload || typeof payload !== 'object') {
+    return {
+      symbol,
+      signal: 'HOLD',
+      confidence: 0,
+      confidence_pct: 0,
+      prediction: fallbackPrice,
+      target: fallbackPrice,
+      stop_loss: fallbackPrice,
+      reasoning: 'Prediction unavailable',
+    };
+  }
+
+  const confidenceRaw = toNumber(payload.confidence ?? payload.confidence_pct, 0);
+  const confidence = confidenceRaw > 1 ? confidenceRaw / 100 : confidenceRaw;
+
+  return {
+    symbol,
+    signal: String(payload.signal || payload.type || 'HOLD').toUpperCase(),
+    confidence,
+    confidence_pct: Math.round(confidence * 100),
+    prediction: toNumber(payload.prediction ?? payload.price, fallbackPrice),
+    target: toNumber(payload.target ?? payload.target_price, fallbackPrice),
+    stop_loss: toNumber(payload.stop_loss ?? payload.stopLoss, fallbackPrice),
+    reasoning: String(payload.reasoning || payload.reason || payload.explanation || 'Prediction unavailable'),
+    timestamp: payload.timestamp,
+  };
+};
+
 const normalizeBundlePayload = (symbol, payload) => {
   const defaults = createEmptyBundle(symbol);
   if (!payload || typeof payload !== 'object') return defaults;
+
+  const flatCandles = Array.isArray(payload?.candles) ? payload.candles : [];
+  const historyPayload = payload?.history && typeof payload.history === 'object' ? payload.history : {};
+  const historyCandles = Array.isArray(historyPayload?.candles)
+    ? historyPayload.candles
+    : (Array.isArray(historyPayload?.data) ? historyPayload.data : flatCandles);
+
+  const topLevelPrice = toNumber(payload?.latest_price ?? payload?.price, NaN);
+  const snapshotPayload = payload?.snapshot && typeof payload.snapshot === 'object' ? payload.snapshot : {};
+  const snapshotPrice = toNumber(snapshotPayload?.ltp ?? snapshotPayload?.price, NaN);
+  const resolvedPrice = Number.isFinite(snapshotPrice)
+    ? snapshotPrice
+    : (Number.isFinite(topLevelPrice) ? topLevelPrice : 0);
+
+  const predictionPayload = payload?.prediction && typeof payload.prediction === 'object'
+    ? payload.prediction
+    : (payload?.signal && typeof payload.signal === 'object' ? payload.signal : {});
+  const normalizedPrediction = normalizePrediction(symbol, predictionPayload, resolvedPrice);
 
   return {
     ...defaults,
     ...payload,
     history: {
       ...defaults.history,
-      ...(payload.history && typeof payload.history === 'object' ? payload.history : {}),
-      candles: Array.isArray(payload?.history?.candles) ? payload.history.candles : [],
+      ...historyPayload,
+      candles: historyCandles,
+      count: Array.isArray(historyCandles)
+        ? historyCandles.length
+        : toNumber(historyPayload?.count, 0),
     },
     snapshot: {
       ...defaults.snapshot,
-      ...(payload.snapshot && typeof payload.snapshot === 'object' ? payload.snapshot : {}),
+      ...snapshotPayload,
+      ltp: resolvedPrice,
+      price: resolvedPrice,
     },
     prediction: {
       ...defaults.prediction,
-      ...(payload.prediction && typeof payload.prediction === 'object' ? payload.prediction : {}),
+      ...normalizedPrediction,
     },
     indicators: {
       ...defaults.indicators,
@@ -140,23 +218,47 @@ export const getBundle = async (symbol, options = {}) => {
   const normalizedSymbol = String(symbol || '').trim().toUpperCase();
   if (!normalizedSymbol) throw new Error('Symbol is required');
 
-  const response = await api.get(`/bundle/${encodeURIComponent(normalizedSymbol)}`, {
-    params: {
-      interval: options.interval || '1m',
-      limit: options.limit || 150,
-      horizon: options.horizon || '15m',
-    },
-  });
+  try {
+    const response = await api.get(`/bundle/${encodeURIComponent(normalizedSymbol)}`, {
+      params: {
+        interval: options.interval || '1m',
+        limit: options.limit || 100,
+        horizon: options.horizon || '15m',
+      },
+    });
 
-  const raw = unwrapPayload(response.data);
-  return normalizeBundlePayload(normalizedSymbol, raw);
+    const raw = unwrapPayload(response.data);
+    const normalized = normalizeBundlePayload(normalizedSymbol, raw);
+
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.log('Bundle response:', {
+        symbol: normalizedSymbol,
+        raw: response.data,
+        normalized,
+      });
+    }
+
+    return normalized;
+  } catch (error) {
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.error('Bundle request failed:', {
+        symbol: normalizedSymbol,
+        error: error?.message,
+        status: error?.response?.status,
+        data: error?.response?.data,
+      });
+    }
+    throw error;
+  }
 };
 
 export const fetchStockBundle = async (symbol, options = {}) => {
   return getBundle(symbol, options);
 };
 
-export const fetchMarketSymbols = async (limit = 100) => {
+export const fetchMarketSymbols = async (limit = 500) => {
   const response = await api.get('/market/symbols', {
     params: { limit: Math.max(1, Math.min(Number(limit) || 100, 500)) },
   });
@@ -164,14 +266,14 @@ export const fetchMarketSymbols = async (limit = 100) => {
   return normalizeSymbolList(response.data);
 };
 
-export const searchMarketSymbols = async (query, limit = 25) => {
+export const searchMarketSymbols = async (query, limit = 100) => {
   const q = String(query || '').trim();
   if (!q) return [];
 
   const response = await api.get('/symbols/search', {
     params: {
       q,
-      limit: Math.max(1, Math.min(Number(limit) || 25, 100)),
+      limit: Math.max(1, Math.min(Number(limit) || 100, 100)),
     },
   });
 

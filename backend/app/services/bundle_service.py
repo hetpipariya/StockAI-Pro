@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -10,22 +11,22 @@ import numpy as np
 import pandas as pd
 
 from app import config
-from app.connectors import SmartAPIConnector, get_symbol_token, get_tradingsymbol
+from app.connectors.smartapi_connector import SmartAPIConnector
 from app.inference.runner import PredictionResult, predict_symbol
 from app.services.candle_store import get_candles, get_last_candle, store_candles
-from app.services.db import PredictionModel, async_session
+from app.services.db import PredictionModel, async_session, is_transient_db_error
 from app.services.indicators import IndicatorEngine
-from app.services.instrument_master import get_token
 from app.services.market_state import get_market_status as _raw_market_status
+from app.services.realtime_data_service import LiveMarketDataService
 from app.services.redis_client import get_cache, set_cache
 
 logger = logging.getLogger(__name__)
 
 # Bundle-specific cache profile for low-latency UI refreshes.
-HISTORY_CACHE_TTL_SECONDS = 5
-SNAPSHOT_CACHE_TTL_SECONDS = 5
-PREDICTION_CACHE_TTL_SECONDS = 5
-BUNDLE_CACHE_TTL_SECONDS = 5
+HISTORY_CACHE_TTL_SECONDS = max(3, min(config.CACHE_TTL_CANDLES_SECONDS, 5))
+SNAPSHOT_CACHE_TTL_SECONDS = 1
+PREDICTION_CACHE_TTL_SECONDS = max(3, min(config.CACHE_TTL_PREDICTION_SECONDS, 5))
+BUNDLE_CACHE_TTL_SECONDS = max(3, min(config.CACHE_TTL_BUNDLE_SECONDS, 5))
 
 # Guardrails for low-latency bundle responses under partial outages.
 DB_READ_TIMEOUT_SECONDS = 0.12
@@ -35,6 +36,15 @@ PREDICTION_TIMEOUT_SECONDS = 1.0
 CONNECTOR_COOLDOWN_SECONDS = 60.0
 MIN_CANDLES_FOR_FEATURES = 50
 MIN_CANDLES_FOR_BUNDLE = 100
+PREWARM_TIMEOUT_SECONDS = 6.0
+DEFAULT_PREWARM_SYMBOLS = tuple(
+    symbol.strip().upper()
+    for symbol in os.getenv(
+        "BUNDLE_PREWARM_SYMBOLS",
+        "RELIANCE,TCS,INFY,HDFCBANK,ICICIBANK,SBIN",
+    ).split(",")
+    if symbol.strip()
+)
 
 YF_INTERVAL_MAP = {
     "1m": "1m",
@@ -67,6 +77,18 @@ YF_INDEX_SYMBOLS = {
 # Connector singleton.
 _connector: SmartAPIConnector | None = None
 _connector_blocked_until: float = 0.0
+_live_market_data_service: LiveMarketDataService | None = None
+_bundle_log_last_emitted: dict[str, float] = {}
+_BUNDLE_LOG_THROTTLE_SECONDS = 30.0
+
+
+def _should_emit_bundle_log(key: str) -> bool:
+    now = time.monotonic()
+    last = _bundle_log_last_emitted.get(key, 0.0)
+    if now - last >= _BUNDLE_LOG_THROTTLE_SECONDS:
+        _bundle_log_last_emitted[key] = now
+        return True
+    return False
 
 
 def _bundle_cache_key(symbol: str, interval: str, limit: int, horizon: str) -> str:
@@ -134,13 +156,13 @@ def _is_valid_candle(candle: dict[str, Any]) -> bool:
 
     o = _to_float(candle.get("open"), -1.0)
     h = _to_float(candle.get("high"), -1.0)
-    l = _to_float(candle.get("low"), -1.0)
+    low_price = _to_float(candle.get("low"), -1.0)
     c = _to_float(candle.get("close"), -1.0)
     v = _to_float(candle.get("volume", 0.0), -1.0)
 
-    if o <= 0 or h <= 0 or l <= 0 or c <= 0:
+    if o <= 0 or h <= 0 or low_price <= 0 or c <= 0:
         return False
-    if h < l:
+    if h < low_price:
         return False
     if v < 0:
         return False
@@ -178,15 +200,48 @@ async def _with_timeout(
     timeout_seconds: float,
     default: Any,
     context: str,
+    *,
+    cancel_on_timeout: bool = True,
 ) -> Any:
     """Run awaited work with a strict timeout and deterministic fallback."""
+    task = asyncio.ensure_future(coro)
+    wait_target = task if cancel_on_timeout else asyncio.shield(task)
+
     try:
-        return await asyncio.wait_for(coro, timeout=timeout_seconds)
+        return await asyncio.wait_for(wait_target, timeout=timeout_seconds)
     except asyncio.TimeoutError:
-        logger.warning("[BUNDLE] Timeout in %s after %.2fs", context, timeout_seconds)
+        is_expected_data_timeout = context.startswith(("db_", "yf_"))
+        timeout_logger = logger.info if is_expected_data_timeout else logger.warning
+
+        if _should_emit_bundle_log(f"timeout:{context}"):
+            timeout_logger("[BUNDLE] Timeout in %s after %.2fs", context, timeout_seconds)
+        else:
+            logger.debug("[BUNDLE] Timeout in %s after %.2fs", context, timeout_seconds)
+
+        if cancel_on_timeout:
+            if not task.done():
+                task.cancel()
+        elif not task.done():
+            def _consume_late_result(done_task: asyncio.Future[Any]) -> None:
+                try:
+                    done_task.result()
+                except BaseException as late_exc:
+                    logger.debug(
+                        "[BUNDLE] Late completion error in %s: %s",
+                        context,
+                        late_exc,
+                    )
+
+            task.add_done_callback(_consume_late_result)
+
         return default
     except Exception as exc:
-        logger.warning("[BUNDLE] %s failed: %s", context, exc)
+        if not task.done():
+            task.cancel()
+        if _should_emit_bundle_log(f"error:{context}"):
+            logger.warning("[BUNDLE] %s failed: %s", context, exc)
+        else:
+            logger.debug("[BUNDLE] %s failed: %s", context, exc)
         return default
 
 
@@ -517,8 +572,19 @@ def _normalize_prediction(symbol: str, prediction: PredictionResult, ltp: float)
 
     confidence = _normalize_confidence_score(prediction.confidence)
     confidence_pct = int(round(confidence * 100))
-    if confidence < 0.6:
+    execution_threshold = float(
+        np.clip(
+            _to_float(os.getenv("MIN_EXECUTION_CONFIDENCE", "0.55"), 0.55),
+            0.45,
+            0.75,
+        )
+    )
+    confidence_gate_reason = ""
+    if signal != "HOLD" and confidence < execution_threshold:
         signal = "HOLD"
+        confidence_gate_reason = (
+            f"Confidence below execution threshold ({execution_threshold:.2f})"
+        )
 
     target = _to_float(prediction.target, 0.0)
     stop_loss = _to_float(prediction.stop, 0.0)
@@ -533,6 +599,11 @@ def _normalize_prediction(symbol: str, prediction: PredictionResult, ltp: float)
         stop_loss = round(ltp * 0.996, 2) if ltp > 0 else 0.0
 
     reasoning = prediction.reason or prediction.explanation or "Technical analysis"
+    if confidence_gate_reason:
+        if reasoning:
+            reasoning = f"{reasoning} | {confidence_gate_reason}"
+        else:
+            reasoning = confidence_gate_reason
 
     return {
         "symbol": symbol,
@@ -640,22 +711,47 @@ async def _save_prediction_record(
     if not async_session:
         return
 
-    try:
-        async with async_session() as session:
-            record = PredictionModel(
-                symbol=symbol,
-                horizon=horizon,
-                predicted_price=_to_float(prediction.get("prediction", 0.0), 0.0),
-                signal=str(prediction.get("signal", "HOLD")),
-                confidence=_to_int(prediction.get("confidence_pct", 0), 0),
-                stop_loss=_to_float(prediction.get("stop_loss", 0.0), 0.0),
-                target=_to_float(prediction.get("target", 0.0), 0.0),
-                explanation=str(prediction.get("reasoning", "")),
+    max_attempts = max(1, int(config.DB_MAX_RETRIES))
+    base_delay = max(0.05, float(config.DB_RETRY_BASE_DELAY_SECONDS))
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with async_session() as session:
+                record = PredictionModel(
+                    symbol=symbol,
+                    horizon=horizon,
+                    predicted_price=_to_float(prediction.get("prediction", 0.0), 0.0),
+                    signal=str(prediction.get("signal", "HOLD")),
+                    confidence=_to_int(prediction.get("confidence_pct", 0), 0),
+                    stop_loss=_to_float(prediction.get("stop_loss", 0.0), 0.0),
+                    target=_to_float(prediction.get("target", 0.0), 0.0),
+                    explanation=str(prediction.get("reasoning", "")),
+                )
+                session.add(record)
+                await session.commit()
+            return
+        except Exception as exc:
+            transient = is_transient_db_error(exc)
+            if transient and attempt < max_attempts:
+                wait_seconds = base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "[BUNDLE] Transient prediction-write failure for %s (attempt %d/%d): %s. Retrying in %.2fs",
+                    symbol,
+                    attempt,
+                    max_attempts,
+                    exc,
+                    wait_seconds,
+                )
+                await asyncio.sleep(wait_seconds)
+                continue
+
+            logger.warning(
+                "[BUNDLE] Failed to persist prediction for %s after %d attempt(s): %s",
+                symbol,
+                attempt,
+                exc,
             )
-            session.add(record)
-            await session.commit()
-    except Exception as exc:
-        logger.warning("[BUNDLE] Failed to persist prediction for %s: %s", symbol, exc)
+            return
 
 
 def _get_connector() -> SmartAPIConnector:
@@ -677,17 +773,20 @@ def _get_connector() -> SmartAPIConnector:
     return _connector
 
 
-async def _fetch_snapshot(symbol: str) -> dict[str, Any]:
-    token = get_token(symbol) or get_symbol_token(symbol)
-    tradingsymbol = get_tradingsymbol(symbol)
-    connector = await asyncio.to_thread(_get_connector)
+def _get_live_market_data_service() -> LiveMarketDataService:
+    global _live_market_data_service
 
-    data = await asyncio.to_thread(
-        connector.get_ltp,
-        token,
-        config.SMARTAPI_EXCHANGE,
-        tradingsymbol,
-    )
+    if _live_market_data_service is None:
+        _live_market_data_service = LiveMarketDataService(
+            connector_provider=_get_connector,
+            exchange=config.SMARTAPI_EXCHANGE,
+        )
+    return _live_market_data_service
+
+
+async def _fetch_snapshot(symbol: str) -> dict[str, Any]:
+    live_data_service = _get_live_market_data_service()
+    data = await live_data_service.fetch_snapshot(symbol)
     if not data:
         raise ValueError(f"LTP not available for {symbol}")
 
@@ -711,6 +810,7 @@ async def _db_snapshot(symbol: str) -> dict[str, Any] | None:
         DB_READ_TIMEOUT_SECONDS,
         None,
         f"db_snapshot_1m:{symbol}",
+        cancel_on_timeout=False,
     )
     if not candle:
         candle = await _with_timeout(
@@ -718,6 +818,7 @@ async def _db_snapshot(symbol: str) -> dict[str, Any] | None:
             DB_READ_TIMEOUT_SECONDS,
             None,
             f"db_snapshot_1d:{symbol}",
+            cancel_on_timeout=False,
         )
     if not candle:
         return None
@@ -760,8 +861,9 @@ async def get_market_status() -> dict[str, Any]:
     }
 
 
-async def get_snapshot(symbol: str) -> dict[str, Any]:
+async def get_snapshot(symbol: str, allow_live: bool = True) -> dict[str, Any]:
     normalized_symbol = _normalize_symbol(symbol)
+    _get_live_market_data_service().resolve_instrument(normalized_symbol)
     cache_key = f"snap:v3:{normalized_symbol}"
 
     cached = await get_cache(cache_key)
@@ -773,7 +875,7 @@ async def get_snapshot(symbol: str) -> dict[str, Any]:
     db_snapshot = await _db_snapshot(normalized_symbol)
 
     # Prefer live quote during market hours.
-    if market_open:
+    if market_open and allow_live:
         snapshot = await _with_timeout(
             _fetch_snapshot(normalized_symbol),
             SNAPSHOT_LIVE_TIMEOUT_SECONDS,
@@ -785,7 +887,7 @@ async def get_snapshot(symbol: str) -> dict[str, Any]:
         snapshot = db_snapshot
 
     # If DB is empty after-hours, opportunistically try live quote once.
-    if not snapshot and not market_open:
+    if not snapshot and not market_open and allow_live:
         snapshot = await _with_timeout(
             _fetch_snapshot(normalized_symbol),
             SNAPSHOT_LIVE_TIMEOUT_SECONDS,
@@ -805,7 +907,12 @@ async def get_snapshot(symbol: str) -> dict[str, Any]:
     # Final fallback: derive snapshot from the latest available candles.
     if not snapshot:
         history_payload = await _with_timeout(
-            get_history(normalized_symbol, interval="1m", limit=2),
+            get_history(
+                normalized_symbol,
+                interval="1m",
+                limit=2,
+                allow_live=allow_live,
+            ),
             HISTORY_LIVE_TIMEOUT_SECONDS,
             None,
             f"snapshot_history_fallback:{normalized_symbol}",
@@ -831,8 +938,11 @@ async def get_history(
     symbol: str,
     interval: str = "1m",
     limit: int = 100,
+    allow_live: bool = True,
 ) -> dict[str, Any]:
     normalized_symbol = _normalize_symbol(symbol)
+    live_data_service = _get_live_market_data_service()
+    live_data_service.resolve_instrument(normalized_symbol)
     requested_limit = max(1, min(int(limit), 1000))
     cache_key = f"hist:v3:{normalized_symbol}:{interval}:{requested_limit}"
 
@@ -845,6 +955,7 @@ async def get_history(
         DB_READ_TIMEOUT_SECONDS,
         [],
         f"db_candles:{normalized_symbol}:{interval}",
+        cancel_on_timeout=False,
     )
 
     db_is_stale = True
@@ -874,16 +985,8 @@ async def get_history(
 
     should_try_live = len(db_candles) < requested_limit * 0.8 or db_is_stale
     if should_try_live:
-        try:
-            token = get_token(normalized_symbol) or get_symbol_token(normalized_symbol)
-            connector = await _with_timeout(
-                asyncio.to_thread(_get_connector),
-                SNAPSHOT_LIVE_TIMEOUT_SECONDS,
-                None,
-                f"connector_init:{normalized_symbol}",
-            )
-
-            if connector is not None:
+        if allow_live:
+            try:
                 to_dt = datetime.now()
 
                 if interval in {"1m", "3m", "5m", "15m", "30m"}:
@@ -894,10 +997,8 @@ async def get_history(
                     from_dt = to_dt - timedelta(days=365)
 
                 rows = await _with_timeout(
-                    asyncio.to_thread(
-                        connector.fetch_history,
-                        token,
-                        config.SMARTAPI_EXCHANGE,
+                    live_data_service.fetch_history_rows(
+                        normalized_symbol,
                         interval,
                         from_dt,
                         to_dt,
@@ -930,8 +1031,8 @@ async def get_history(
                             }
                             await set_cache(cache_key, payload, ttl=HISTORY_CACHE_TTL_SECONDS)
                             return payload
-        except Exception as exc:
-            logger.warning("[BUNDLE] History fetch failed for %s: %s", normalized_symbol, exc)
+            except Exception as exc:
+                logger.warning("[BUNDLE] History fetch failed for %s: %s", normalized_symbol, exc)
 
         yf_candles = await _with_timeout(
             asyncio.to_thread(
@@ -1088,12 +1189,14 @@ async def get_prediction(
     horizon: str = "15m",
     history: dict[str, Any] | None = None,
     snapshot: dict[str, Any] | None = None,
+    allow_live: bool = True,
 ) -> dict[str, Any]:
     normalized_symbol = _normalize_symbol(symbol)
     resolved_history = history or await get_history(
         normalized_symbol,
         interval="1m",
         limit=200,
+        allow_live=allow_live,
     )
     candles = resolved_history.get("candles") or resolved_history.get("data") or []
 
@@ -1152,14 +1255,19 @@ async def get_prediction(
         try:
             # Refresh broker session only during market hours; model inference itself
             # can still run from cached/yfinance candles off-hours.
-            if bool(_raw_market_status().get("is_open")):
+            if allow_live and bool(_raw_market_status().get("is_open")):
                 await _with_timeout(
                     _refresh_market_session(),
                     SNAPSHOT_LIVE_TIMEOUT_SECONDS,
                     None,
                     f"prediction_refresh:{normalized_symbol}",
                 )
-            refreshed_history = await get_history(normalized_symbol, interval="1m", limit=200)
+            refreshed_history = await get_history(
+                normalized_symbol,
+                interval="1m",
+                limit=200,
+                allow_live=allow_live,
+            )
             candles = refreshed_history.get("candles") or refreshed_history.get("data") or candles
             candles = _sanitize_candles(candles)
             prediction = await _with_timeout(
@@ -1199,6 +1307,7 @@ async def get_bundle(
     interval: str = "1m",
     limit: int = 100,
     horizon: str = "15m",
+    allow_live: bool = True,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     normalized_symbol = _normalize_symbol(symbol)
@@ -1215,9 +1324,16 @@ async def get_bundle(
         return cached_bundle
 
     history_task = asyncio.create_task(
-        get_history(normalized_symbol, interval=interval, limit=limit)
+        get_history(
+            normalized_symbol,
+            interval=interval,
+            limit=limit,
+            allow_live=allow_live,
+        )
     )
-    snapshot_task = asyncio.create_task(get_snapshot(normalized_symbol))
+    snapshot_task = asyncio.create_task(
+        get_snapshot(normalized_symbol, allow_live=allow_live)
+    )
     status_task = asyncio.create_task(get_market_status())
 
     history_payload, snapshot_payload, market_status = await asyncio.gather(
@@ -1267,6 +1383,7 @@ async def get_bundle(
             horizon=horizon,
             history=history_payload,
             snapshot=snapshot_payload,
+            allow_live=allow_live,
         )
     )
 
@@ -1333,3 +1450,77 @@ async def get_bundle(
 
     await set_cache(cache_key, response_payload, ttl=BUNDLE_CACHE_TTL_SECONDS)
     return response_payload
+
+
+async def prewarm_bundle_cache(
+    symbols: list[str] | None = None,
+    interval: str = "1m",
+    limit: int = 120,
+    horizon: str = "15m",
+    allow_live: bool = True,
+) -> dict[str, Any]:
+    """Warm bundle cache in parallel for frequently viewed symbols."""
+    candidates = symbols or list(DEFAULT_PREWARM_SYMBOLS)
+    normalized_candidates = [
+        _normalize_symbol(symbol) for symbol in candidates if _normalize_symbol(symbol)
+    ]
+    normalized_candidates = list(dict.fromkeys(normalized_candidates))
+
+    if not normalized_candidates:
+        return {
+            "requested": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "symbols": [],
+        }
+
+    started_at = time.perf_counter()
+    concurrency = max(1, min(config.BUNDLE_PREWARM_CONCURRENCY, len(normalized_candidates)))
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _prewarm_symbol(symbol: str):
+        async with sem:
+            return await _with_timeout(
+                get_bundle(
+                    symbol=symbol,
+                    interval=interval,
+                    limit=limit,
+                    horizon=horizon,
+                    allow_live=allow_live,
+                ),
+                PREWARM_TIMEOUT_SECONDS,
+                None,
+                f"bundle_prewarm:{symbol}",
+                cancel_on_timeout=False,
+            )
+
+    tasks = [asyncio.create_task(_prewarm_symbol(symbol)) for symbol in normalized_candidates]
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    succeeded = 0
+    failed = 0
+    for item in results:
+        if isinstance(item, Exception):
+            failed += 1
+        elif isinstance(item, dict):
+            succeeded += 1
+        else:
+            failed += 1
+
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+    logger.info(
+        "[BUNDLE] Prewarm complete requested=%d succeeded=%d failed=%d latency_ms=%.2f",
+        len(normalized_candidates),
+        succeeded,
+        failed,
+        elapsed_ms,
+    )
+
+    return {
+        "requested": len(normalized_candidates),
+        "succeeded": succeeded,
+        "failed": failed,
+        "symbols": normalized_candidates,
+        "latency_ms": elapsed_ms,
+    }

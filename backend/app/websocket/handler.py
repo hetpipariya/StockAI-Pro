@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import math
+import threading
 import time
 from datetime import datetime
 from typing import Optional
@@ -14,7 +15,8 @@ from sqlalchemy import select
 from app import config
 from app.connectors import SmartAPIConnector
 from app.services.candle_store import store_candles
-from app.services.instrument_master import get_symbol, get_token
+from app.services.instrument_service import (get_symbol_by_token,
+                                             get_token_by_symbol)
 from app.services.market_state import is_market_open
 from app.services.tick_aggregator import tick_aggregator
 from app.websocket.relay import (broadcast_candle, broadcast_signal,
@@ -44,11 +46,14 @@ _smartapi_ws_started = False
 _ws_connector: Optional[SmartAPIConnector] = None
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 _cached_candle_builder_15m = None
+_cached_candle_builder_5m = None
 _last_live_tick_time = 0.0
 _last_known_prices: dict[str, float] = {}
 _ws_state = "DISCONNECTED"
 _ws_reconnect_attempt = 0
 _ws_reconnect_task = None
+_ws_subscription_lock = threading.Lock()
+_ws_subscribed_symbols: set[str] = set()
 
 _WS_BASE_BACKOFF_SECONDS = 1
 _WS_MAX_BACKOFF_SECONDS = 60
@@ -262,18 +267,28 @@ async def _persist_completed_candle(symbol: str, candle: dict):
         logger.error("[TICK] Failed to persist candle: %s", exc)
 
 
+async def _persist_completed_5m_candle(symbol: str, candle: dict):
+    try:
+        await store_candles(symbol, "5m", [candle])
+    except Exception as exc:
+        logger.error("[TICK] Failed to persist 5m candle: %s", exc)
+
+
 async def _broadcast_signal_update(symbol: str):
     """Compute and push latest prediction for a symbol after candle close."""
     try:
         from app.services.bundle_service import get_history, get_prediction, get_snapshot
 
-        history = await get_history(symbol=symbol, interval="1m", limit=200)
-        snapshot = await get_snapshot(symbol=symbol)
+        # Signal updates run after local candle completion, so prefer cache/DB paths
+        # to avoid broker auth storms when SmartAPI credentials are stale.
+        history = await get_history(symbol=symbol, interval="1m", limit=200, allow_live=False)
+        snapshot = await get_snapshot(symbol=symbol, allow_live=False)
         prediction = await get_prediction(
             symbol=symbol,
             horizon="15m",
             history=history,
             snapshot=snapshot,
+            allow_live=False,
         )
 
         payload = {
@@ -296,9 +311,139 @@ async def _run_live_executor(symbol: str):
     )
 
 
+def _get_auto_execution_contexts() -> list[dict]:
+    """Resolve user contexts for feed-triggered 5m execution."""
+    contexts: list[dict] = []
+    seen: set[int] = set()
+
+    try:
+        from app.trading.user_state import trading_manager
+
+        for summary in trading_manager.get_all_summaries():
+            raw_user_id = summary.get("user_id")
+            if raw_user_id is None:
+                continue
+            user_id = int(raw_user_id)
+            if user_id in seen:
+                continue
+            seen.add(user_id)
+
+            contexts.append(
+                {
+                    "user_id": user_id,
+                    "mode": str(summary.get("mode", config.TRADING_MODE)).upper(),
+                    "capital": float(
+                        summary.get("starting_capital", config.STARTING_CAPITAL)
+                    ),
+                }
+            )
+    except Exception as exc:
+        logger.warning("[EXECUTOR-5M] Failed reading in-memory user contexts: %s", exc)
+
+    if not config.LIVE_5M_EXECUTE_ALL_ACTIVE_USERS:
+        return contexts
+
+    try:
+        from app.services.db import UserModel, get_sync_db_session
+
+        db_gen = get_sync_db_session()
+        session = next(db_gen)
+        if session is None:
+            return contexts
+
+        try:
+            rows = (
+                session.query(
+                    UserModel.id,
+                    UserModel.trading_mode,
+                    UserModel.starting_capital,
+                )
+                .filter(UserModel.is_active.is_(True))
+                .all()
+            )
+            for user_id, trading_mode, starting_capital in rows:
+                uid = int(user_id)
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                contexts.append(
+                    {
+                        "user_id": uid,
+                        "mode": str(trading_mode or config.TRADING_MODE).upper(),
+                        "capital": float(starting_capital or config.STARTING_CAPITAL),
+                    }
+                )
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("[EXECUTOR-5M] Failed loading DB user contexts: %s", exc)
+
+    return contexts
+
+
+async def _run_live_executor_5m(symbol: str, completed_candle: dict):
+    if not config.LIVE_5M_AUTO_EXECUTION_ENABLED:
+        return
+
+    contexts = await asyncio.to_thread(_get_auto_execution_contexts)
+    if not contexts:
+        logger.debug("[EXECUTOR-5M] No eligible users for feed-triggered execution")
+        return
+
+    from app.trading.live_executor_5m import get_executor_5m
+    from app.trading.trade_logger import log_trade
+
+    for ctx in contexts:
+        user_id = int(ctx["user_id"])
+        mode = str(ctx["mode"]).upper()
+        capital = float(ctx["capital"])
+
+        try:
+            executor = await asyncio.to_thread(
+                get_executor_5m,
+                user_id,
+                mode,
+                capital,
+            )
+            result = await asyncio.to_thread(
+                executor.on_candle_complete,
+                symbol,
+                completed_candle,
+                user_id,
+            )
+
+            if result:
+                logger.info(
+                    "[EXECUTOR-5M] user_id=%s symbol=%s action=%s status=%s",
+                    user_id,
+                    symbol,
+                    result.get("action"),
+                    result.get("status"),
+                )
+        except Exception as exc:
+            logger.exception(
+                "[EXECUTOR-5M] user_id=%s symbol=%s execution failed: %s",
+                user_id,
+                symbol,
+                exc,
+            )
+            await asyncio.to_thread(
+                log_trade,
+                "FAILED",
+                f"AUTO5M-{symbol}",
+                symbol,
+                "NA",
+                mode=mode,
+                status="FAILED",
+                reason="5m auto-execution runtime error",
+                error=str(exc),
+                user_id=user_id,
+            )
+
+
 def _on_smartapi_tick(msg):
     """SmartAPI websocket callback running on connector thread."""
-    global _cached_candle_builder_15m, _last_live_tick_time
+    global _cached_candle_builder_15m, _cached_candle_builder_5m, _last_live_tick_time
 
     _last_live_tick_time = time.time()
 
@@ -307,8 +452,9 @@ def _on_smartapi_tick(msg):
             return
 
         token = str(msg.get("token", msg.get("symboltoken", "")))
-        symbol = get_symbol(token)
-        if not symbol:
+        try:
+            symbol = get_symbol_by_token(token, exchange=config.SMARTAPI_EXCHANGE)
+        except KeyError:
             symbol = str(msg.get("tradingsymbol", token)).replace("-EQ", "")
 
         raw_ltp = float(
@@ -341,10 +487,13 @@ def _on_smartapi_tick(msg):
 
         completed_candle = tick_aggregator.process_tick(symbol, ltp, vol)
 
-        if _cached_candle_builder_15m is None:
-            from app.trading.candle_builder import candle_builder_15m
+        if _cached_candle_builder_15m is None or _cached_candle_builder_5m is None:
+            from app.trading.candle_builder import candle_builder_15m, candle_builder_5m
 
             _cached_candle_builder_15m = candle_builder_15m
+            _cached_candle_builder_5m = candle_builder_5m
+
+        completed_5m = _cached_candle_builder_5m.process_tick(symbol, ltp, vol)
         completed_15m = _cached_candle_builder_15m.process_tick(symbol, ltp, vol)
 
         tick_data = {
@@ -361,6 +510,11 @@ def _on_smartapi_tick(msg):
             _schedule_async(_persist_completed_candle(symbol, completed_candle))
             _schedule_async(_broadcast_signal_update(symbol))
 
+        if completed_5m:
+            _schedule_async(broadcast_candle(symbol, completed_5m))
+            _schedule_async(_persist_completed_5m_candle(symbol, completed_5m))
+            _schedule_async(_run_live_executor_5m(symbol, completed_5m))
+
         if completed_15m:
             _schedule_async(_run_live_executor(symbol))
 
@@ -372,29 +526,52 @@ def start_smartapi_ws(symbols_list: list[str]):
     """Start SmartAPI websocket subscription for requested symbols."""
     global _smartapi_ws_started, _ws_reconnect_attempt
 
-    if _smartapi_ws_started:
-        return
+    normalized_symbols: list[str] = []
+    for symbol in symbols_list:
+        normalized = str(symbol or "").strip().upper()
+        if normalized and normalized not in normalized_symbols:
+            normalized_symbols.append(normalized)
 
-    _set_ws_state("CONNECTING")
+    if not normalized_symbols:
+        logger.warning("[WS] Empty symbol list received for subscription")
+        return
 
     connector = get_or_create_ws_connector()
 
     tokens: list[str] = []
-    for symbol in symbols_list:
-        token = get_token(symbol)
-        if token:
-            tokens.append(token)
-        else:
-            logger.warning("[WS] Cannot resolve token for %s", symbol)
+    with _ws_subscription_lock:
+        for symbol in normalized_symbols:
+            if _smartapi_ws_started and symbol in _ws_subscribed_symbols:
+                continue
+
+            try:
+                token = get_token_by_symbol(symbol, exchange=config.SMARTAPI_EXCHANGE)
+                tokens.append(token)
+                _ws_subscribed_symbols.add(symbol)
+            except KeyError as exc:
+                logger.warning("[WS] %s", exc)
 
     if not tokens:
+        if _smartapi_ws_started:
+            logger.debug("[WS] No new tokens to subscribe")
+            return
         logger.warning("[WS] No valid tokens to subscribe")
         _set_ws_state("FAILED")
         return
 
+    if _smartapi_ws_started:
+        if connector.subscribe_ws_tokens(tokens):
+            logger.info("[WS] Added %d tokens to active stream", len(tokens))
+            return
+        logger.warning("[WS] Incremental subscribe failed; scheduling reconnect")
+        _set_ws_state("RECONNECTING")
+        _schedule_reconnect(sorted(_ws_subscribed_symbols) or normalized_symbols)
+        return
+
+    _set_ws_state("CONNECTING")
+
     token_list = [{"exchangeType": 1, "tokens": tokens}]
     try:
-        connector.login()
         connector.start_ws(token_list, _on_smartapi_tick)
         _smartapi_ws_started = True
         _ws_reconnect_attempt = 0
@@ -404,7 +581,7 @@ def start_smartapi_ws(symbols_list: list[str]):
         _smartapi_ws_started = False
         _set_ws_state("RECONNECTING")
         logger.error("[WS] Failed to start SmartAPI WebSocket: %s", exc)
-        _schedule_reconnect(symbols_list)
+        _schedule_reconnect(sorted(_ws_subscribed_symbols) or normalized_symbols)
 
 
 async def _retry_ws_connect(symbols_list: list[str]):
@@ -477,7 +654,42 @@ async def auto_start_ws():
         "RECONNECTING",
     }:
         logger.info("[SCHEDULER] Auto-starting WebSocket")
-        start_smartapi_ws(DEFAULT_WATCHLIST)
+        symbols = sorted(_ws_subscribed_symbols) or DEFAULT_WATCHLIST
+        start_smartapi_ws(symbols)
+
+
+async def _resolve_websocket_user_id(token: str) -> int | None:
+    from app.services.db import AsyncSessionLocal, UserModel, is_transient_db_error
+    from app.utils.auth_utils import decode_access_token
+
+    payload = decode_access_token(token)
+    user_id = int(payload["sub"])
+
+    auth_timeout = max(0.5, float(config.WS_AUTH_DB_TIMEOUT_SECONDS))
+    max_attempts = max(1, min(config.DB_MAX_RETRIES, 3))
+    base_delay = max(0.05, float(config.DB_RETRY_BASE_DELAY_SECONDS))
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await asyncio.wait_for(
+                    session.execute(
+                        select(UserModel.id)
+                        .where(UserModel.id == user_id, UserModel.is_active.is_(True))
+                        .limit(1)
+                    ),
+                    timeout=auth_timeout,
+                )
+                resolved_id = result.scalar_one_or_none()
+                return int(resolved_id) if resolved_id is not None else None
+        except Exception as exc:
+            transient = is_transient_db_error(exc)
+            if transient and attempt < max_attempts:
+                await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+                continue
+            raise
+
+    return None
 
 
 async def websocket_live(
@@ -492,24 +704,10 @@ async def websocket_live(
         return
 
     try:
-        from app.services.db import AsyncSessionLocal, UserModel
-        from app.utils.auth_utils import decode_access_token
-
-        payload = decode_access_token(token)
-        user_id = int(payload["sub"])
-
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(UserModel).where(
-                    UserModel.id == user_id, UserModel.is_active
-                )
-            )
-            user = result.scalars().first()
-
-        if not user:
+        user_id = await _resolve_websocket_user_id(token)
+        if user_id is None:
             await websocket.close(code=4003, reason="User not found")
             return
-
     except Exception as exc:
         await websocket.close(code=4001, reason="Invalid token")
         logger.warning("[WS] Auth failed from %s: %s", client_host, type(exc).__name__)

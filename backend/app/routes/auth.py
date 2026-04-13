@@ -1,11 +1,4 @@
-"""
-Authentication routes — signup, login, me, refresh, logout.
-All passwords hashed with bcrypt (12 rounds). All tokens are JWT HS256.
-
-Token system:
-  - Access token  → 24h, used for API authentication
-  - Refresh token → 7 days, used only at /auth/refresh for token rotation
-"""
+"""Authentication routes for the canonical /api/v1/auth API contract."""
 
 from __future__ import annotations
 
@@ -20,25 +13,45 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from app import config
 from app.services.db import UserModel, get_async_session
-from app.utils.auth_utils import (create_access_token, create_refresh_token,
-                                  decode_access_token, decode_refresh_token,
-                                  hash_password, hash_refresh_token,
-                                  verify_password)
+from app.utils.auth_utils import (
+    create_access_token,
+    create_refresh_token,
+    decode_access_token,
+    decode_refresh_token,
+    hash_password,
+    hash_refresh_token,
+    verify_password,
+)
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/auth", tags=["auth"])
-compat_router = APIRouter(prefix="/api", tags=["auth"])
-v1_router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
+
+router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
+_optional_oauth2 = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token", auto_error=False)
+
+_DUMMY_PASSWORD_HASH = "$2b$12$LJ3m4ys.ehaGPCWQB4z2/.FpFqjKJzMVhasO/5l.VoxTrSSCVIwmW"
+
+_USER_LOOKUP_COLUMNS = (
+    UserModel.id,
+    UserModel.username,
+    UserModel.email,
+    UserModel.is_active,
+    UserModel.is_verified,
+    UserModel.trading_mode,
+    UserModel.starting_capital,
+    UserModel.refresh_token_hash,
+    UserModel.created_at,
+    UserModel.last_login,
+)
+
+_LOGIN_LOOKUP_COLUMNS = _USER_LOOKUP_COLUMNS + (UserModel.password_hash,)
 
 
-# ── Pydantic Schemas ──────────────────────────────────────────────────
-
-
-class SignupRequest(BaseModel):
+class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=8, max_length=128)
     email: Optional[str] = Field(None, max_length=255)
@@ -47,9 +60,7 @@ class SignupRequest(BaseModel):
     @classmethod
     def username_alphanumeric(cls, v: str) -> str:
         if not re.match(r"^[a-zA-Z0-9_]+$", v):
-            raise ValueError(
-                "Username must contain only letters, numbers, and underscores"
-            )
+            raise ValueError("Username must contain only letters, numbers, and underscores")
         return v.lower().strip()
 
     @field_validator("password")
@@ -70,8 +81,6 @@ class SignupRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    """JSON login body — kept for backward compatibility with frontend."""
-
     username: str = Field(..., min_length=1, max_length=100)
     password: str = Field(..., min_length=1)
 
@@ -80,22 +89,26 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
-# ── Dependency: Get Current User ──────────────────────────────────────
-
-
 async def get_current_user(
     token: Annotated[str, Depends(oauth2_scheme)],
     session: AsyncSession = Depends(get_async_session),
 ) -> UserModel:
-    """
-    Dependency injection function.
-    Use as: Depends(get_current_user) on any protected route.
-    Validates JWT, fetches user from DB, returns UserModel.
-    """
     payload = decode_access_token(token)
-    user_id = int(payload["sub"])
 
-    result = await session.execute(select(UserModel).where(UserModel.id == user_id))
+    try:
+        user_id = int(payload["sub"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+    result = await session.execute(
+        select(UserModel)
+        .options(load_only(*_USER_LOOKUP_COLUMNS))
+        .where(UserModel.id == user_id)
+    )
     user = result.scalars().first()
 
     if not user:
@@ -112,16 +125,10 @@ async def get_current_user(
     return user
 
 
-# ── Optional Auth (for endpoints that benefit from user context) ──────
-
-_optional_oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
-
-
 async def get_optional_user(
     token: Optional[str] = Depends(_optional_oauth2),
     session: AsyncSession = Depends(get_async_session),
 ) -> Optional[UserModel]:
-    """Returns user if valid token present, None if no token."""
     if not token:
         return None
     try:
@@ -130,21 +137,34 @@ async def get_optional_user(
         return None
 
 
-# ── POST /api/auth/signup ──────────────────────────────────────────
+async def _issue_tokens_for_user(user: UserModel, session: AsyncSession) -> dict:
+    access_token = create_access_token(user.id, user.username)
+    refresh_token = create_refresh_token(user.id)
+
+    user.refresh_token_hash = hash_refresh_token(refresh_token)
+    user.last_login = datetime.utcnow()
+    await session.commit()
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": config.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "trading_mode": user.trading_mode,
+            "starting_capital": user.starting_capital,
+        },
+    }
 
 
-@router.post("/signup", status_code=status.HTTP_201_CREATED)
-async def signup(
-    data: SignupRequest,
+@router.post("/register", status_code=status.HTTP_201_CREATED)
+async def register(
+    data: RegisterRequest,
     session: AsyncSession = Depends(get_async_session),
 ):
-    """
-    Register a new user.
-    - Validates username/email uniqueness
-    - Hashes password with bcrypt (12 rounds)
-    - Returns access + refresh token pair immediately
-    """
-    # Check username uniqueness
     existing = await session.execute(
         select(UserModel).where(UserModel.username == data.username)
     )
@@ -154,7 +174,6 @@ async def signup(
             detail="Username already taken. Please choose a different one.",
         )
 
-    # Check email uniqueness (if provided)
     if data.email:
         existing_email = await session.execute(
             select(UserModel).where(UserModel.email == data.email)
@@ -165,7 +184,6 @@ async def signup(
                 detail="Email already registered.",
             )
 
-    # Create user with hashed password
     new_user = UserModel(
         username=data.username,
         email=data.email,
@@ -180,44 +198,29 @@ async def signup(
     try:
         await session.commit()
         await session.refresh(new_user)
-    except IntegrityError:
+    except IntegrityError as exc:
         await session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Registration failed due to conflict. Please try again.",
-        )
+        ) from exc
 
-    # Generate token pair
-    access_token = create_access_token(new_user.id, new_user.username)
-    refresh_token = create_refresh_token(new_user.id)
-
-    # Store hashed refresh token
-    new_user.refresh_token_hash = hash_refresh_token(refresh_token)
-    new_user.last_login = datetime.utcnow()
-    await session.commit()
-
-    logger.info(
-        f"[Auth] New user registered: id={new_user.id} username={new_user.username}"
-    )
+    tokens = await _issue_tokens_for_user(new_user, session)
+    logger.info("[AUTH] New user registered id=%s username=%s", new_user.id, new_user.username)
 
     return {
         "status": "ok",
         "message": "Account created successfully",
-        "data": {
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "token_type": "bearer",
-            "expires_in": config.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-            "user": {
-                "id": new_user.id,
-                "username": new_user.username,
-                "email": new_user.email,
-            },
-        },
+        "data": tokens,
     }
 
 
-# ── POST /api/auth/login ──────────────────────────────────────────
+@router.post("/signup", status_code=status.HTTP_201_CREATED, include_in_schema=False)
+async def signup_alias(
+    data: RegisterRequest,
+    session: AsyncSession = Depends(get_async_session),
+):
+    return await register(data, session)
 
 
 @router.post("/login")
@@ -225,23 +228,17 @@ async def login(
     data: LoginRequest,
     session: AsyncSession = Depends(get_async_session),
 ):
-    """
-    Authenticate user with username + password (JSON body).
-    Returns access + refresh token pair.
-    Always uses constant-time comparison (no timing attacks).
-    """
     username = data.username.lower().strip()
 
     result = await session.execute(
-        select(UserModel).where(UserModel.username == username)
+        select(UserModel)
+        .options(load_only(*_LOGIN_LOOKUP_COLUMNS))
+        .where(UserModel.username == username)
     )
     user = result.scalars().first()
 
-    # IMPORTANT: always verify password even if user not found
-    # This prevents timing-based user enumeration attacks
-    dummy_hash = "$2b$12$LJ3m4ys.ehaGPCWQB4z2/.FpFqjKJzMVhasO/5l.VoxTrSSCVIwmW"
     if not user:
-        verify_password(data.password, dummy_hash)  # Constant-time
+        verify_password(data.password, _DUMMY_PASSWORD_HASH)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
@@ -261,97 +258,23 @@ async def login(
             detail="Account is deactivated. Contact support.",
         )
 
-    # Generate fresh token pair
-    access_token = create_access_token(user.id, user.username)
-    refresh_token = create_refresh_token(user.id)
-
-    # Store hashed refresh token (invalidates previous refresh token)
-    user.refresh_token_hash = hash_refresh_token(refresh_token)
-    user.last_login = datetime.utcnow()
-    await session.commit()
-
-    logger.info(f"[Auth] Login: user_id={user.id} username={user.username}")
+    tokens = await _issue_tokens_for_user(user, session)
+    logger.info("[AUTH] Login success user_id=%s username=%s", user.id, user.username)
 
     return {
         "status": "ok",
         "message": "Login successful",
-        "data": {
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "token_type": "bearer",
-            "expires_in": config.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-            "user": {
-                "id": user.id,
-                "username": user.username,
-                "email": user.email,
-                "trading_mode": user.trading_mode,
-                "starting_capital": user.starting_capital,
-            },
-        },
+        "data": tokens,
     }
 
 
 @router.get("/login")
 async def login_help():
-    """Human-friendly response when the login API route is opened in a browser."""
     return {
         "status": "error",
-        "message": "Use POST /api/auth/login with JSON {username, password}.",
-        "hint": "For UI login, open /login on the frontend app (e.g. https://stockai-pro.in/login).",
+        "message": "Use POST /api/v1/auth/login with JSON {username, password}.",
+        "hint": "For UI login, open /login on the frontend app.",
     }
-
-
-@compat_router.post(
-    "/signup", status_code=status.HTTP_201_CREATED, include_in_schema=False
-)
-async def signup_compat(
-    data: SignupRequest,
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Compatibility alias for clients using /api/signup."""
-    return await signup(data, session)
-
-
-@compat_router.post("/login", include_in_schema=False)
-async def login_compat(
-    data: LoginRequest,
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Compatibility alias for clients using /api/login."""
-    return await login(data, session)
-
-
-@compat_router.get("/login", include_in_schema=False)
-async def login_help_compat():
-    """Compatibility alias for browser visits to /api/login."""
-    return await login_help()
-
-
-@v1_router.post("/signup", status_code=status.HTTP_201_CREATED, include_in_schema=False)
-async def signup_v1_compat(
-    data: SignupRequest,
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Compatibility alias for clients using /api/v1/auth/signup."""
-    return await signup(data, session)
-
-
-@v1_router.post("/login", include_in_schema=False)
-async def login_v1_compat(
-    data: LoginRequest,
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Compatibility alias for clients using /api/v1/auth/login."""
-    return await login(data, session)
-
-
-@v1_router.get("/login", include_in_schema=False)
-async def login_help_v1_compat():
-    """Compatibility alias for browser visits to /api/v1/auth/login."""
-    return await login_help()
-
-
-# ── POST /api/auth/login (OAuth2 form-data — for Swagger UI) ──────
 
 
 @router.post("/token")
@@ -359,21 +282,12 @@ async def login_form(
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """
-    OAuth2-compatible login using form-data (username + password fields).
-    Powers the Swagger UI 'Authorize' button. Returns same format as /login.
-    """
-    # Reuse the JSON login logic
     login_req = LoginRequest(username=form_data.username, password=form_data.password)
     return await login(login_req, session)
 
 
-# ── GET /api/auth/me ───────────────────────────────────────────────
-
-
 @router.get("/me")
 async def get_me(current_user: UserModel = Depends(get_current_user)):
-    """Return current authenticated user's profile."""
     return {
         "status": "ok",
         "message": "User profile",
@@ -395,26 +309,20 @@ async def get_me(current_user: UserModel = Depends(get_current_user)):
     }
 
 
-@v1_router.get("/me", include_in_schema=False)
-async def get_me_v1_compat(current_user: UserModel = Depends(get_current_user)):
-    """Compatibility alias for clients using /api/v1/auth/me."""
-    return await get_me(current_user)
-
-
-# ── POST /api/auth/refresh ─────────────────────────────────────────
-
-
 @router.post("/refresh")
 async def refresh_token(
     data: RefreshRequest,
     session: AsyncSession = Depends(get_async_session),
 ):
-    """
-    Exchange a refresh token for a new access + refresh token pair.
-    Implements token rotation — old refresh token is invalidated.
-    """
     payload = decode_refresh_token(data.refresh_token)
-    user_id = int(payload["sub"])
+
+    try:
+        user_id = int(payload["sub"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token payload",
+        ) from exc
 
     result = await session.execute(select(UserModel).where(UserModel.id == user_id))
     user = result.scalars().first()
@@ -425,23 +333,19 @@ async def refresh_token(
             detail="User not found or deactivated",
         )
 
-    # Validate refresh token matches what's stored (prevents token reuse)
     expected_hash = hash_refresh_token(data.refresh_token)
     if user.refresh_token_hash != expected_hash:
-        # Possible token theft — invalidate all tokens
         user.refresh_token_hash = None
         await session.commit()
         logger.warning(
-            f"[Auth] Refresh token mismatch for user_id={user.id} — "
-            "possible token theft. All tokens invalidated."
+            "[AUTH] Refresh token mismatch for user_id=%s; forcing re-login",
+            user.id,
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token has already been used or is invalid. "
-            "Please login again.",
+            detail="Refresh token has already been used or is invalid. Please login again.",
         )
 
-    # Issue fresh token pair (rotation)
     new_access = create_access_token(user.id, user.username)
     new_refresh = create_refresh_token(user.id)
 
@@ -460,44 +364,73 @@ async def refresh_token(
     }
 
 
-@v1_router.post("/refresh", include_in_schema=False)
-async def refresh_token_v1_compat(
-    data: RefreshRequest,
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Compatibility alias for clients using /api/v1/auth/refresh."""
-    return await refresh_token(data, session)
-
-
-# ── POST /api/auth/logout ──────────────────────────────────────────
-
-
 @router.post("/logout")
 async def logout(
     current_user: UserModel = Depends(get_current_user),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """
-    Logout user by invalidating their refresh token.
-    The access token will naturally expire (JWTs can't be server-side revoked).
-    """
     current_user.refresh_token_hash = None
     await session.commit()
 
-    # Remove user's trading state from memory
     from app.trading.user_state import trading_manager
 
     await trading_manager.remove_state(current_user.id)
 
-    logger.info(f"[Auth] Logout: user_id={current_user.id}")
-    return {"status": "ok", "message": "Logged out successfully", "data": None}
+    logger.info("[AUTH] Logout user_id=%s", current_user.id)
+    return {
+        "status": "ok",
+        "message": "Logged out successfully",
+        "data": None,
+    }
 
 
-@v1_router.post("/logout", include_in_schema=False)
-async def logout_v1_compat(
-    current_user: UserModel = Depends(get_current_user),
-    session: AsyncSession = Depends(get_async_session),
-):
-    """Compatibility alias for clients using /api/v1/auth/logout."""
-    return await logout(current_user, session)
+@router.get("/broker-status")
+async def get_broker_status(current_user: UserModel = Depends(get_current_user)):
+    """Get the status of the broker (Angel Broking/SmartAPI) connection.
 
+    Returns information about whether the broker session is active and its age.
+    If broker session is old, the user may need to re-login.
+    """
+    try:
+        from app.connectors.smartapi_connector import SmartAPIConnector
+        connector = SmartAPIConnector()
+
+        is_logged_in = connector.is_logged_in
+        session_age_minutes = connector.session_age_minutes
+
+        # Session is considered stale if > 55 minutes (SmartAPI auth token expires in ~55min)
+        is_stale = session_age_minutes > 55
+
+        status_msg = "connected"
+        if not is_logged_in:
+            status_msg = "disconnected"
+        elif is_stale:
+            status_msg = "stale"
+
+        return {
+            "status": "ok",
+            "data": {
+                "broker": "angel_broking",
+                "connection_status": status_msg,
+                "is_logged_in": is_logged_in,
+                "session_age_minutes": round(session_age_minutes, 1) if session_age_minutes != float("inf") else None,
+                "is_stale": is_stale,
+                "message": (
+                    "Broker session is stale. Please initiate a new session to continue trading."
+                    if is_stale else
+                    "Broker connection is healthy"
+                    if is_logged_in else
+                    "Not connected to broker. Login required."
+                ),
+            },
+        }
+    except Exception as e:
+        logger.error("[AUTH] Broker status check failed: %s", e)
+        return {
+            "status": "error",
+            "data": {
+                "broker": "angel_broking",
+                "connection_status": "error",
+                "message": f"Could not check broker status: {str(e)[:100]}"
+            },
+        }

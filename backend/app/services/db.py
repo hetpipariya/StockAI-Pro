@@ -7,20 +7,29 @@ All trading tables enforce user_id isolation via foreign keys.
 import asyncio
 import logging
 import time
-import warnings
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
 
 from sqlalchemy import (Boolean, DateTime, Float, ForeignKey, Index, Integer,
                         String, Text, UniqueConstraint, create_engine, event,
                         text)
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.exc import DBAPIError, OperationalError
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
+                                    create_async_engine)
 from sqlalchemy.orm import (Mapped, declarative_base, mapped_column,
                             relationship, sessionmaker)
 from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from app.config import APP_ENV
 from app.config import DATABASE_URL as CONFIG_DATABASE_URL
-from app.config import DB_SLOW_QUERY_MS, REQUIRE_POSTGRES
+from app.config import (DB_COMMAND_TIMEOUT_SECONDS, DB_LOCK_TIMEOUT_MS,
+                        DB_LOG_SLOW_QUERIES, DB_MAX_OVERFLOW,
+                        DB_POOL_RECYCLE_SECONDS, DB_POOL_SIZE,
+                        DB_POOL_TIMEOUT_SECONDS, DB_SLOW_QUERY_MS,
+                        DB_STATEMENT_TIMEOUT_MS, REQUIRE_POSTGRES,
+                        RESET_SQLITE_ON_START, SQLALCHEMY_ECHO)
 
 logger = logging.getLogger(__name__)
 
@@ -95,17 +104,52 @@ class CandleModel(Base):
     __table_args__ = (
         UniqueConstraint("symbol", "timeframe", "timestamp", name="uq_candle"),
         Index("ix_candle_lookup", "symbol", "timeframe", "timestamp"),
+        Index("ix_candle_timeframe", "timeframe"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(String(20), index=True)
-    timeframe: Mapped[str] = mapped_column(String(10))
+    timeframe: Mapped[str] = mapped_column(String(10), index=True)
     open: Mapped[float] = mapped_column(Float)
     high: Mapped[float] = mapped_column(Float)
     low: Mapped[float] = mapped_column(Float)
     close: Mapped[float] = mapped_column(Float)
     volume: Mapped[int] = mapped_column(Integer, default=0)
     timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
+class InstrumentModel(Base):
+    """Instrument token master for symbol/token resolution across exchanges."""
+
+    __tablename__ = "instruments"
+    __table_args__ = (
+        UniqueConstraint("exchange", "symbol", name="uq_instruments_exchange_symbol"),
+        UniqueConstraint("exchange", "token", name="uq_instruments_exchange_token"),
+        Index("ix_instruments_exchange_symbol", "exchange", "symbol"),
+        Index("ix_instruments_exchange_token", "exchange", "token"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(80), nullable=False)
+    token: Mapped[str] = mapped_column(String(40), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(12), nullable=False)
+    tradingsymbol: Mapped[str] = mapped_column(String(120), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    instrument_type: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    expiry: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    strike: Mapped[float] = mapped_column(Float, nullable=True)
+    lot_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    tick_size: Mapped[float] = mapped_column(Float, nullable=True)
+    isin: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
 
 
 class OrderModel(Base):
@@ -304,6 +348,10 @@ if not _db_url:
 DATABASE_URL = _db_url
 _is_postgres = "postgresql" in _db_url or "postgres" in _db_url
 _is_sqlite = _db_url.startswith("sqlite")
+_pool_size = max(5, DB_POOL_SIZE)
+_max_overflow = max(0, DB_MAX_OVERFLOW)
+_pool_timeout = max(5.0, DB_POOL_TIMEOUT_SECONDS)
+_pool_recycle = max(60, DB_POOL_RECYCLE_SECONDS)
 
 if _env == "production" and _is_sqlite:
     raise RuntimeError(
@@ -311,36 +359,46 @@ if _env == "production" and _is_sqlite:
     )
 
 if REQUIRE_POSTGRES and not _is_postgres:
-    warnings.warn(
-        "[DB] REQUIRE_POSTGRES=true but non-PostgreSQL DB is active. "
-        "Set REQUIRE_POSTGRES=false for local SQLite-only development.",
-        stacklevel=2,
+    raise RuntimeError(
+        "FATAL: REQUIRE_POSTGRES=true but non-PostgreSQL DB is active. "
+        "Set DATABASE_URL to PostgreSQL or disable REQUIRE_POSTGRES explicitly for SQLite-only development."
     )
 
 _engine_kwargs = {
-    "echo": _env == "development",
+    "echo": SQLALCHEMY_ECHO,
+    "hide_parameters": True,
     "future": True,
 }
 if _is_postgres:
+    _command_timeout = max(5.0, DB_COMMAND_TIMEOUT_SECONDS)
     _engine_kwargs.update(
         {
             "poolclass": AsyncAdaptedQueuePool,
-            "pool_size": 10,
-            "max_overflow": 20,
+            "pool_size": _pool_size,
+            "max_overflow": _max_overflow,
             "pool_pre_ping": True,
-            "pool_recycle": 3600,
-            "pool_timeout": 30,
+            "pool_recycle": _pool_recycle,
+            "pool_timeout": _pool_timeout,
+            "pool_use_lifo": True,
+            "connect_args": {
+                "timeout": _command_timeout,
+                "command_timeout": _command_timeout,
+                "server_settings": {
+                    "application_name": "stockai-backend",
+                    "statement_timeout": str(max(1000, DB_STATEMENT_TIMEOUT_MS)),
+                    "lock_timeout": str(max(500, DB_LOCK_TIMEOUT_MS)),
+                },
+            },
         }
     )
 
 engine = create_async_engine(_db_url, **_engine_kwargs)
 
-AsyncSessionLocal = sessionmaker(
+AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
     expire_on_commit=False,
     autoflush=False,
-    autocommit=False,
 )
 
 # Backward-compatible async session factory alias used by existing modules.
@@ -350,22 +408,37 @@ SessionLocal = AsyncSessionLocal
 # Sync engine for background workers and sync-only code paths.
 if _is_sqlite:
     _sync_url = _db_url.replace("+aiosqlite", "")
-    sync_engine = create_engine(_sync_url, echo=False, future=True)
+    sync_engine = create_engine(
+        _sync_url,
+        echo=False,
+        hide_parameters=True,
+        future=True,
+    )
 else:
     _sync_url = (
         _db_url.replace("+asyncpg", "+psycopg2")
         if "+asyncpg" in _db_url
         else _db_url.replace("postgresql://", "postgresql+psycopg2://")
     )
+    _sync_pool_size = max(5, min(_pool_size, 24))
+    _sync_max_overflow = max(5, min(_max_overflow, 48))
     sync_engine = create_engine(
         _sync_url,
         echo=False,
+        hide_parameters=True,
         future=True,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=_sync_pool_size,
+        max_overflow=_sync_max_overflow,
         pool_pre_ping=True,
-        pool_recycle=3600,
-        pool_timeout=30,
+        pool_recycle=_pool_recycle,
+        pool_timeout=_pool_timeout,
+        pool_use_lifo=True,
+        connect_args={
+            "options": (
+                f"-c statement_timeout={max(1000, DB_STATEMENT_TIMEOUT_MS)} "
+                f"-c lock_timeout={max(500, DB_LOCK_TIMEOUT_MS)}"
+            )
+        },
     )
 
 sync_session_factory = sessionmaker(
@@ -391,6 +464,20 @@ def _register_slow_query_logging(target_engine, label: str) -> None:
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         if elapsed_ms >= DB_SLOW_QUERY_MS:
             compact_sql = " ".join((statement or "").split())
+            upper_sql = compact_sql.upper()
+
+            # Instrument master bootstrap reads/writes are expected and can flood logs.
+            if any(
+                marker in upper_sql
+                for marker in (
+                    "INSERT INTO INSTRUMENTS",
+                    "DELETE FROM INSTRUMENTS",
+                    "UPDATE INSTRUMENTS",
+                    "FROM INSTRUMENTS",
+                )
+            ):
+                return
+
             if len(compact_sql) > 240:
                 compact_sql = compact_sql[:240] + "..."
             logger.warning(
@@ -401,10 +488,98 @@ def _register_slow_query_logging(target_engine, label: str) -> None:
             )
 
 
-_register_slow_query_logging(engine.sync_engine, "async")
-_register_slow_query_logging(sync_engine, "sync")
+if DB_LOG_SLOW_QUERIES:
+    _register_slow_query_logging(engine.sync_engine, "async")
+    _register_slow_query_logging(sync_engine, "sync")
 
 logger.info("[DB] Engine initialized (%s)", "PostgreSQL" if _is_postgres else "SQLite")
+
+_TRANSIENT_DB_ERROR_MARKERS = (
+    "deadlock detected",
+    "could not serialize access",
+    "lock timeout",
+    "connection refused",
+    "connection reset",
+    "server closed the connection",
+    "too many clients",
+    "the database system is starting up",
+)
+
+
+def is_transient_db_error(exc: Exception) -> bool:
+    if isinstance(exc, (OperationalError, DBAPIError)):
+        if getattr(exc, "connection_invalidated", False):
+            return True
+        lowered = str(exc).lower()
+        return any(marker in lowered for marker in _TRANSIENT_DB_ERROR_MARKERS)
+    return False
+
+
+def _resolve_sqlite_file_path() -> Optional[Path]:
+    if not _is_sqlite:
+        return None
+
+    try:
+        parsed = make_url(_db_url)
+        raw_path = str(parsed.database or "").strip()
+    except Exception as exc:
+        logger.warning("[DB] Could not parse SQLite DB URL for reset: %s", exc)
+        return None
+
+    if not raw_path or raw_path == ":memory:":
+        return None
+
+    db_path = Path(raw_path)
+    if not db_path.is_absolute():
+        db_path = (Path.cwd() / db_path).resolve()
+    return db_path
+
+
+async def _reset_sqlite_db_file_if_needed() -> None:
+    if not (_is_sqlite and RESET_SQLITE_ON_START):
+        return
+
+    db_path = _resolve_sqlite_file_path()
+    if db_path is None:
+        logger.info("[DB] SQLite reset skipped (in-memory or unresolved DB path)")
+        return
+
+    # Dispose first to release file handles before unlinking on Windows.
+    await engine.dispose()
+    sync_engine.dispose()
+
+    candidates = [
+        db_path,
+        Path(str(db_path) + "-wal"),
+        Path(str(db_path) + "-shm"),
+        Path(str(db_path) + "-journal"),
+    ]
+
+    removed = 0
+    for candidate in candidates:
+        for attempt in range(1, 4):
+            try:
+                if candidate.exists():
+                    candidate.unlink()
+                    removed += 1
+                break
+            except FileNotFoundError:
+                break
+            except PermissionError as exc:
+                if attempt == 3:
+                    logger.warning(
+                        "[DB] Could not remove locked SQLite file %s: %s",
+                        candidate,
+                        exc,
+                    )
+                else:
+                    await asyncio.sleep(0.2 * attempt)
+            except Exception as exc:
+                logger.warning("[DB] Failed removing SQLite file %s: %s", candidate, exc)
+                break
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("[DB] SQLite reset complete; removed %d file(s) for %s", removed, db_path)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -415,11 +590,13 @@ logger.info("[DB] Engine initialized (%s)", "PostgreSQL" if _is_postgres else "S
 async def init_db():
     """Create all tables from metadata (used at startup)."""
     try:
+        await _reset_sqlite_db_file_if_needed()
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("[DB] ✓ Tables initialized")
     except Exception as e:
         logger.error("[DB] Initialization failed: %s", e)
+        raise
 
 
 async def check_db_connection(retries: int = 3, delay: float = 2.0) -> bool:
@@ -428,7 +605,7 @@ async def check_db_connection(retries: int = 3, delay: float = 2.0) -> bool:
         try:
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
-            logger.info("[DB] ✓ Connection verified (attempt %d/%d)", attempt, retries)
+            logger.debug("[DB] Connection verified (attempt %d/%d)", attempt, retries)
             return True
         except Exception as exc:
             wait = delay * (2 ** (attempt - 1))
@@ -457,10 +634,17 @@ async def get_async_session():
     async with AsyncSessionLocal() as session:
         try:
             yield session
-            await session.commit()
         except Exception:
-            await session.rollback()
+            if session.in_transaction():
+                await session.rollback()
             raise
+        else:
+            # Avoid unnecessary commits for pure reads; close the transaction explicitly.
+            if session.in_transaction():
+                if session.new or session.dirty or session.deleted:
+                    await session.commit()
+                else:
+                    await session.rollback()
 
 
 async def get_db_session():
