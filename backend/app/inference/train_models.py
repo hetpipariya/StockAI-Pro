@@ -55,7 +55,6 @@ DEFAULT_SYMBOLS = [
     "LT",
     "MARUTI",
     "SUNPHARMA",
-    "TATAMOTORS",
     "TITAN",
     "BAJFINANCE",
     "HCLTECH",

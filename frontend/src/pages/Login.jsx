@@ -1,272 +1,253 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../store/useAuthStore';
 import {
-  Activity,
   AlertTriangle,
   ArrowRight,
-  CheckCircle,
   Eye,
   EyeOff,
-  KeyRound,
-  Loader,
   Lock,
-  TrendingUp,
+  ShieldCheck,
   User,
+  Activity,
+  Command,
 } from 'lucide-react';
 
-const Login = () => {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [rememberMe, setRememberMe] = useState(false);
-  const [isError, setIsError] = useState(false);
-  const [isChecking, setIsChecking] = useState(false);
-  const [focusedField, setFocusedField] = useState(null);
-  const [shakeError, setShakeError] = useState(false);
-  
+export default function Login() {
+  const navigate = useNavigate();
   const login = useAuthStore((state) => state.login);
   const error = useAuthStore((state) => state.error);
   const clearError = useAuthStore((state) => state.clearError);
-  const navigate = useNavigate();
 
-  const handleLogin = async (e) => {
-    e.preventDefault();
-    if (!username.trim() || !password) {
-      setIsError(true);
-      setShakeError(true);
-      setTimeout(() => setShakeError(false), 500);
-      return;
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [rememberMe, setRememberMe] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    // Clear login errors on mount
+    clearError();
+    // Retrieve remembered email
+    const savedEmail = localStorage.getItem('stockai_remembered_email');
+    if (savedEmail) {
+      setEmail(savedEmail);
+      setRememberMe(true);
     }
-    
-    setIsChecking(true);
-    setIsError(false);
+  }, [clearError]);
 
-    const success = await login({ username: username.trim().toLowerCase(), password });
+  const disabled = useMemo(() => !email.trim() || !password || submitting, [email, password, submitting]);
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    if (disabled) return;
+    setSubmitting(true);
+    clearError();
     
+    const success = await login({ email: email.trim().toLowerCase(), password });
+    setSubmitting(false);
     if (success) {
       if (rememberMe) {
-        localStorage.setItem('rememberUsername', username.trim().toLowerCase());
+        localStorage.setItem('stockai_remembered_email', email.trim().toLowerCase());
       } else {
-        localStorage.removeItem('rememberUsername');
+        localStorage.removeItem('stockai_remembered_email');
       }
       navigate('/dashboard');
-    } else {
-      setIsError(true);
-      setShakeError(true);
-      setTimeout(() => setShakeError(false), 500);
     }
-
-    setIsChecking(false);
-  };
-
-  const handleFieldChange = (field, value) => {
-    if (field === 'username') setUsername(value);
-    if (field === 'password') setPassword(value);
-    setIsError(false);
-    clearError();
   };
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-gradient-to-br from-[#0a0f1c] via-[#0f172a] to-[#020617] text-slate-100">
-      <div
-        className="pointer-events-none absolute inset-0 bg-grid-pattern bg-[size:34px_34px] opacity-[0.12] [mask-image:radial-gradient(circle_at_center,black_38%,transparent_88%)]"
-        aria-hidden="true"
-      />
-      <div
-        className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_35%,rgba(56,189,248,0.12),transparent_60%)]"
-        aria-hidden="true"
-      />
-      <div
-        className="pointer-events-none absolute left-1/2 top-1/2 h-[34rem] w-[34rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-400/10 blur-[130px]"
-        aria-hidden="true"
-      />
+    <div className="min-h-screen w-full relative flex items-center justify-center bg-[#050816] text-slate-100 overflow-hidden font-sans select-none">
+      
+      {/* Dynamic Moving Background Grid */}
+      <div className="absolute inset-0 z-0 pointer-events-none opacity-20">
+        <div 
+          className="w-full h-full bg-[linear-gradient(rgba(0,245,255,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(0,245,255,0.06)_1px,transparent_1px)] bg-[size:40px_40px] animate-matrix-move"
+          style={{
+            animation: 'gridMove 30s linear infinite',
+          }}
+        />
+      </div>
 
-      <div className="relative flex min-h-screen items-center justify-center px-4 py-10 sm:px-6 lg:px-8">
-        <div className="w-full max-w-lg space-y-5">
-          <div className="text-center">
-            <p className="inline-flex rounded-full border border-white/10 bg-white/[0.03] px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.22em] text-slate-300 backdrop-blur-sm">
-              StockAI Pro
-            </p>
+      {/* Styled global grid movement in case stylesheet is not yet loaded */}
+      <style>{`
+        @keyframes gridMove {
+          0% { background-position: 0 0; }
+          100% { background-position: 40px 40px; }
+        }
+        @keyframes chartPulse {
+          0%, 100% { opacity: 0.1; transform: scale(1); }
+          50% { opacity: 0.25; transform: scale(1.02); }
+        }
+      `}</style>
+
+      {/* Subtle Market Chart Motion in Background */}
+      <div 
+        className="absolute inset-0 z-0 pointer-events-none flex items-center justify-center opacity-15"
+        style={{
+          animation: 'chartPulse 8s ease-in-out infinite',
+        }}
+      >
+        <svg width="80%" height="40%" viewBox="0 0 1000 400" fill="none" xmlns="http://www.w3.org/2000/svg" className="text-cyan-400">
+          <path d="M0,350 L100,280 L200,320 L300,180 L400,240 L500,120 L600,260 L700,90 L800,160 L900,40 L1000,150" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M0,350 L100,280 L200,320 L300,180 L400,240 L500,120 L600,260 L700,90 L800,160 L900,40 L1000,150 L1000,400 L0,400 Z" fill="url(#bg-gradient)" opacity="0.08" />
+          <defs>
+            <linearGradient id="bg-gradient" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#00F5FF" />
+              <stop offset="100%" stopColor="transparent" />
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+
+      {/* Soft Purple Accents & Glow Overlays */}
+      <div className="absolute top-1/4 left-1/4 w-96 h-96 rounded-full bg-[#8B5CF6]/8 blur-[120px] pointer-events-none" />
+      <div className="absolute bottom-1/4 right-1/4 w-96 h-96 rounded-full bg-[#00F5FF]/8 blur-[120px] pointer-events-none" />
+
+      {/* Centered Glassmorphism Login Container */}
+      <div className="relative z-10 w-full max-w-[440px] px-4">
+        
+        {/* Logo and Branding header */}
+        <div className="flex flex-col items-center mb-6 text-center">
+          <div className="h-12 w-12 rounded-2xl border border-cyan-400/40 bg-cyan-500/10 flex items-center justify-center shadow-[0_0_20px_rgba(0,245,255,0.15)] mb-3">
+            <Command className="h-6 w-6 text-cyan-300" />
+          </div>
+          <h2 className="text-xl font-bold tracking-tight text-white">StockAI Pro</h2>
+          <p className="text-xs tracking-wider text-slate-500 uppercase mt-1">Institutional Desk Login</p>
+        </div>
+
+        {/* Form panel with custom neon glow */}
+        <form 
+          onSubmit={handleSubmit} 
+          className="w-full rounded-2xl border border-white/8 bg-[#0C1220]/75 p-8 backdrop-blur-[24px] shadow-[0_16px_50px_rgba(0,0,0,0.55)] transition-all hover:border-cyan-400/40 hover:shadow-[0_0_35px_rgba(0,245,255,0.06)]"
+        >
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <p className="text-xs uppercase tracking-[0.16em] text-slate-400 font-semibold">Security Gate</p>
+              <h3 className="mt-1 text-2xl font-black text-white">Sign In</h3>
+            </div>
+            <div className="px-2.5 py-1 rounded-full border border-cyan-500/30 bg-cyan-500/10 text-[10px] text-cyan-300 font-bold uppercase tracking-widest flex items-center gap-1.5">
+              <Activity className="h-3 w-3 animate-pulse" /> Live API
+            </div>
           </div>
 
-          <section className="relative">
-            <div
-              className="pointer-events-none absolute -inset-6 -z-10 rounded-[2rem] bg-emerald-400/10 blur-3xl"
-              aria-hidden="true"
-            />
+          <div className="space-y-4">
+            
+            {/* Email Field */}
+            <label className="block">
+              <span className="text-[11px] uppercase tracking-[0.14em] text-slate-400 font-semibold">Email Desk</span>
+              <div className="mt-2 relative">
+                <User className="h-4 w-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(event) => {
+                    setEmail(event.target.value);
+                    clearError();
+                  }}
+                  className="w-full rounded-xl border border-white/10 bg-[#060A14] pl-11 pr-4 py-3 text-[13px] text-slate-200 placeholder:text-slate-600 outline-none focus:border-cyan-400 focus:shadow-[0_0_15px_rgba(0,245,255,0.15)] transition-all font-mono"
+                  placeholder="name@desk.com"
+                  autoComplete="email"
+                  required
+                />
+              </div>
+            </label>
 
-            <div
-              className={`w-full max-w-md sm:max-w-lg rounded-3xl border border-white/10 bg-slate-950/65 p-7 shadow-[0_0_40px_rgba(0,255,159,0.1),0_18px_40px_rgba(2,6,23,0.65)] backdrop-blur-xl transition-all duration-300 hover:-translate-y-1 hover:shadow-[0_0_52px_rgba(0,255,159,0.16),0_20px_45px_rgba(2,6,23,0.7)] animate-card-enter ${shakeError ? 'animate-shake' : ''}`}
+            {/* Password Field */}
+            <label className="block">
+              <span className="text-[11px] uppercase tracking-[0.14em] text-slate-400 font-semibold">Access Key</span>
+              <div className="mt-2 relative">
+                <Lock className="h-4 w-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(event) => {
+                    setPassword(event.target.value);
+                    clearError();
+                  }}
+                  className="w-full rounded-xl border border-white/10 bg-[#060A14] pl-11 pr-11 py-3 text-[13px] text-slate-200 placeholder:text-slate-600 outline-none focus:border-cyan-400 focus:shadow-[0_0_15px_rgba(0,245,255,0.15)] transition-all"
+                  placeholder="••••••••••••"
+                  autoComplete="current-password"
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((state) => !state)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-cyan-300 transition-colors"
+                  aria-label={showPassword ? 'Hide key' : 'Show key'}
+                >
+                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </label>
+
+            {/* Remember Me checkbox */}
+            <div className="flex items-center justify-between text-xs pt-1">
+              <label className="flex items-center gap-2 cursor-pointer text-slate-400 hover:text-slate-300 select-none">
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  className="rounded border-white/10 bg-slate-900 text-cyan-400 focus:ring-cyan-400/40 w-3.5 h-3.5"
+                />
+                <span>Remember email</span>
+              </label>
+              <button 
+                type="button" 
+                onClick={() => navigate('/forgot-password')} 
+                className="text-slate-500 hover:text-cyan-300 transition-colors"
+              >
+                Forgot key?
+              </button>
+            </div>
+
+            {/* Security Alerts */}
+            {error ? (
+              <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2.5 text-xs text-rose-300 flex items-start gap-2 animate-shake">
+                <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-emerald-500/15 bg-emerald-500/5 px-3 py-2 text-[10px] text-emerald-400 flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-400" />
+                <span>Airtight JWT signature validation active.</span>
+              </div>
+            )}
+
+            {/* Action button */}
+            <button
+              type="submit"
+              disabled={disabled}
+              className={`w-full rounded-xl py-3.5 font-bold flex items-center justify-center gap-2 transition-all ${disabled
+                ? 'bg-slate-800/40 text-slate-600 cursor-not-allowed border border-white/5'
+                : 'bg-gradient-to-r from-cyan-500 to-emerald-500 text-[#041019] hover:opacity-95 hover:scale-[1.01] active:scale-[0.99] shadow-[0_4px_20px_rgba(0,245,255,0.2)]'}`}
             >
-            <div className="flex items-center gap-3 mb-8">
-              <div className="h-11 w-11 rounded-2xl bg-gradient-to-br from-cyan-500/40 to-emerald-500/30 border border-cyan-400/60 flex items-center justify-center shadow-lg shadow-cyan-500/30 group hover:shadow-cyan-500/50 transition-all">
-                <KeyRound className="h-5 w-5 text-cyan-300 group-hover:text-emerald-300 transition-colors" />
-              </div>
-              <div>
-                <h2 className="text-2xl font-extrabold text-white leading-tight">Login</h2>
-                <p className="text-sm text-slate-300">Access your trading dashboard</p>
-              </div>
-            </div>
+              {submitting ? 'Authenticating Desk...' : 'Access Terminal'}
+              {!submitting ? <ArrowRight className="h-4 w-4" /> : null}
+            </button>
 
-            <form onSubmit={handleLogin} className="space-y-6">
-              <div>
-                <label className="block text-sm font-medium text-slate-200 mb-2.5">Username</label>
-                <div className="relative group">
-                  <User className={`pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 transition-colors ${
-                    focusedField === 'username' ? 'text-emerald-300' : 'text-slate-500'
-                  }`} />
-                  <input
-                    type="text"
-                    value={username}
-                    onChange={(e) => handleFieldChange('username', e.target.value)}
-                    onFocus={() => setFocusedField('username')}
-                    onBlur={() => setFocusedField(null)}
-                    placeholder="Enter username"
-                    autoComplete="username"
-                    disabled={isChecking}
-                    className={`w-full rounded-xl border bg-slate-900/65 pl-11 pr-3 py-3.5 text-slate-100 placeholder:text-slate-500 transition-all duration-200 ${
-                      focusedField === 'username'
-                        ? 'border-emerald-400/80 bg-slate-900/80 shadow-[0_0_20px_rgba(16,185,129,0.35),inset_0_1px_2px_rgba(16,185,129,0.1)]'
-                        : 'border-slate-700/70 shadow-[inset_0_1px_2px_rgba(0,0,0,0.3)] hover:border-slate-600/90'
-                    } ${isError ? 'border-red-500/60 shadow-[0_0_16px_rgba(239,68,68,0.25)]' : ''}`}
-                  />
-                </div>
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-2.5">
-                  <label className="block text-sm font-medium text-slate-200">Password</label>
-                  <button
-                    type="button"
-                    onClick={() => navigate('/forgot-password')}
-                    className="text-xs text-emerald-400 hover:text-emerald-300 font-medium transition-colors duration-200"
-                  >
-                    Forgot?
-                  </button>
-                </div>
-                <div className="relative group">
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    value={password}
-                    onChange={(e) => handleFieldChange('password', e.target.value)}
-                    onFocus={() => setFocusedField('password')}
-                    onBlur={() => setFocusedField(null)}
-                    placeholder="Enter password"
-                    autoComplete="current-password"
-                    disabled={isChecking}
-                    className={`w-full rounded-xl border bg-slate-900/65 pl-3 pr-11 py-3.5 text-slate-100 placeholder:text-slate-500 transition-all duration-200 ${
-                      focusedField === 'password'
-                        ? 'border-emerald-400/80 bg-slate-900/80 shadow-[0_0_20px_rgba(16,185,129,0.35),inset_0_1px_2px_rgba(16,185,129,0.1)]'
-                        : 'border-slate-700/70 shadow-[inset_0_1px_2px_rgba(0,0,0,0.3)] hover:border-slate-600/90'
-                    } ${isError ? 'border-red-500/60 shadow-[0_0_16px_rgba(239,68,68,0.25)]' : ''}`}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    disabled={isChecking}
-                    className={`absolute right-3.5 top-1/2 -translate-y-1/2 transition-all duration-200 ${
-                      focusedField === 'password' ? 'text-emerald-300' : 'text-slate-500 hover:text-slate-300'
-                    } disabled:opacity-50`}
-                    aria-label={showPassword ? 'Hide password' : 'Show password'}
-                  >
-                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-3 pt-1">
-                <label className="flex items-center cursor-pointer group">
-                  <input
-                    type="checkbox"
-                    checked={rememberMe}
-                    onChange={(e) => setRememberMe(e.target.checked)}
-                    disabled={isChecking}
-                    className="w-4 h-4 rounded border-emerald-500/60 bg-slate-900/50 accent-emerald-400 cursor-pointer disabled:opacity-50 transition-colors"
-                  />
-                  <span className="ml-2.5 text-sm text-slate-300 group-hover:text-slate-100 transition-colors">
-                    Remember this device
-                  </span>
-                </label>
-              </div>
-
-              {isError && (
-                <div className="rounded-xl border border-red-400/50 bg-red-500/12 px-4 py-3 text-sm text-red-200 flex items-start gap-3 animate-in fade-in slide-in-from-top-2">
-                  <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
-                  <span>{error || 'Invalid credentials. Please try again.'}</span>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={isChecking || !username.trim() || !password}
-                className={`w-full py-3.5 rounded-xl font-bold text-base flex items-center justify-center gap-2 transition-all duration-300 group relative overflow-hidden ${
-                  isChecking || !username.trim() || !password
-                    ? 'bg-slate-700/50 text-slate-400 cursor-not-allowed'
-                    : 'border border-emerald-400/20 bg-gradient-to-r from-emerald-500 via-cyan-500 to-emerald-600 text-white shadow-[0_10px_24px_rgba(16,185,129,0.25)] hover:-translate-y-0.5 hover:shadow-[0_0_40px_rgba(16,185,129,0.4),0_12px_24px_rgba(16,185,129,0.3)] active:translate-y-0.5 active:scale-[0.98]'
-                }`}
+            {/* Alternate page routing */}
+            <div className="flex items-center justify-center gap-2 text-xs pt-2">
+              <span className="text-slate-500">Need access?</span>
+              <button 
+                type="button" 
+                onClick={() => navigate('/signup')} 
+                className="text-cyan-400 hover:text-cyan-300 font-semibold transition-colors"
               >
-                {isChecking ? (
-                  <>
-                    <Loader className="h-4 w-4 animate-spin" />
-                    Signing in...
-                  </>
-                ) : (
-                  <>
-                    Sign In
-                    <ArrowRight className="h-4 w-4 group-hover:translate-x-1 transition-transform" />
-                  </>
-                )}
-              </button>
-            </form>
-
-            <div className="mt-8 pt-6 border-t border-slate-700/50">
-              <div className="grid grid-cols-3 gap-3 mb-6">
-                <div className="text-center group relative" title="Your session uses industry-standard JWT for security">
-                  <div className="inline-flex items-center justify-center h-9 w-9 rounded-lg bg-cyan-500/20 border border-cyan-500/50 group-hover:border-cyan-400/80 group-hover:bg-cyan-500/30 group-hover:shadow-[0_0_12px_rgba(34,211,238,0.4)] transition-all mb-2">
-                    <Lock className="h-4 w-4 text-cyan-300" />
-                  </div>
-                  <p className="text-xs text-slate-400 font-semibold">Secure JWT</p>
-                </div>
-                <div className="text-center group relative" title="All communication is encrypted end-to-end">
-                  <div className="inline-flex items-center justify-center h-9 w-9 rounded-lg bg-emerald-500/20 border border-emerald-500/50 group-hover:border-emerald-400/80 group-hover:bg-emerald-500/30 group-hover:shadow-[0_0_12px_rgba(16,185,129,0.4)] transition-all mb-2">
-                    <CheckCircle className="h-4 w-4 text-emerald-300" />
-                  </div>
-                  <p className="text-xs text-slate-400 font-semibold">Encrypted</p>
-                </div>
-                <div className="text-center group relative" title="Real-time connection to live trading infrastructure">
-                  <div className="inline-flex items-center justify-center h-9 w-9 rounded-lg bg-blue-500/20 border border-blue-500/50 group-hover:border-blue-400/80 group-hover:bg-blue-500/30 group-hover:shadow-[0_0_12px_rgba(59,130,246,0.4)] transition-all mb-2">
-                    <Activity className="h-4 w-4 text-blue-300" />
-                  </div>
-                  <p className="text-xs text-slate-400 font-semibold">Live API</p>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => navigate('/')}
-                className="hidden w-full py-2 text-sm font-medium text-slate-400 transition-colors hover:text-cyan-300 sm:block"
-              >
-                ← Back to landing page
+                Create Account
               </button>
             </div>
 
-            <div className="mt-6 pt-5 border-t border-slate-700/40 flex items-center justify-between text-xs text-slate-500">
-              <span className="inline-flex items-center gap-1.5">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-                System Ready
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <TrendingUp className="h-3.5 w-3.5" />
-                Live Trading Mode
-              </span>
-            </div>
-            </div>
-          </section>
-        </div>
+            <button 
+              type="button" 
+              onClick={() => navigate('/')} 
+              className="w-full text-center text-[10px] text-slate-600 hover:text-slate-400 transition-colors pt-2"
+            >
+              Back to Landing
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
-};
-
-export default Login;
+}

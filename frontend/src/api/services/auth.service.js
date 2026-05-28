@@ -101,8 +101,13 @@ const requestWithAbsoluteFallbacks = async (payload, urls) => {
 };
 
 export const AuthService = {
-    login: async (username, password) => {
-        const body = { username, password };
+    register: async (email, password) => {
+        const body = { email, password };
+        return requestWithRelativeFallbacks('post', API_ENDPOINTS.AUTH.REGISTER, body, []);
+    },
+
+    login: async (email, password) => {
+        const body = { email, password };
 
         try {
             return await requestWithRelativeFallbacks(

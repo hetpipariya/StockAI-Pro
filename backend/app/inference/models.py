@@ -19,15 +19,10 @@ import pandas as pd
 from app import config
 from app.inference.feature_engineering import (FEATURE_COLUMNS,
                                                FEATURE_VERSION,
-                                               apply_feature_compatibility,
                                                compute_features,
                                                get_feature_summary,
+                                               validate_feature_contract,
                                                validate_features)
-from app.inference.liquidity_order_flow import compute_liquidity_order_flow
-from app.inference.multi_timeframe_alignment import compute_multi_timeframe_alignment
-from app.inference.risk_position_context import compute_risk_position_context
-from app.inference.time_intelligence import compute_time_intelligence
-from app.inference.volume_intelligence import build_feature_vector
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +39,8 @@ if _env_model_path and Path(_env_model_path).exists():
 else:
     for candidate in [
         Path("/app/models"),
+        _p2 / "models" / "entry_5m",
+        _p3 / "models" / "entry_5m",
         _p2 / "models",
         _p3 / "models",
     ]:
@@ -52,7 +49,7 @@ else:
             break
 
 if MODEL_DIR is None:
-    MODEL_DIR = _p2 / "models"
+    MODEL_DIR = _p2 / "models" / "entry_5m"
 
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 logger.info(
@@ -308,21 +305,16 @@ def load_models():
         return
 
     if not isinstance(payload, dict) or "version" not in payload:
-        logger.info(
-            "[MODELS] Legacy model payload detected. Wrapping into modern dictionary format."
-        )
+        logger.info("[MODELS] Raw model artifact detected; loading strict sidecars.")
         if isinstance(payload, dict):
-            # Old dictionary format missing version
             model_obj = payload.get("model", payload)
             scaler_obj = payload.get("scaler", None)
             feat_list = payload.get("features") or payload.get("feature_columns")
         else:
-            # Raw model object
             model_obj = payload
             scaler_obj = None
             feat_list = None
 
-        # Backward compatibility: load sidecar artifacts if legacy model.pkl is raw.
         if scaler_obj is None:
             scaler_path = MODEL_DIR / "scaler.pkl"
             if scaler_path.exists():
@@ -356,9 +348,6 @@ def load_models():
                         exc,
                     )
 
-        if feat_list is None:
-            feat_list = FEATURE_COLUMNS
-
         payload = {
             "model": model_obj,
             "scaler": scaler_obj,
@@ -368,19 +357,23 @@ def load_models():
 
     loaded_version = payload.get("version")
     if loaded_version != FEATURE_VERSION:
-        logger.warning(
+        logger.error(
             "[MODELS] Feature version mismatch (model=%s runtime=%s). "
-            "Running in compatibility mode.",
+            "Rejecting artifact; compatibility mode is disabled.",
             loaded_version,
             FEATURE_VERSION,
         )
+        _ensemble_model = None
+        _scaler = None
+        _features_list = None
+        _model_version = None
+        return
 
     _ensemble_model = payload.get("model")
     _scaler = payload.get("scaler")
-    _features_list = payload.get("features")
+    _features_list = [str(name) for name in (payload.get("features") or [])]
     _model_version = loaded_version
 
-    # Strict validation for canonical artifacts; legacy artifacts run in compatibility mode.
     try:
         validate_features(
             _features_list,
@@ -388,10 +381,23 @@ def load_models():
             context="load_models() vs FEATURE_COLUMNS",
         )
     except Exception as exc:
-        logger.warning(
-            "[MODELS] Feature contract mismatch; enabling legacy compatibility mode: %s",
+        logger.error(
+            "[MODELS] Feature contract mismatch; rejecting artifact: %s",
             exc,
         )
+        _ensemble_model = None
+        _scaler = None
+        _features_list = None
+        _model_version = None
+        return
+
+    if _ensemble_model is None or _scaler is None:
+        logger.error("[MODELS] Strict v3 artifact requires both model and scaler")
+        _ensemble_model = None
+        _scaler = None
+        _features_list = None
+        _model_version = None
+        return
 
     logger.info(
         "[MODELS] ✓ Loaded ML Ensemble Pipeline — %d features validated.",
@@ -535,20 +541,28 @@ def _extract_directional_probabilities(model: Any, scaled_row: np.ndarray) -> tu
         except Exception:
             continue
 
-    if 1 in class_to_index:
+    if set(class_to_index) >= {0, 1, 2}:
+        prob_up = float(probabilities[class_to_index[2]])
+        prob_down = float(probabilities[class_to_index[0]])
+    elif 1 in class_to_index and -1 in class_to_index:
         prob_up = float(probabilities[class_to_index[1]])
+        prob_down = float(probabilities[class_to_index[-1]])
+    elif 1 in class_to_index:
+        prob_up = float(probabilities[class_to_index[1]])
+        if len(probabilities) == 2:
+            prob_down = 1.0 - prob_up
+        else:
+            prob_down = float(probabilities[0])
     elif len(probabilities) >= 2:
         prob_up = float(probabilities[-1])
-    else:
-        prob_up = float(probabilities[0])
-
-    if -1 in class_to_index:
-        prob_down = float(probabilities[class_to_index[-1]])
-    elif len(probabilities) == 2 and 1 in class_to_index:
-        prob_down = 1.0 - prob_up
-    elif len(probabilities) >= 2:
         prob_down = float(probabilities[0])
     else:
+        prob_up = float(probabilities[0])
+        prob_down = 1.0 - prob_up
+
+    if -1 in class_to_index and not (set(class_to_index) >= {0, 1, 2}):
+        prob_down = float(probabilities[class_to_index[-1]])
+    elif len(probabilities) == 2 and 1 in class_to_index:
         prob_down = 1.0 - prob_up
 
     if not np.isfinite(prob_up):
@@ -2260,13 +2274,14 @@ class ModelEnsemble:
         ltp: float,
         features_seq: "np.ndarray",
         features_tab: "np.ndarray",
+        feature_df: Optional[pd.DataFrame] = None,
         ohlcv_df: Optional[pd.DataFrame] = None,
         debug: bool = False,
     ) -> Dict[str, Any]:
 
         def _safe_hold(reason: str) -> Dict[str, Any]:
             safe_ltp = float(ltp or 0.0)
-            return {
+            payload = {
                 "prediction": round(safe_ltp, 2),
                 "signal": "HOLD",
                 "confidence": 0.0,
@@ -2366,6 +2381,27 @@ class ModelEnsemble:
                 "explanation": f"Signal quality low: {reason}",
                 "reason": reason,
             }
+            if debug:
+                prob_up = 0.5
+                prob_down = 0.5
+                try:
+                    if _ensemble_model is not None and _scaler is not None:
+                        zero_row = pd.DataFrame([[0.0 for _ in FEATURE_COLUMNS]], columns=FEATURE_COLUMNS)
+                        scaled = _scaler.transform(zero_row)
+                        prob_up, prob_down = _extract_directional_probabilities(_ensemble_model, scaled)
+                except Exception:
+                    prob_up = 0.5
+                    prob_down = 0.5
+                payload["debug_info"] = {
+                    "features": {name: 0.0 for name in FEATURE_COLUMNS},
+                    "feature_count": len(FEATURE_COLUMNS),
+                    "rows_used": 0,
+                    "error": reason,
+                    "prob_up": round(float(prob_up), 4),
+                    "prob_down": round(float(prob_down), 4),
+                    "signal_reasoning": reason,
+                }
+            return payload
 
         if ohlcv_df is None or len(ohlcv_df) < 50:
             return _safe_hold("Insufficient data (< 50 candles)")
@@ -2374,21 +2410,27 @@ class ModelEnsemble:
             logger.warning("[PREDICT] Model artifacts unavailable. Returning safe fallback.")
             return _safe_hold("Model unavailable")
 
-        feature_df = compute_features(ohlcv_df, include_legacy=True)
-        if feature_df.empty:
-            return _safe_hold("Feature computation returned empty")
-
-        try:
-            feature_df = build_feature_vector(ohlcv_df, base_features=feature_df)
-        except Exception as exc:
-            logger.warning("[PREDICT] Volume feature build failed; using base features: %s", exc)
+        if feature_df is None:
+            try:
+                feature_df = compute_features(ohlcv_df)
+            except Exception as exc:
+                logger.warning("[PREDICT] C++ feature computation failed: %s", exc)
+                return _safe_hold("Feature computation failed")
+            if feature_df.empty:
+                return _safe_hold("Feature computation returned empty")
+        else:
+            feature_df = feature_df.copy()
 
         required_model_features = list(_features_list or FEATURE_COLUMNS)
-        feature_df = apply_feature_compatibility(
-            feature_df,
-            ohlcv_df,
-            required_model_features,
-        )
+        try:
+            validate_feature_contract(
+                feature_df,
+                required_model_features,
+                context="ModelEnsemble.predict",
+            )
+        except Exception as exc:
+            logger.error("[PREDICT] Feature contract validation failed: %s", exc)
+            return _safe_hold("Feature contract mismatch")
 
         missing_model_features = [
             name for name in required_model_features if name not in feature_df.columns

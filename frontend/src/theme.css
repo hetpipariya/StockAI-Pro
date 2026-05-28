@@ -50,4 +50,14 @@
   /* Global Settings */
   --font-family-base: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-family-mono: 'JetBrains Mono', 'IBM Plex Mono', monospace;
+
+  /* Premium Institutional Neon Colors & Glows */
+  --neon-cyan: #00F5FF;
+  --neon-cyan-glow: rgba(0, 245, 255, 0.25);
+  --neon-green: #00FF9D;
+  --neon-green-glow: rgba(0, 255, 157, 0.25);
+  --neon-red: #FF1744;
+  --neon-red-glow: rgba(255, 23, 68, 0.25);
+  --accent-purple: #8B5CF6;
+  --bg-dark-terminal: #050816;
 }

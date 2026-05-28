@@ -4,6 +4,8 @@ import asyncio
 
 import pytest
 
+from app import config
+
 
 @pytest.mark.anyio
 async def test_signup_success_returns_token_pair(client, make_user_payload):
@@ -16,26 +18,25 @@ async def test_signup_success_returns_token_pair(client, make_user_payload):
     assert body["data"]["token_type"] == "bearer"
     assert "access_token" in body["data"]
     assert "refresh_token" in body["data"]
-    assert body["data"]["user"]["username"] == payload["username"]
+    assert body["data"]["user"]["email"] == payload["email"]
 
 
 @pytest.mark.anyio
-async def test_signup_duplicate_username_returns_conflict(client, make_user_payload):
+async def test_signup_duplicate_email_returns_conflict(client, make_user_payload):
     payload = make_user_payload("dup")
     first = await client.post("/api/v1/auth/signup", json=payload)
     assert first.status_code == 201
 
     second_payload = {
-        "username": payload["username"],
         "password": "SecurePass123",
-        "email": f"other_{payload['username']}@example.com",
+        "email": payload["email"],
     }
     second = await client.post("/api/v1/auth/signup", json=second_payload)
 
     assert second.status_code == 409
     body = second.json()
     assert body["status"] == "error"
-    assert "Username already taken" in body["message"]
+    assert "Email already registered" in body["message"]
 
 
 @pytest.mark.anyio
@@ -54,20 +55,20 @@ async def test_signup_validation_errors_for_weak_password(client, make_user_payl
 
 
 @pytest.mark.anyio
-async def test_login_is_case_insensitive_for_username(client, make_user_payload):
+async def test_login_is_case_insensitive_for_email(client, make_user_payload):
     payload = make_user_payload("login")
     signup = await client.post("/api/v1/auth/signup", json=payload)
     assert signup.status_code == 201
 
     response = await client.post(
         "/api/v1/auth/login",
-        json={"username": payload["username"].upper(), "password": payload["password"]},
+        json={"email": payload["email"].upper(), "password": payload["password"]},
     )
 
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["data"]["user"]["username"] == payload["username"]
+    assert body["data"]["user"]["email"] == payload["email"]
 
 
 @pytest.mark.anyio
@@ -78,13 +79,13 @@ async def test_login_wrong_password_returns_generic_401(client, make_user_payloa
 
     response = await client.post(
         "/api/v1/auth/login",
-        json={"username": payload["username"], "password": "WrongPass999"},
+        json={"email": payload["email"], "password": "WrongPass999"},
     )
 
     assert response.status_code == 401
     body = response.json()
     assert body["status"] == "error"
-    assert body["message"] == "Invalid username or password"
+    assert body["message"] == "Invalid email or password"
 
 
 @pytest.mark.anyio
@@ -108,7 +109,7 @@ async def test_me_returns_current_user_profile(client, signup_user):
     body = response.json()
     assert body["status"] == "ok"
     assert body["data"]["id"] == created["user"]["id"]
-    assert body["data"]["username"] == created["request"]["username"]
+    assert body["data"]["email"] == created["request"]["email"]
 
 
 @pytest.mark.anyio
@@ -164,3 +165,36 @@ async def test_logout_invalidates_refresh_token(client, signup_user):
     body = replay.json()
     assert body["status"] == "error"
     assert "invalid" in body["message"].lower() or "used" in body["message"].lower()
+
+
+@pytest.mark.anyio
+async def test_signup_blocks_sixth_user_in_beta_mode(client, make_user_payload):
+    for idx in range(max(1, int(config.MAX_BETA_USERS))):
+        payload = make_user_payload(f"cap_{idx}")
+        response = await client.post("/api/v1/auth/signup", json=payload)
+        assert response.status_code == 201
+
+    overflow = make_user_payload("cap_overflow")
+    blocked = await client.post("/api/v1/auth/signup", json=overflow)
+
+    assert blocked.status_code == 403
+    body = blocked.json()
+    assert body["status"] == "error"
+    assert body["message"] == "User limit reached (beta phase)"
+
+
+@pytest.mark.anyio
+async def test_login_expires_in_uses_one_hour_default(client, make_user_payload):
+    payload = make_user_payload("expires")
+    signup = await client.post("/api/v1/auth/signup", json=payload)
+    assert signup.status_code == 201
+
+    login = await client.post(
+        "/api/v1/auth/login",
+        json={"email": payload["email"], "password": payload["password"]},
+    )
+    assert login.status_code == 200
+
+    body = login.json()
+    assert body["status"] == "ok"
+    assert body["data"]["expires_in"] == int(config.ACCESS_TOKEN_EXPIRE_MINUTES) * 60

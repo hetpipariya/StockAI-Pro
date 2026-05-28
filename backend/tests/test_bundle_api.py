@@ -74,12 +74,15 @@ async def test_bundle_endpoint_timeout_contract(client, monkeypatch):
     monkeypatch.setattr("app.routes.bundle.get_bundle_data", _mock_timeout)
 
     response = await client.get("/api/v1/bundle/RELIANCE")
-    assert response.status_code == 504
+    assert response.status_code == 200
 
     body = response.json()
-    assert body["success"] is False
-    assert body["data"] is None
-    assert body["error"]["code"] == "BUNDLE_TIMEOUT"
+    assert body["success"] is True
+    assert body["error"] is None
+    assert body["data"]["symbol"] == "RELIANCE"
+    assert body["data"]["prediction"]["signal"] == "HOLD"
+    assert body["data"]["partial"] is True
+    assert any("BUNDLE_TIMEOUT" in warning for warning in body["data"]["warnings"])
 
 
 @pytest.mark.anyio
@@ -90,13 +93,36 @@ async def test_bundle_endpoint_unknown_symbol_contract(client, monkeypatch):
     monkeypatch.setattr("app.routes.bundle.get_bundle_data", _mock_missing_symbol)
 
     response = await client.get("/api/v1/bundle/UNKNOWN")
-    assert response.status_code == 404
+    assert response.status_code == 200
 
     body = response.json()
-    assert body["success"] is False
-    assert body["data"] is None
-    assert body["error"]["code"] == "SYMBOL_NOT_FOUND"
-    assert "UNKNOWN" in body["error"]["message"]
+    assert body["success"] is True
+    assert body["error"] is None
+    assert body["data"]["symbol"] == "UNKNOWN"
+    assert body["data"]["history"]["count"] == 0
+    assert body["data"]["partial"] is True
+    assert any("SYMBOL_NOT_FOUND" in warning for warning in body["data"]["warnings"])
+
+
+@pytest.mark.anyio
+async def test_bundle_endpoint_accepts_exchange_prefixed_symbol(client, monkeypatch):
+    async def _mock_bundle(symbol: str, *_args, **_kwargs):
+        return {
+            "symbol": symbol,
+            "history": {"candles": [], "count": 0},
+            "snapshot": {"symbol": symbol, "price": 0.0, "ltp": 0.0},
+            "prediction": {"symbol": symbol, "signal": "HOLD", "confidence": 0.0},
+            "indicators": {"symbol": symbol},
+        }
+
+    monkeypatch.setattr("app.routes.bundle.get_bundle_data", _mock_bundle)
+
+    response = await client.get("/api/v1/bundle/NSE:RELIANCE")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"]["symbol"] == "RELIANCE"
 
 
 @pytest.mark.anyio

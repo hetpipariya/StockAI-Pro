@@ -1,0 +1,174 @@
+{
+  "rf": {
+    "top_features": [
+      {
+        "feature": "bb_width",
+        "importance": 0.13706442680242137
+      },
+      {
+        "feature": "vwap_distance",
+        "importance": 0.09449101857529754
+      },
+      {
+        "feature": "ema_ratio",
+        "importance": 0.07087915115604072
+      },
+      {
+        "feature": "atr14",
+        "importance": 0.0655236499621576
+      },
+      {
+        "feature": "linreg_slope",
+        "importance": 0.056469531876988596
+      },
+      {
+        "feature": "ema50",
+        "importance": 0.055783293524043126
+      },
+      {
+        "feature": "ema21",
+        "importance": 0.05508972643083149
+      },
+      {
+        "feature": "ema9",
+        "importance": 0.0537587067112024
+      },
+      {
+        "feature": "adx14",
+        "importance": 0.05275670067972514
+      },
+      {
+        "feature": "roc10",
+        "importance": 0.05226906388635414
+      },
+      {
+        "feature": "rsi14",
+        "importance": 0.048922246580462694
+      },
+      {
+        "feature": "mfi14",
+        "importance": 0.045963976430990094
+      },
+      {
+        "feature": "macd_hist",
+        "importance": 0.04415780015625847
+      },
+      {
+        "feature": "volume_ratio",
+        "importance": 0.04182791124506139
+      },
+      {
+        "feature": "cci20",
+        "importance": 0.03996971568942243
+      },
+      {
+        "feature": "bb_percent_b",
+        "importance": 0.038881723854118144
+      },
+      {
+        "feature": "candle_body_ratio",
+        "importance": 0.03089999800780517
+      },
+      {
+        "feature": "daily_alignment",
+        "importance": 0.01131083460353986
+      },
+      {
+        "feature": "mtf_15m_direction",
+        "importance": 0.003980523827279771
+      },
+      {
+        "feature": "nifty_direction",
+        "importance": 0.0
+      }
+    ],
+    "over_dominant_feature": false,
+    "top_feature_share": 0.13706442680242137
+  },
+  "xgboost": {
+    "top_features": [
+      {
+        "feature": "bb_width",
+        "importance": 0.08232053369283676
+      },
+      {
+        "feature": "mtf_15m_direction",
+        "importance": 0.06633727252483368
+      },
+      {
+        "feature": "ema21",
+        "importance": 0.06245679780840874
+      },
+      {
+        "feature": "ema50",
+        "importance": 0.06132618337869644
+      },
+      {
+        "feature": "vwap_distance",
+        "importance": 0.05734314024448395
+      },
+      {
+        "feature": "atr14",
+        "importance": 0.05678783729672432
+      },
+      {
+        "feature": "daily_alignment",
+        "importance": 0.05625477060675621
+      },
+      {
+        "feature": "ema_ratio",
+        "importance": 0.05524826422333717
+      },
+      {
+        "feature": "ema9",
+        "importance": 0.050548601895570755
+      },
+      {
+        "feature": "rsi14",
+        "importance": 0.04854932799935341
+      },
+      {
+        "feature": "roc10",
+        "importance": 0.04847203567624092
+      },
+      {
+        "feature": "adx14",
+        "importance": 0.04730655997991562
+      },
+      {
+        "feature": "macd_hist",
+        "importance": 0.046059202402830124
+      },
+      {
+        "feature": "cci20",
+        "importance": 0.0456726998090744
+      },
+      {
+        "feature": "linreg_slope",
+        "importance": 0.045345354825258255
+      },
+      {
+        "feature": "mfi14",
+        "importance": 0.045268237590789795
+      },
+      {
+        "feature": "volume_ratio",
+        "importance": 0.04456565901637077
+      },
+      {
+        "feature": "bb_percent_b",
+        "importance": 0.04260030761361122
+      },
+      {
+        "feature": "candle_body_ratio",
+        "importance": 0.03753725439310074
+      },
+      {
+        "feature": "nifty_direction",
+        "importance": 0.0
+      }
+    ],
+    "over_dominant_feature": false,
+    "top_feature_share": 0.08232053031949016
+  }
+}

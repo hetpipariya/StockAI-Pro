@@ -512,6 +512,9 @@ class SmartAPIConnector:
 
         self._sync_session_from_token_manager()
 
+    def ensure_login(self) -> None:
+        self._ensure_login()
+
     def _refresh_session(self, relogin_on_fail: bool = True) -> bool:
         """Refresh token with retries; optionally fallback to full login."""
         with self._login_lock:
@@ -542,6 +545,9 @@ class SmartAPIConnector:
                     logger.error("[TOKEN] Re-login after refresh failure failed: %s", relogin_exc)
 
                 return False
+
+    def refresh_session(self) -> bool:
+        return self._refresh_session(relogin_on_fail=True)
 
     @staticmethod
     def _is_token_error_response(resp: dict[str, Any]) -> bool:
@@ -879,6 +885,11 @@ class SmartAPIConnector:
         logger.error("[SMARTAPI] All LTP methods failed")
         return None
 
+    def fetch_latest(
+        self, symbol_token: str, exchange: str = "NSE", tradingsymbol: str = ""
+    ) -> Optional[dict]:
+        return self.get_ltp(symbol_token=symbol_token, exchange=exchange, tradingsymbol=tradingsymbol)
+
     # ─── WebSocket ───
 
     def _merge_ws_tokens(self, token_list: list[dict]) -> list[str]:
@@ -924,6 +935,26 @@ class SmartAPIConnector:
         if not new_tokens:
             return True
         return self._subscribe_new_tokens(new_tokens)
+
+    def subscribe(self, token_list, on_message=None):
+        if on_message is None:
+            normalized = [str(token).strip() for token in token_list if str(token).strip()]
+            return self.subscribe_ws_tokens(normalized)
+        return self.start_ws(token_list, on_message)
+
+    def unsubscribe(self, tokens) -> bool:
+        normalized = {str(token).strip() for token in tokens if str(token).strip()}
+        if not normalized:
+            return True
+        with self._session_lock:
+            self._ws_tokens.difference_update(normalized)
+        try:
+            if self._ws and hasattr(self._ws, "unsubscribe"):
+                correlation_id = f"stockai-pro-unsub-{int(time.time())}"
+                self._ws.unsubscribe(correlation_id, 2, [{"exchangeType": 1, "tokens": sorted(normalized)}])
+        except Exception as exc:
+            logger.debug("[WS] Unsubscribe best-effort failed: %s", exc)
+        return True
 
     def start_ws(self, token_list: list[dict], on_message: Callable[[Any], None]):
         """

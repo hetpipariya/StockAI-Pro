@@ -9,13 +9,14 @@ from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 from app.config import SLOW_REQUEST_LOG_MS
+from app.services.instrument_service import normalize_symbol_input
 from app.services.bundle_service import get_bundle as get_bundle_data
 
 logger = logging.getLogger(__name__)
 
 _SLOW_BUNDLE_MS = max(50, SLOW_REQUEST_LOG_MS)
 
-router = APIRouter(prefix="/api/v1", tags=["bundle"])
+router = APIRouter(tags=["bundle"])
 
 
 def _utc_now_iso() -> str:
@@ -36,16 +37,22 @@ def _success_response(data: dict) -> dict:
     }
 
 
-def _error_response(code: str, message: str) -> dict:
-    return {
-        "success": False,
-        "data": None,
-        "error": {
-            "code": code,
-            "message": message,
-        },
-        "timestamp": _utc_now_iso(),
-    }
+def _degraded_response(symbol: str, code: str, message: str, data: dict | None = None) -> dict:
+    payload = _normalize_bundle_data(symbol, data)
+    payload["partial"] = True
+    payload["warnings"] = list(
+        dict.fromkeys(
+            [
+                *(
+                    payload.get("warnings")
+                    if isinstance(payload.get("warnings"), list)
+                    else []
+                ),
+                f"{code}: {message}",
+            ]
+        )
+    )
+    return _success_response(payload)
 
 
 def _default_bundle_data(symbol: str) -> dict:
@@ -109,6 +116,7 @@ def _normalize_bundle_data(symbol: str, payload: dict | None) -> dict:
         **defaults,
         **payload,
     }
+    normalized["symbol"] = symbol
 
     history = payload.get("history") if isinstance(payload.get("history"), dict) else {}
     snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
@@ -123,14 +131,17 @@ def _normalize_bundle_data(symbol: str, payload: dict | None) -> dict:
         **defaults["snapshot"],
         **snapshot,
     }
+    normalized["snapshot"]["symbol"] = symbol
     normalized["prediction"] = {
         **defaults["prediction"],
         **prediction,
     }
+    normalized["prediction"]["symbol"] = symbol
     normalized["indicators"] = {
         **defaults["indicators"],
         **indicators,
     }
+    normalized["indicators"]["symbol"] = symbol
 
     candles = normalized["history"].get("candles")
     if not isinstance(candles, list):
@@ -139,21 +150,24 @@ def _normalize_bundle_data(symbol: str, payload: dict | None) -> dict:
     return normalized
 
 
-@router.get("/bundle/{symbol}")
+@router.get("/api/v1/bundle/{symbol}")
+@router.get("/api/bundle/{symbol}", include_in_schema=False)
 async def get_bundle(
     symbol: str,
     interval: str = Query("1m", pattern="^(1m|3m|5m|15m|30m|1h|1d)$"),
-    limit: int = Query(100, ge=50, le=300),
+    limit: int = Query(200, ge=50, le=300),
     horizon: str = Query("15m"),
 ):
     """Single optimized market bundle endpoint."""
-    normalized_symbol = symbol.strip().upper()
+    raw_symbol = symbol.strip()
+    normalized_symbol = normalize_symbol_input(raw_symbol)
     started_at = time.perf_counter()
+    fallback_payload = _default_bundle_data(normalized_symbol)
 
     try:
         payload = await asyncio.wait_for(
             get_bundle_data(
-                normalized_symbol,
+                raw_symbol,
                 interval=interval,
                 limit=limit,
                 horizon=horizon,
@@ -181,10 +195,12 @@ async def get_bundle(
             message,
         )
         return JSONResponse(
-            status_code=404,
-            content=_error_response(
+            status_code=200,
+            content=_degraded_response(
+                normalized_symbol,
                 code="SYMBOL_NOT_FOUND",
                 message=message,
+                data=fallback_payload,
             ),
         )
     except asyncio.TimeoutError:
@@ -195,10 +211,12 @@ async def get_bundle(
             horizon,
         )
         return JSONResponse(
-            status_code=504,
-            content=_error_response(
+            status_code=200,
+            content=_degraded_response(
+                normalized_symbol,
                 code="BUNDLE_TIMEOUT",
                 message="Bundle request timed out",
+                data=fallback_payload,
             ),
         )
     except Exception as exc:
@@ -211,9 +229,11 @@ async def get_bundle(
             exc_info=True,
         )
         return JSONResponse(
-            status_code=500,
-            content=_error_response(
+            status_code=200,
+            content=_degraded_response(
+                normalized_symbol,
                 code="BUNDLE_ERROR",
                 message="Failed to build market bundle",
+                data=fallback_payload,
             ),
         )

@@ -7,6 +7,8 @@ import asyncio
 import logging
 import os
 
+from app import config
+
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
@@ -23,7 +25,7 @@ router = APIRouter(prefix="/api/v1/backtest", tags=["backtest"])
 SLIPPAGE_BPS = 0.02 / 100
 BROKERAGE_BPS = 0.03 / 100
 TOTAL_COST = SLIPPAGE_BPS + BROKERAGE_BPS
-RISK_PER_TRADE = 0.01
+RISK_PER_TRADE = config.MAX_RISK_PER_TRADE_PCT
 REWARD_RISK_RATIO = 1.5
 ATR_STOP_MULTIPLIER = 1.5
 
@@ -122,8 +124,7 @@ def _execute_backtest_sync(
         raise ValueError(f"No data available for symbol {target_symbol}")
 
     feature_df = compute_features(
-        df_symbol[["open", "high", "low", "close", "volume"]],
-        include_legacy=True,
+        df_symbol[["open", "high", "low", "close", "volume"]]
     )
     if feature_df.empty:
         raise ValueError("Unable to compute canonical features for backtest window.")
@@ -156,22 +157,22 @@ def _execute_backtest_sync(
 
     df_test["signal_buy"] = (
         (df_test["ml_pred"] == 1)
-        & (df_test["close"] > df_test["ema_50"])
-        & (df_test["ema_9"] > df_test["ema_21"])
-        & (df_test["volume_spike"] == 1)
-        & (df_test["rsi_14"] > 55)
-        & (df_test["rsi_14"] < 75)
-        & (df_test["atr_14"] > df_test["close"] * 0.003)
+        & (df_test["close"] > df_test["ema50"])
+        & (df_test["ema9"] > df_test["ema21"])
+        & (df_test["volume_ratio"] >= 1.2)
+        & (df_test["rsi14"] > 55)
+        & (df_test["rsi14"] < 75)
+        & ((df_test["atr14"] / df_test["close"]) > 0.003)
     )
 
     df_test["signal_sell"] = (
         (df_test["ml_pred"] == 0)
-        & (df_test["close"] < df_test["ema_50"])
-        & (df_test["ema_9"] < df_test["ema_21"])
-        & (df_test["volume_spike"] == 1)
-        & (df_test["rsi_14"] > 25)
-        & (df_test["rsi_14"] < 45)
-        & (df_test["atr_14"] > df_test["close"] * 0.003)
+        & (df_test["close"] < df_test["ema50"])
+        & (df_test["ema9"] < df_test["ema21"])
+        & (df_test["volume_ratio"] >= 1.2)
+        & (df_test["rsi14"] > 25)
+        & (df_test["rsi14"] < 45)
+        & ((df_test["atr14"] / df_test["close"]) > 0.003)
     )
 
     capital = initial_capital
@@ -195,7 +196,7 @@ def _execute_backtest_sync(
         c = row["close"]
         h = row["high"]
         low_price = row["low"]
-        atr = row["atr_14"]
+        atr = row["atr14"]
         t_str = str(row["date"])
 
         if in_pos:

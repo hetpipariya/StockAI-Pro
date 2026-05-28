@@ -9,12 +9,14 @@ from app.services.realtime_data_service import LiveMarketDataService
 async def test_fetch_snapshot_uses_local_symbol_resolution(monkeypatch):
     calls: dict[str, object] = {}
 
-    def _mock_get_token(symbol: str) -> str:
+    def _mock_get_token(symbol: str, exchange: str = "NSE") -> str:
         calls["token_symbol"] = symbol
+        calls["token_exchange"] = exchange
         return "2885"
 
-    def _mock_get_tradingsymbol(symbol: str) -> str:
+    def _mock_get_tradingsymbol(symbol: str, exchange: str = "NSE") -> str:
         calls["tradingsymbol_symbol"] = symbol
+        calls["tradingsymbol_exchange"] = exchange
         return "RELIANCE-EQ"
 
     class _DummyConnector:
@@ -43,7 +45,9 @@ async def test_fetch_snapshot_uses_local_symbol_resolution(monkeypatch):
 
     assert payload["symbol"] == "RELIANCE"
     assert calls["token_symbol"] == "RELIANCE"
+    assert calls["token_exchange"] == "NSE"
     assert calls["tradingsymbol_symbol"] == "RELIANCE"
+    assert calls["tradingsymbol_exchange"] == "NSE"
     assert calls["ltp_args"] == ("2885", "NSE", "RELIANCE-EQ")
 
 
@@ -51,7 +55,7 @@ async def test_fetch_snapshot_uses_local_symbol_resolution(monkeypatch):
 async def test_fetch_snapshot_unknown_symbol_raises_before_connector(monkeypatch):
     connector_called = {"value": False}
 
-    def _mock_get_token(_symbol: str) -> str:
+    def _mock_get_token(_symbol: str, exchange: str = "NSE") -> str:
         raise KeyError("Instrument token not found for symbol: UNKNOWN")
 
     def _connector_provider():
@@ -78,10 +82,10 @@ async def test_fetch_snapshot_unknown_symbol_raises_before_connector(monkeypatch
 
 @pytest.mark.anyio
 async def test_fetch_history_rows_uses_local_token(monkeypatch):
-    def _mock_get_token(_symbol: str) -> str:
+    def _mock_get_token(_symbol: str, exchange: str = "NSE") -> str:
         return "3045"
 
-    def _mock_get_tradingsymbol(_symbol: str) -> str:
+    def _mock_get_tradingsymbol(_symbol: str, exchange: str = "NSE") -> str:
         return "SBIN-EQ"
 
     class _DummyConnector:
@@ -114,3 +118,49 @@ async def test_fetch_history_rows_uses_local_token(monkeypatch):
 
     assert isinstance(rows, list)
     assert len(rows) == 1
+
+
+@pytest.mark.anyio
+async def test_fetch_snapshot_accepts_exchange_prefixed_symbol(monkeypatch):
+    calls: dict[str, object] = {}
+
+    def _mock_get_token(symbol: str, exchange: str = "NSE") -> str:
+        calls["token_symbol"] = symbol
+        calls["token_exchange"] = exchange
+        return "2885"
+
+    def _mock_get_tradingsymbol(symbol: str, exchange: str = "NSE") -> str:
+        calls["tradingsymbol_symbol"] = symbol
+        calls["tradingsymbol_exchange"] = exchange
+        return "RELIANCE-EQ"
+
+    class _DummyConnector:
+        def get_ltp(self, token: str, exchange: str, tradingsymbol: str):
+            calls["ltp_args"] = (token, exchange, tradingsymbol)
+            return {
+                "ltp": 2500.5,
+                "open": 2490.0,
+                "high": 2512.0,
+                "low": 2488.0,
+                "close": 2499.0,
+                "volume": 1500,
+            }
+
+    monkeypatch.setattr(
+        "app.services.realtime_data_service.get_token_by_symbol",
+        _mock_get_token,
+    )
+    monkeypatch.setattr(
+        "app.services.realtime_data_service.get_tradingsymbol",
+        _mock_get_tradingsymbol,
+    )
+
+    service = LiveMarketDataService(connector_provider=lambda: _DummyConnector(), exchange="NSE")
+    payload = await service.fetch_snapshot("nse:reliance")
+
+    assert payload["symbol"] == "RELIANCE"
+    assert calls["token_symbol"] == "RELIANCE"
+    assert calls["token_exchange"] == "NSE"
+    assert calls["tradingsymbol_symbol"] == "RELIANCE"
+    assert calls["tradingsymbol_exchange"] == "NSE"
+    assert calls["ltp_args"] == ("2885", "NSE", "RELIANCE-EQ")

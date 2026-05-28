@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from app.services.native_accelerators import get_native_candle_aggregator
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +72,7 @@ class CandleBuilder:
         self._active: Dict[str, LiveCandle] = {}
         self._history: Dict[str, List[dict]] = {}
         self._history_limit = history_limit
+        self._native_aggregator = get_native_candle_aggregator(timeframe_minutes, history_limit)
 
     def _candle_start(self, dt: datetime) -> datetime:
         """Round down to the nearest timeframe boundary."""
@@ -83,6 +86,36 @@ class CandleBuilder:
         Feed a tick. Returns a completed candle dict if a boundary was crossed,
         otherwise returns None.
         """
+        if self._native_aggregator is not None:
+            try:
+                completed = self._native_aggregator.process_tick(
+                    symbol,
+                    price,
+                    volume,
+                    datetime.now().timestamp(),
+                )
+                if completed:
+                    completed_dict = dict(completed)
+                    completed_dict.setdefault("timeframe", self._timeframe_label)
+                    logger.info(
+                        "[CANDLE-%s] Completed candle for %s: O=%.2f H=%.2f L=%.2f C=%.2f",
+                        self._timeframe_label,
+                        symbol,
+                        completed_dict["open"],
+                        completed_dict["high"],
+                        completed_dict["low"],
+                        completed_dict["close"],
+                    )
+                    return completed_dict
+                return None
+            except Exception as exc:
+                logger.debug(
+                    "[CANDLE-%s] Native aggregator failed for %s: %s",
+                    self._timeframe_label,
+                    symbol,
+                    exc,
+                )
+
         now = datetime.now()
         boundary = self._candle_start(now)
 
@@ -124,11 +157,33 @@ class CandleBuilder:
 
     def get_history(self, symbol: str, limit: int = 100) -> List[dict]:
         """Get completed candle history for a symbol."""
+        if self._native_aggregator is not None:
+            try:
+                return list(self._native_aggregator.get_history(symbol, limit))
+            except Exception as exc:
+                logger.debug(
+                    "[CANDLE-%s] Native history failed for %s: %s",
+                    self._timeframe_label,
+                    symbol,
+                    exc,
+                )
         history = self._history.get(symbol, [])
         return history[-limit:]
 
     def get_current_candle(self, symbol: str) -> Optional[dict]:
         """Get the in-progress candle for a symbol."""
+        if self._native_aggregator is not None:
+            try:
+                current = self._native_aggregator.current_candle(symbol)
+                if current is not None:
+                    return dict(current)
+            except Exception as exc:
+                logger.debug(
+                    "[CANDLE-%s] Native current candle failed for %s: %s",
+                    self._timeframe_label,
+                    symbol,
+                    exc,
+                )
         candle = self._active.get(symbol)
         if candle and not candle.is_empty:
             current = candle.to_dict()
@@ -137,6 +192,15 @@ class CandleBuilder:
         return None
 
     def active_symbols(self) -> list:
+        if self._native_aggregator is not None:
+            try:
+                return list(self._native_aggregator.active_symbols())
+            except Exception as exc:
+                logger.debug(
+                    "[CANDLE-%s] Native active symbols failed: %s",
+                    self._timeframe_label,
+                    exc,
+                )
         return list(self._active.keys())
 
 

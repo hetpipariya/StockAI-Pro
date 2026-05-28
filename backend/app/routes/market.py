@@ -8,7 +8,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 
 from app.config import SMARTAPI_EXCHANGE
-from app.connectors import SmartAPIConnector, get_tradingsymbol
+from app.connectors import BrokerRouter, get_market_data_connector, get_tradingsymbol
 from app.services.candle_store import get_last_candle
 from app.services.bundle_service import (get_history as get_history_service,
                                          get_market_status as get_market_status_service,
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/market", tags=["market"])
 
 # Lazy singleton connector
-_connector: SmartAPIConnector | None = None
+_connector: BrokerRouter | None = None
 
 
 def _parse_candle_row(r) -> dict | None:
@@ -58,11 +58,11 @@ def _parse_candle_row(r) -> dict | None:
     return None
 
 
-def get_connector() -> SmartAPIConnector:
+def get_connector() -> BrokerRouter:
     global _connector
     if _connector is None:
-        _connector = SmartAPIConnector()
-        _connector.login()
+        _connector = get_market_data_connector()
+        _connector.ensure_login()
     return _connector
 
 
@@ -262,12 +262,7 @@ _TOP_SYMBOLS = [
         "sector": "FMCG",
         "type": "stock",
     },
-    {
-        "symbol": "TATAMOTORS",
-        "name": "Tata Motors Ltd",
-        "sector": "Auto",
-        "type": "stock",
-    },
+
     {
         "symbol": "BAJFINANCE",
         "name": "Bajaj Finance Ltd",
@@ -307,24 +302,7 @@ def _format_volume(volume: int) -> str:
     return str(safe)
 
 
-@router.get("/top-symbols")
-async def top_symbols():
-    """Curated top market symbols — indices + NIFTY 50 blue chips."""
-    return {
-        "status": "success",
-        "data": {"symbols": _TOP_SYMBOLS},
-        "message": "Top symbols",
-    }
-
-
-@router.get("/top-volume")
-async def top_volume():
-    """Top 5 stocks by real trading volume from snapshot feed."""
-    key = "top_volume"
-    cached = await get_cache(key)
-    if cached:
-        return {"status": "success", "data": cached, "message": "Top volume from cache"}
-
+async def _build_top_volume_rows(limit: int = 5) -> list[dict]:
     top_vol: list[dict] = []
     stock_symbols = [item for item in _TOP_SYMBOLS if item.get("type") == "stock"]
 
@@ -351,11 +329,33 @@ async def top_volume():
                 "volume_raw": volume_value,
                 "change": float(snapshot.get("change", 0) or 0),
                 "data_source": snapshot.get("data_source", "UNKNOWN"),
+                "ltp": float(snapshot.get("ltp", 0) or 0),
             }
         )
 
     top_vol.sort(key=lambda item: item.get("volume_raw", 0), reverse=True)
-    top_vol = top_vol[:5]
+    return top_vol[: max(1, min(limit, 10))]
+
+
+@router.get("/top-symbols")
+async def top_symbols():
+    """Curated top market symbols — indices + NIFTY 50 blue chips."""
+    return {
+        "status": "success",
+        "data": {"symbols": _TOP_SYMBOLS},
+        "message": "Top symbols",
+    }
+
+
+@router.get("/top-volume")
+async def top_volume():
+    """Top 5 stocks by real trading volume from snapshot feed."""
+    key = "top_volume"
+    cached = await get_cache(key)
+    if cached:
+        return {"status": "success", "data": cached, "message": "Top volume from cache"}
+
+    top_vol = await _build_top_volume_rows(limit=5)
 
     result = {
         "stocks": [
@@ -372,6 +372,38 @@ async def top_volume():
     }
     await set_cache(key, result, ttl=60)
     return {"status": "success", "data": result, "message": "Top volume"}
+
+
+@router.get("/overview")
+async def market_overview(top_n: int = Query(6, ge=3, le=10)):
+    """Aggregated market overview for dashboard terminals."""
+    key = f"market_overview:{top_n}"
+    cached = await get_cache(key)
+    if cached:
+        return {"status": "success", "data": cached, "message": "Market overview from cache"}
+
+    status_payload = await get_market_status_service()
+    leaders = await _build_top_volume_rows(limit=top_n)
+
+    data = {
+        "market_status": status_payload.get("details", get_market_status()),
+        "state": status_payload.get("state", "CLOSED"),
+        "leaders": [
+            {
+                "symbol": item["symbol"],
+                "name": item["name"],
+                "sector": item["sector"],
+                "ltp": item.get("ltp", 0.0),
+                "change": item.get("change", 0.0),
+                "volume": item["volume"],
+                "data_source": item.get("data_source", "UNKNOWN"),
+            }
+            for item in leaders
+        ],
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    await set_cache(key, data, ttl=20)
+    return {"status": "success", "data": data, "message": "Market overview"}
 
 
 # ─── Frontend-compatible path-based endpoints ───

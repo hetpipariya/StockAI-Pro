@@ -44,7 +44,6 @@ WATCHLIST: dict[str, str] = {
     "Power Grid": "POWERGRID.NS",
     # ── Automobile (10) ───────────────────────────────────────────────────────
     "Maruti Suzuki": "MARUTI.NS",
-    "Tata Motors": "TATAMOTORS.NS",
     "M&M": "M&M.NS",
     "Bajaj Auto": "BAJAJ-AUTO.NS",
     "Eicher Motors": "EICHERMOT.NS",

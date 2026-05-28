@@ -1,0 +1,21 @@
+{
+  "prediction_latency": {
+    "latency_ms": 48.3920999977272
+  },
+  "concurrent_benchmark": {
+    "requests": 100,
+    "avg_latency_ms": 738.6659029998555,
+    "max_latency_ms": 2777.4496999991243,
+    "p95_latency_ms": 1690.8566199963386
+  },
+  "multi_user_inference": {
+    "users": 8,
+    "symbols_per_user": 20,
+    "avg_user_batch_ms": 5906.383249999635,
+    "max_user_batch_ms": 6155.2991999997175
+  },
+  "websocket_inference_stability": true,
+  "live_candle_ingestion_compatible": true,
+  "redis_compatibility": true,
+  "bundle_endpoint_compatibility": true
+}

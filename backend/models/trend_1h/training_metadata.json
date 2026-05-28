@@ -1,0 +1,122 @@
+{
+  "pipeline": "train_1h_v3_leakage_free",
+  "model_type": "TREND_FILTER",
+  "timeframe": "1h",
+  "classes": {
+    "0": "BEAR",
+    "1": "BULL"
+  },
+  "feature_count": 24,
+  "feature_list": [
+    "ret_1",
+    "ret_3",
+    "ret_6",
+    "log_ret_1",
+    "log_ret_3",
+    "rsi_14",
+    "roc_5",
+    "roc_10",
+    "ema_spread",
+    "trend_strength_local",
+    "macd_hist",
+    "atr_pct",
+    "volatility_12",
+    "bb_width_pct",
+    "volume_ratio_20",
+    "volume_zscore_20",
+    "vwap_deviation",
+    "obv_slope_5",
+    "body_pct",
+    "upper_wick_pct",
+    "lower_wick_pct",
+    "close_location",
+    "breakout_up_20",
+    "breakout_down_20"
+  ],
+  "label_config": {
+    "type": "pure_forward_return",
+    "future_bars": 4,
+    "bull_threshold_pct": 0.5,
+    "bear_threshold_pct": 0.5
+  },
+  "sim_config": {
+    "tp_pct": 0.5,
+    "sl_pct": 0.35000000000000003,
+    "slippage": 0.05,
+    "max_hold_bars": 6
+  },
+  "inference_threshold": 0.55,
+  "calibration_method": "platt_logistic_regression",
+  "train_rows": 72669,
+  "valid_rows": 15572,
+  "test_rows": 15572,
+  "test_metrics": {
+    "accuracy": 0.5764834318006679,
+    "precision_bull": 0.5512114537444934,
+    "precision_bear": 0.57981971503344,
+    "roc_auc": 0.5660287042973442,
+    "brier_score": 0.24434582552668394,
+    "ece": 0.04638467044949723,
+    "trade_rate": 0.4165168250706396,
+    "trade_accuracy": 0.6059204440333025,
+    "confusion_matrix": [
+      [
+        7976,
+        815
+      ],
+      [
+        5780,
+        1001
+      ]
+    ],
+    "classification_report": {
+      "BEAR": {
+        "precision": 0.57981971503344,
+        "recall": 0.9072915481742692,
+        "f1-score": 0.7074998891205039,
+        "support": 8791.0
+      },
+      "BULL": {
+        "precision": 0.5512114537444934,
+        "recall": 0.14761834537678808,
+        "f1-score": 0.23287193206932652,
+        "support": 6781.0
+      },
+      "accuracy": 0.5764834318006679,
+      "macro avg": {
+        "precision": 0.5655155843889668,
+        "recall": 0.5274549467755286,
+        "f1-score": 0.4701859105949152,
+        "support": 15572.0
+      },
+      "weighted avg": {
+        "precision": 0.5673619305612883,
+        "recall": 0.5764834318006679,
+        "f1-score": 0.5008178844477558,
+        "support": 15572.0
+      }
+    },
+    "n_samples": 15572,
+    "n_traded": 6486,
+    "threshold_used": 0.55
+  },
+  "profit_simulation": {
+    "total_trades": 6482,
+    "win_rate": 0.5081764887380438,
+    "profit_factor": 1.1624058971141782,
+    "expectancy_pct": 0.03195001542733722,
+    "max_drawdown_pct": -12.400000000000011,
+    "total_return_pct": 207.10000000000014,
+    "rr_ratio": 1.43
+  },
+  "zero_fill_allowed": false,
+  "feature_contract_v": "v3.0",
+  "leakage_fixes": [
+    "Label: pure forward-return, no EMA gate",
+    "Calibration: PlattCalibrator (LR on valid, base model not re-trained)",
+    "1h context shifted +1 bar before merge",
+    "allow_exact_matches=False in asof merge",
+    "early_stopping_rounds prevents n_estimators overfitting",
+    "Scaler fit on train only"
+  ]
+}

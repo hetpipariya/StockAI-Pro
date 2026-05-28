@@ -1,10 +1,19 @@
 """WebSocket feed fallback tests for off-hours and idle-stream behavior."""
 
 import asyncio
+import json
 
 import pytest
 
 from app.websocket import handler, relay
+
+
+class _DummyWebSocket:
+    def __init__(self):
+        self.messages: list[dict] = []
+
+    async def send_text(self, raw: str):
+        self.messages.append(json.loads(raw))
 
 
 @pytest.fixture(autouse=True)
@@ -12,10 +21,63 @@ def reset_ws_feed_state():
     handler._last_known_prices.clear()
     relay._last_push.clear()
     relay._last_tick.clear()
+    relay.socket_manager._connections.clear()
+    relay.socket_manager._user_map.clear()
+    relay.socket_manager._user_clients.clear()
+    relay.socket_manager._subscriptions.clear()
+    relay.socket_manager._restored_symbols.clear()
+    relay.socket_manager._recent_disconnects.clear()
     yield
     handler._last_known_prices.clear()
     relay._last_push.clear()
     relay._last_tick.clear()
+    relay.socket_manager._connections.clear()
+    relay.socket_manager._user_map.clear()
+    relay.socket_manager._user_clients.clear()
+    relay.socket_manager._subscriptions.clear()
+    relay.socket_manager._restored_symbols.clear()
+    relay.socket_manager._recent_disconnects.clear()
+
+
+@pytest.mark.anyio
+async def test_socket_manager_send_to_user_isolation():
+    manager = relay.SocketManager()
+    ws_user_1 = _DummyWebSocket()
+    ws_user_2 = _DummyWebSocket()
+
+    await manager.connect(ws_user_1, user_id=1)
+    await manager.connect(ws_user_2, user_id=2)
+
+    await manager.send_to_user(
+        user_id=1,
+        payload={
+            "type": "user_state",
+            "user_id": 1,
+            "positions": [{"symbol": "RELIANCE"}],
+            "pnl": 125.5,
+        },
+    )
+
+    assert len(ws_user_1.messages) == 1
+    assert ws_user_1.messages[0]["user_id"] == 1
+    assert ws_user_1.messages[0]["type"] == "user_state"
+    assert ws_user_2.messages == []
+
+
+@pytest.mark.anyio
+async def test_socket_manager_restores_subscriptions_on_reconnect_within_grace_window():
+    manager = relay.SocketManager()
+    first_socket = _DummyWebSocket()
+
+    first_client = await manager.connect(first_socket, user_id=77)
+    await manager.subscribe(first_client, ["reliance", "tcs"])
+    await manager.disconnect(first_client)
+
+    second_socket = _DummyWebSocket()
+    second_client = await manager.connect(second_socket, user_id=77)
+    restored = manager.pop_restored_symbols(second_client)
+
+    assert set(restored) == {"RELIANCE", "TCS"}
 
 
 @pytest.mark.anyio

@@ -1,94 +1,83 @@
-from typing import Any, Dict, List
+"""Legacy feature helpers for the inference runner.
+
+This module preserves the older `app.inference.features` import surface
+while delegating feature construction to the canonical feature-engineering
+implementation.
+"""
+
+from __future__ import annotations
+
+from typing import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
 
-from app.services.indicators import IndicatorEngine
+from app.inference.feature_engineering import BASE_5M_FEATURE_COLUMNS, FEATURE_COLUMNS, compute_features
 
 
-def extract_features(ohlcv: List[Dict[str, Any]]) -> pd.DataFrame:
-    """
-    Given raw OHLCV data, calculates indicators and extracts feature vectors
-    for model inference. Returns a DataFrame with normalized features.
-    """
-    if not ohlcv or len(ohlcv) < 50:
+def _to_dataframe(ohlcv: pd.DataFrame | Sequence[dict] | None) -> pd.DataFrame:
+    if ohlcv is None:
         return pd.DataFrame()
-
-    # Calculate indicators
-    df = IndicatorEngine.compute_all(ohlcv)
-    if "time" in df.columns:
-        df.set_index("time", inplace=True)
-
-    # Drop rows with NaNs from rolling windows
-    df.dropna(inplace=True)
-    if len(df) == 0:
-        return pd.DataFrame()
-
-    # Feature columns we care about
-    feature_cols = [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "ema9",
-        "ema15",
-        "sma20",
-        "vwap",
-        "rsi9",
-        "macd",
-        "macd_hist",
-        "stoch_k",
-        "stoch_d",
-        "cci20",
-        "roc9",
-        "bb_upper",
-        "bb_lower",
-        "atr14",
-        "adx14",
-        "obv",
-    ]
-
-    available_cols = [c for c in feature_cols if c in df.columns]
-    features_df = df[available_cols].copy()
-
-    # Simple percentage changes relative to close
-    for col in ["ema9", "ema15", "sma20", "vwap", "bb_upper", "bb_lower"]:
-        if col in features_df.columns:
-            features_df[f"{col}_dist"] = (
-                features_df[col] - features_df["close"]
-            ) / features_df["close"]
-
-    # Calculate log returns
-    features_df["log_ret"] = np.log(
-        features_df["close"] / features_df["close"].shift(1)
-    )
-
-    # Fill remaining NaNs
-    features_df.fillna(0, inplace=True)
-
-    # Scale features (StandardScaler logic but hardcoded here for simplicity if no scikit fitted scaler is saved)
-    # In production, you would load the fitted scaler from training.
-    for col in features_df.columns:
-        if features_df[col].std() > 0:
-            features_df[col] = (
-                features_df[col] - features_df[col].mean()
-            ) / features_df[col].std()
-
-    return features_df
+    if isinstance(ohlcv, pd.DataFrame):
+        return ohlcv.copy()
+    return pd.DataFrame(list(ohlcv))
 
 
-def get_latest_sequence(
-    features_df: pd.DataFrame, sequence_length: int = 20
-) -> np.ndarray:
-    """Returns the most recent sequence for RNN/LSTM/GRU inputs."""
-    if len(features_df) < sequence_length:
-        return np.array([])
-    return features_df.iloc[-sequence_length:].values
+def extract_features(ohlcv: pd.DataFrame | Sequence[dict]) -> pd.DataFrame:
+    """Build the legacy inference feature frame from raw OHLCV input."""
+
+    frame = _to_dataframe(ohlcv)
+    if frame.empty:
+        return pd.DataFrame(columns=FEATURE_COLUMNS)
+
+    for column in ["open", "high", "low", "close", "volume"]:
+        if column not in frame.columns:
+            frame[column] = 0.0
+
+    return compute_features(frame)
 
 
-def get_latest_tabular(features_df: pd.DataFrame) -> np.ndarray:
-    """Returns the most recent row for XGBoost inputs."""
-    if len(features_df) == 0:
-        return np.array([])
-    return features_df.iloc[-1:].values
+def get_latest_sequence(feature_df: pd.DataFrame, window: int = 20) -> np.ndarray:
+    """Return a simple rolling feature sequence for legacy ensemble inputs."""
+
+    frame = feature_df.copy() if isinstance(feature_df, pd.DataFrame) else pd.DataFrame(feature_df)
+    if frame.empty:
+        return np.zeros((window, len(FEATURE_COLUMNS)), dtype=float)
+
+    columns = [name for name in FEATURE_COLUMNS if name in frame.columns]
+    if not columns:
+        columns = list(frame.columns[: min(len(frame.columns), len(FEATURE_COLUMNS))])
+
+    trimmed = frame[columns].tail(window).astype(float).to_numpy(copy=True)
+    if len(trimmed) < window:
+        pad = np.zeros((window - len(trimmed), trimmed.shape[1] if trimmed.ndim == 2 else len(columns)), dtype=float)
+        trimmed = np.vstack([pad, trimmed]) if trimmed.size else pad
+
+    if trimmed.ndim == 1:
+        trimmed = trimmed.reshape(-1, 1)
+
+    return np.nan_to_num(trimmed, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def get_latest_tabular(feature_df: pd.DataFrame) -> np.ndarray:
+    """Return the latest feature row as a 2D tabular input."""
+
+    frame = feature_df.copy() if isinstance(feature_df, pd.DataFrame) else pd.DataFrame(feature_df)
+    if frame.empty:
+        return np.zeros((1, len(FEATURE_COLUMNS)), dtype=float)
+
+    columns = [name for name in FEATURE_COLUMNS if name in frame.columns]
+    if not columns:
+        columns = list(frame.columns[: min(len(frame.columns), len(FEATURE_COLUMNS))])
+
+    latest = frame.iloc[-1:][columns].astype(float).to_numpy(copy=True)
+    return np.nan_to_num(latest, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+__all__ = [
+    "BASE_5M_FEATURE_COLUMNS",
+    "FEATURE_COLUMNS",
+    "extract_features",
+    "get_latest_sequence",
+    "get_latest_tabular",
+]

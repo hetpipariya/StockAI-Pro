@@ -1,4 +1,11 @@
 import axios from 'axios';
+import { getStoredAccessToken } from '../utils/authStorage.js';
+import {
+  API_TIMEOUT_MS,
+  beginSingleFlightRequest,
+  isAbortLikeError,
+  normalizeTimeoutMs,
+} from '../api/requestGate.js';
 
 const rawBaseUrl = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 const apiBaseUrl = !rawBaseUrl
@@ -11,11 +18,43 @@ const apiBaseUrl = !rawBaseUrl
 
 const api = axios.create({
   baseURL: apiBaseUrl,
-  timeout: 10000,
+  timeout: API_TIMEOUT_MS,
 });
 
+const stableSerialize = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return JSON.stringify(value ?? null);
+  }
+
+  const ordered = Object.keys(value)
+    .sort()
+    .reduce((acc, key) => {
+      acc[key] = value[key];
+      return acc;
+    }, {});
+
+  return JSON.stringify(ordered);
+};
+
+const buildSingleFlightKey = (config = {}) => {
+  const method = String(config.method || 'GET').toUpperCase();
+  const url = String(config.url || '');
+  const params = stableSerialize(config.params || null);
+  return `${method}:${url}:${params}`;
+};
+
 api.interceptors.request.use((config) => {
-  const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+  const gate = beginSingleFlightRequest({
+    externalSignal: config.signal,
+    key: buildSingleFlightKey(config),
+  });
+  const timeoutMs = normalizeTimeoutMs(config.timeout, API_TIMEOUT_MS);
+  config.signal = gate.signal;
+  config.timeout = timeoutMs;
+  config.__requestTimeoutMs = timeoutMs;
+  config.__requestGateRelease = gate.release;
+
+  const token = getStoredAccessToken();
   if (token) {
     config.headers = {
       ...config.headers,
@@ -24,6 +63,37 @@ api.interceptors.request.use((config) => {
   }
   return config;
 });
+
+api.interceptors.response.use(
+  (response) => {
+    response?.config?.__requestGateRelease?.();
+    return response;
+  },
+  (error) => {
+    error?.config?.__requestGateRelease?.();
+    if (isAbortLikeError(error)) {
+      const timeoutMs = Number(error?.config?.__requestTimeoutMs || API_TIMEOUT_MS);
+      const abortReason = String(error?.config?.signal?.reason || '');
+
+      if (abortReason === 'request_timeout') {
+        const timeoutError = new Error(`Request timed out after ${timeoutMs}ms. Fail-fast triggered.`);
+        timeoutError.name = 'TimeoutError';
+        timeoutError.code = 'ERR_TIMEOUT';
+        timeoutError.status = 0;
+        timeoutError.isTimeout = true;
+        return Promise.reject(timeoutError);
+      }
+
+      const cancelError = new Error('Request canceled by a newer request.');
+      cancelError.name = 'AbortError';
+      cancelError.code = 'ERR_CANCELED';
+      cancelError.status = 0;
+      cancelError.isTimeout = false;
+      return Promise.reject(cancelError);
+    }
+    return Promise.reject(error);
+  },
+);
 
 const toNumber = (value, fallback = 0) => {
   const parsed = Number(value);
@@ -86,6 +156,14 @@ const normalizeSymbolList = (payload) => {
 
 const createEmptyBundle = (symbol) => ({
   symbol,
+  partial: false,
+  warnings: [],
+  components: {
+    history: 'ok',
+    snapshot: 'ok',
+    prediction: 'ok',
+    indicators: 'ok',
+  },
   history: {
     candles: [],
     count: 0,
@@ -222,9 +300,11 @@ export const getBundle = async (symbol, options = {}) => {
     const response = await api.get(`/bundle/${encodeURIComponent(normalizedSymbol)}`, {
       params: {
         interval: options.interval || '1m',
-        limit: options.limit || 100,
+        limit: options.limit || 200,
         horizon: options.horizon || '15m',
       },
+      signal: options.signal,
+      timeout: Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : API_TIMEOUT_MS,
     });
 
     const raw = unwrapPayload(response.data);
@@ -241,6 +321,19 @@ export const getBundle = async (symbol, options = {}) => {
 
     return normalized;
   } catch (error) {
+    const fallbackPayload = error?.response?.data && typeof error.response.data === 'object'
+      ? unwrapPayload(error.response.data)
+      : null;
+
+    if (fallbackPayload && typeof fallbackPayload === 'object') {
+      const normalized = normalizeBundlePayload(normalizedSymbol, fallbackPayload);
+      normalized.partial = true;
+      normalized.warnings = Array.isArray(normalized.warnings) && normalized.warnings.length > 0
+        ? normalized.warnings
+        : ['Bundle request degraded'];
+      return normalized;
+    }
+
     if (import.meta.env.DEV) {
       // eslint-disable-next-line no-console
       console.error('Bundle request failed:', {
@@ -258,15 +351,17 @@ export const fetchStockBundle = async (symbol, options = {}) => {
   return getBundle(symbol, options);
 };
 
-export const fetchMarketSymbols = async (limit = 500) => {
+export const fetchMarketSymbols = async (limit = 500, options = {}) => {
   const response = await api.get('/market/symbols', {
     params: { limit: Math.max(1, Math.min(Number(limit) || 100, 500)) },
+    signal: options.signal,
+    timeout: Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : API_TIMEOUT_MS,
   });
 
   return normalizeSymbolList(response.data);
 };
 
-export const searchMarketSymbols = async (query, limit = 100) => {
+export const searchMarketSymbols = async (query, limit = 100, options = {}) => {
   const q = String(query || '').trim();
   if (!q) return [];
 
@@ -275,9 +370,45 @@ export const searchMarketSymbols = async (query, limit = 100) => {
       q,
       limit: Math.max(1, Math.min(Number(limit) || 100, 100)),
     },
+    signal: options.signal,
+    timeout: Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : API_TIMEOUT_MS,
   });
 
   return normalizeSymbolList(response.data);
+};
+
+export const fetchTradeDecision = async (symbol, options = {}) => {
+  const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+  if (!normalizedSymbol) {
+    throw new Error('Symbol is required for trade decision');
+  }
+
+  const response = await api.get(`/trade-decision/${encodeURIComponent(normalizedSymbol)}`, {
+    params: {
+      interval: options.interval || '1m',
+      horizon: options.horizon || '15m',
+      capital: options.capital,
+      risk_per_trade: options.riskPerTrade ?? 0.01,
+    },
+    signal: options.signal,
+    timeout: Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : API_TIMEOUT_MS,
+  });
+
+  const payload = unwrapPayload(response.data);
+  return payload && typeof payload === 'object' ? payload : {};
+};
+
+export const fetchMarketOverview = async (options = {}) => {
+  const response = await api.get('/market/overview', {
+    params: {
+      top_n: Math.max(3, Math.min(Number(options.topN) || 6, 10)),
+    },
+    signal: options.signal,
+    timeout: Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : API_TIMEOUT_MS,
+  });
+
+  const payload = unwrapPayload(response.data);
+  return payload && typeof payload === 'object' ? payload : {};
 };
 
 // Search is smart on frontend but basic proxy here if necessary 

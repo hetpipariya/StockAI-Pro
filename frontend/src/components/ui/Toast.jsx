@@ -1,58 +1,64 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useMemo, useState, useCallback } from 'react';
+import { AlertCircle, AlertTriangle, CheckCircle2, Info } from 'lucide-react';
 
-const ToastContext = createContext();
+const ToastContext = createContext(null);
+
+const toastTone = {
+  success: {
+    icon: CheckCircle2,
+    style: 'border-emerald-300/45 bg-emerald-500/15 text-emerald-100',
+  },
+  error: {
+    icon: AlertCircle,
+    style: 'border-rose-300/45 bg-rose-500/15 text-rose-100',
+  },
+  warning: {
+    icon: AlertTriangle,
+    style: 'border-amber-300/45 bg-amber-500/15 text-amber-100',
+  },
+  info: {
+    icon: Info,
+    style: 'border-cyan-300/45 bg-cyan-500/15 text-cyan-100',
+  },
+};
 
 export const ToastProvider = ({ children }) => {
   const [toasts, setToasts] = useState([]);
 
-  const showToast = useCallback((message, type = 'info') => {
-    const id = Date.now();
-    setToasts(prev => {
-      // Keep max 3 toasts
-      const active = [...prev, { id, message, type }];
-      if (active.length > 3) active.shift();
-      return active;
+  const showToast = useCallback((message, type = 'info', duration = 3200) => {
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    setToasts((prev) => {
+      const next = [...prev, { id, message, type }];
+      if (next.length > 4) next.shift();
+      return next;
     });
 
     setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
-    }, 3000);
+      setToasts((prev) => prev.filter((toast) => toast.id !== id));
+    }, duration);
   }, []);
 
+  const contextValue = useMemo(() => ({ showToast }), [showToast]);
+
   return (
-    <ToastContext.Provider value={{ showToast }}>
+    <ToastContext.Provider value={contextValue}>
       {children}
-      <div style={{
-        position: 'fixed',
-        top: '20px',
-        right: '20px',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '8px',
-        zIndex: 9999,
-        pointerEvents: 'none',
-        fontFamily: 'var(--font-family-base, sans-serif)'
-      }}>
-        {toasts.map(toast => {
-          let bg = 'var(--card, #0C1118)';
-          let border = 'var(--primary, #00FF9F)';
-          if (toast.type === 'error') border = '#FF4C4C';
-          else if (toast.type === 'warning') border = '#FFB347';
-          else if (toast.type === 'info') border = '#8A9BB0';
+      <div className="pointer-events-none fixed right-4 top-4 z-[100] flex w-[min(92vw,360px)] flex-col gap-2">
+        {toasts.map((toast) => {
+          const tone = toastTone[toast.type] || toastTone.info;
+          const Icon = tone.icon;
 
           return (
-            <div key={toast.id} style={{
-              background: bg,
-              color: '#fff',
-              borderLeft: `4px solid ${border}`,
-              padding: '12px 20px',
-              borderRadius: '4px',
-              boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
-              fontSize: '13px',
-              animation: 'slideInRight 0.3s ease forwards',
-              minWidth: '250px'
-            }}>
-              {toast.message}
+            <div
+              key={toast.id}
+              className={`pointer-events-auto rounded-xl border px-3.5 py-3 text-sm shadow-[0_14px_30px_rgba(2,8,23,0.45)] backdrop-blur-sm animate-in slide-in-from-right-5 fade-in duration-300 ${tone.style}`}
+              role="status"
+              aria-live="polite"
+            >
+              <div className="flex items-start gap-2.5">
+                <Icon className="mt-0.5 h-4.5 w-4.5 shrink-0" />
+                <p className="leading-relaxed">{toast.message}</p>
+              </div>
             </div>
           );
         })}
@@ -61,4 +67,10 @@ export const ToastProvider = ({ children }) => {
   );
 };
 
-export const useToast = () => useContext(ToastContext);
+export const useToast = () => {
+  const context = useContext(ToastContext);
+  if (!context) {
+    throw new Error('useToast must be used within ToastProvider');
+  }
+  return context;
+};

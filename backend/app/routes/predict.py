@@ -1,8 +1,10 @@
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from app.routes.auth import get_current_user
+from app.services.db import UserModel
 from app.services.bundle_service import get_prediction as get_prediction_service
 
 logger = logging.getLogger(__name__)
@@ -32,18 +34,25 @@ def _path_hold_fallback(symbol: str, reason: str) -> dict:
 
 # Deprecated: replaced by /api/v1/bundle
 @router.get("/predict/{symbol}", deprecated=True)
-async def get_predict_by_path(symbol: str):
+async def get_predict_by_path(
+    symbol: str,
+    current_user: UserModel = Depends(get_current_user),
+):
     """Path alias for prediction endpoint; delegates to the main runner pipeline."""
     normalized_symbol = symbol.strip().upper()
     try:
-        response = await get_predict(
-            symbol=normalized_symbol, horizon="15m", debug=False
+        result = await get_prediction_service(
+            symbol=normalized_symbol,
+            horizon="15m",
         )
-        if isinstance(response, dict) and isinstance(response.get("data"), dict):
-            return response["data"]
-        return response
+        return {**result, "user_id": current_user.id}
     except Exception as exc:
-        logger.error("Path prediction failed for %s: %s", normalized_symbol, exc)
+        logger.error(
+            "Path prediction failed for %s user_id=%s: %s",
+            normalized_symbol,
+            current_user.id,
+            exc,
+        )
         return _path_hold_fallback(normalized_symbol, reason=f"HOLD fallback: {exc}")
 
 
@@ -55,6 +64,7 @@ async def get_predict(
     debug: bool = Query(
         False, description="Include debug info (feature values, probabilities)"
     ),
+    current_user: UserModel = Depends(get_current_user),
 ):
     """Get AI prediction for symbol using shared bundle data services."""
     normalized_symbol = symbol.strip().upper()
@@ -66,11 +76,17 @@ async def get_predict(
         )
         return {
             "status": "success",
-            "data": result,
+            "data": {**result, "user_id": current_user.id},
             "message": "Prediction generated successfully",
         }
     except Exception as exc:
-        logger.error("Prediction failed for %s: %s", normalized_symbol, exc, exc_info=True)
+        logger.error(
+            "Prediction failed for %s user_id=%s: %s",
+            normalized_symbol,
+            current_user.id,
+            exc,
+            exc_info=True,
+        )
         return {
             "status": "error",
             "data": _path_hold_fallback(
@@ -82,7 +98,10 @@ async def get_predict(
 
 
 @router.get("/predict/signal/{symbol}")
-async def get_signal(symbol: str):
+async def get_signal(
+    symbol: str,
+    current_user: UserModel = Depends(get_current_user),
+):
     """Get AI trading signal for a specific symbol (path-based)."""
     normalized_symbol = symbol.strip().upper()
 
@@ -116,11 +135,17 @@ async def get_signal(symbol: str):
 
         return {
             "status": "success",
-            "data": signal_data,
+            "data": {**signal_data, "user_id": current_user.id},
             "message": "Signal retrieved successfully",
         }
     except Exception as exc:
-        logger.error("Signal fetch failed for %s: %s", normalized_symbol, exc, exc_info=True)
+        logger.error(
+            "Signal fetch failed for %s user_id=%s: %s",
+            normalized_symbol,
+            current_user.id,
+            exc,
+            exc_info=True,
+        )
         return {
             "status": "error",
             "data": _path_hold_fallback(

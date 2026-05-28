@@ -1,0 +1,204 @@
+{
+  "train_rows": 56000,
+  "val_rows": 12000,
+  "test_rows": 12000,
+  "walk_forward_validation": {
+    "folds": 20,
+    "max_folds_cap": 20,
+    "mean_accuracy": 0.9968,
+    "mean_f1": 0.9952121131942295,
+    "mean_mcc": 0.0,
+    "per_fold": [
+      {
+        "fold": 1,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 0.988,
+        "f1": 0.982036217303823,
+        "mcc": 0.0
+      },
+      {
+        "fold": 2,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 3,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 4,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 5,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 0.996,
+        "f1": 0.9940040080160322,
+        "mcc": 0.0
+      },
+      {
+        "fold": 6,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 7,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 8,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 9,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 10,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 11,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 0.976,
+        "f1": 0.9641457489878543,
+        "mcc": 0.0
+      },
+      {
+        "fold": 12,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 13,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 0.992,
+        "f1": 0.9880160642570281,
+        "mcc": 0.0
+      },
+      {
+        "fold": 14,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 15,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 16,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 0.988,
+        "f1": 0.982036217303823,
+        "mcc": 0.0
+      },
+      {
+        "fold": 17,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 0.996,
+        "f1": 0.9940040080160322,
+        "mcc": 0.0
+      },
+      {
+        "fold": 18,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 19,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      },
+      {
+        "fold": 20,
+        "rows_train": 1000,
+        "rows_val": 250,
+        "accuracy": 1.0,
+        "f1": 1.0,
+        "mcc": 0.0
+      }
+    ]
+  },
+  "feature_schema": [
+    "ema9",
+    "ema21",
+    "ema50",
+    "ema_ratio",
+    "linreg_slope",
+    "rsi14",
+    "macd_hist",
+    "roc10",
+    "cci20",
+    "vwap_distance",
+    "volume_ratio",
+    "mfi14",
+    "atr14",
+    "bb_width",
+    "bb_percent_b",
+    "adx14",
+    "candle_body_ratio",
+    "mtf_15m_direction",
+    "daily_alignment",
+    "nifty_direction"
+  ],
+  "hold_threshold": 0.58,
+  "hold_bias_margin": 0.06,
+  "min_directional_prob": 0.18,
+  "class_weight_map": {
+    "0": 137.2549019607843,
+    "1": 0.33526108456960857,
+    "2": 100.3584229390681
+  }
+}

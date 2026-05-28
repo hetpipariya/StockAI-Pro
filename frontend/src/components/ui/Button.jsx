@@ -1,93 +1,77 @@
-import React from "react";
-import { Loader2, CheckCircle } from "lucide-react";
+import React from 'react';
+import { Loader2, CheckCircle2 } from 'lucide-react';
+import { clsx } from 'clsx';
+import { twMerge } from 'tailwind-merge';
 
 export const Button = ({
   children,
   onClick,
-  type = "button",
+  type = 'button',
   disabled = false,
   isLoading = false,
+  loadingText = 'Loading...',
   isSuccess = false,
-  variant = "primary", // primary, secondary, outline, ghost
-  className = "",
-  size = "default", // sm, default, lg
+  variant = 'primary',
+  className = '',
+  size = 'default',
+  ...props
 }) => {
-  const baseClasses =
-    "relative font-semibold flex items-center justify-center overflow-hidden transition-all duration-300 ease-out transform active:scale-[0.98] outline-none rounded-lg";
-  
+  const isBlocked = disabled || isLoading || isSuccess;
+
   const sizeClasses = {
-    sm: "py-1.5 px-3 text-xs",
-    default: "py-2.5 px-5 text-sm",
-    lg: "py-3.5 px-6 text-base",
+    sm: 'h-8 px-3 text-xs',
+    default: 'h-10 px-4 text-sm',
+    lg: 'h-12 px-5 text-base',
   };
 
   const variantClasses = {
-    primary:
-      "bg-[#1e2532] text-white border border-[#2e374a] shadow-[0_4px_12px_rgba(0,0,0,0.3)] hover:bg-[#252d3d] hover:border-[#384358] hover:shadow-[0_6px_16px_rgba(0,0,0,0.4)] hover:-translate-y-[1px]",
-    secondary:
-      "bg-[#0d121c] text-slate-300 border border-slate-800 hover:bg-[#121926] hover:border-slate-700 hover:text-white shadow-sm",
-    outline:
-      "bg-transparent text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/10 hover:border-cyan-400/50 shadow-[0_0_10px_rgba(34,211,238,0.05)]",
-    ghost:
-      "bg-transparent text-slate-400 hover:text-white hover:bg-slate-800/50 border border-transparent",
+    primary: 'border-cyan-400/45 bg-gradient-to-r from-cyan-400/25 via-cyan-300/10 to-emerald-300/20 text-cyan-50 shadow-[0_10px_26px_rgba(34,211,238,0.2)] hover:border-cyan-300/70 hover:shadow-[0_12px_28px_rgba(16,185,129,0.26)]',
+    secondary: 'border-slate-600/60 bg-slate-900/70 text-slate-100 shadow-[0_8px_20px_rgba(2,6,23,0.45)] hover:border-slate-500/70 hover:bg-slate-800/80',
+    outline: 'border-cyan-400/45 bg-transparent text-cyan-200 hover:bg-cyan-500/10 hover:text-cyan-100',
+    ghost: 'border-transparent bg-transparent text-slate-300 hover:bg-white/10 hover:text-white',
+    danger: 'border-rose-400/45 bg-rose-500/15 text-rose-100 shadow-[0_10px_24px_rgba(244,63,94,0.24)] hover:border-rose-300/70 hover:bg-rose-500/25',
   };
 
-  const disabledClasses =
-    "bg-[#0f141e] text-slate-600 cursor-not-allowed border-[#1a2233] shadow-none hover:translate-y-0 active:scale-100";
-  
-  const successClasses =
-    "bg-emerald-500/10 border-emerald-500/30 text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.2)] filter-none hover:translate-y-0 cursor-default active:scale-100";
-
-  const getCombinedClasses = () => {
-    let classes = `${baseClasses} ${sizeClasses[size]}`;
-    
-    if (isSuccess) {
-      classes += ` ${successClasses}`;
-    } else if (disabled || isLoading) {
-      classes += ` ${disabledClasses}`;
-    } else {
-      classes += ` ${variantClasses[variant]}`;
-    }
-    
-    return `${classes} ${className}`;
-  };
+  const stateClasses = isSuccess
+    ? 'cursor-default border-emerald-400/50 bg-emerald-500/20 text-emerald-100 shadow-[0_0_22px_rgba(16,185,129,0.28)]'
+    : isBlocked
+      ? 'cursor-not-allowed border-slate-700/60 bg-slate-900/70 text-slate-500 shadow-none'
+      : variantClasses[variant] || variantClasses.primary;
 
   return (
     <button
       type={type}
       onClick={onClick}
-      disabled={disabled || isLoading || isSuccess}
-      className={getCombinedClasses()}
+      disabled={isBlocked}
+      className={twMerge(clsx(
+        'group relative inline-flex items-center justify-center gap-2 overflow-hidden rounded-xl border font-semibold tracking-wide transition-all duration-200 ease-out',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300/40 focus-visible:ring-offset-2 focus-visible:ring-offset-[#060C18]',
+        !isBlocked && 'active:scale-[0.99] hover:-translate-y-[1px]',
+        sizeClasses[size] || sizeClasses.default,
+        stateClasses,
+        className,
+      ))}
+      {...props}
     >
-      <div className="relative z-10 flex items-center justify-center gap-2">
+      {!isBlocked && variant === 'primary' ? (
+        <span className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_-15%,rgba(255,255,255,0.28),transparent_42%)] opacity-70" />
+      ) : null}
+
+      <span className="relative z-10 inline-flex items-center gap-2">
         {isSuccess ? (
           <>
-            <CheckCircle className="h-4 w-4 animate-in zoom-in duration-300" />
-            <span className="animate-in slide-in-from-right-2 duration-300">
-              Verified
-            </span>
+            <CheckCircle2 className="h-4 w-4" />
+            <span>Verified</span>
           </>
         ) : isLoading ? (
           <>
-            <Loader2 className="h-4 w-4 animate-spin text-cyan-400" />
-            <span className="animate-in fade-in duration-300 text-slate-300">
-              Signing in...
-            </span>
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>{loadingText}</span>
           </>
         ) : (
           children
         )}
-      </div>
-
-      {/* Subtle top highlight for depth */}
-      {(!disabled && !isSuccess && variant === "primary") && (
-        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent opacity-50"></div>
-      )}
-      
-      {/* Ripple/Glow effect base layer */}
-      {(!disabled && !isSuccess && variant === "primary") && (
-        <div className="absolute inset-0 bg-cyan-400/5 opacity-0 active:opacity-100 transition-opacity duration-150 mix-blend-overlay"></div>
-      )}
+      </span>
     </button>
   );
 };

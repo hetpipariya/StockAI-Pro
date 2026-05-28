@@ -1,98 +1,64 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
-import { useStore } from '../store/useStore';
+import React, { useCallback, useEffect, useRef } from 'react';
+import { useStore } from '../store/useStore.js';
 import { useToast } from '../components/Toast';
-import { Card, Badge, Button } from '../components/ui';
-import SmartSearchBar from '../components/dashboard/SmartSearchBar';
-import CandlestickChart from '../components/dashboard/CandlestickChart';
-import KpiCards from '../components/dashboard/KpiCards';
-import TopMovers from '../components/dashboard/TopMovers';
 import { wsManager } from '../api/websocket.js';
+import { useLivePrice } from '../context/LivePriceContext';
+import CandlestickChart from '../components/dashboard/CandlestickChart';
+import Topbar from '../components/dashboard/Topbar';
+import Bottombar from '../components/dashboard/Bottombar';
+import AiTerminalPanel from '../components/dashboard/AiTerminalPanel';
+import { AlertTriangle, Layers, Maximize2 } from 'lucide-react';
 
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '1d'];
-const TRENDING_SYMBOLS = ['RELIANCE', 'TCS', 'INFY', 'HDFCBANK', 'ICICIBANK'];
-
-const toNumber = (value, fallback = 0) => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-};
-
-const toFinite = (value) => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-};
-
-const formatOptionalCurrency = (value) => {
-  const parsed = toFinite(value);
-  if (parsed === null || parsed <= 0) return '--';
-  return `₹${parsed.toFixed(2)}`;
-};
-
-const formatOptionalPercent = (value) => {
-  const parsed = toFinite(value);
-  if (parsed === null || parsed <= 0) return '--';
-  return `${parsed.toFixed(1)}%`;
-};
-
-const signalVariant = (signal) => {
-  const value = String(signal || '').toUpperCase();
-  if (value === 'BUY') return 'buy';
-  if (value === 'SELL') return 'sell';
-  return 'info';
-};
 
 export default function Dashboard() {
   const { showToast } = useToast();
 
-  const {
-    balance,
-    todaysPnL,
-    winRate,
-    activeTrades,
-    selectedSymbol,
-    selectedTimeframe,
-    symbolCatalog,
-    priceBySymbol,
-    currentSignal,
-    candles,
-    indicators,
-    bundleLoading,
-    bundleError,
-    loadSymbolCatalog,
-    loadSymbolBundle,
-    selectTimeframe,
-  } = useStore();
+  const { currentPrice, dataSource, connectionStatus } = useLivePrice();
+
+  // Selector-based Zustand subscriptions to minimize global page reconciliation
+  const selectedSymbol = useStore(state => state.selectedSymbol);
+  const selectedTimeframe = useStore(state => state.selectedTimeframe);
+  const symbolCatalog = useStore(state => state.symbolCatalog);
+  const candles = useStore(state => state.candles);
+  const snapshot = useStore(state => state.snapshot);
+  const indicators = useStore(state => state.indicators);
+  const currentSignal = useStore(state => state.currentSignal);
+  const bundleLoading = useStore(state => state.bundleLoading);
+  const bundleError = useStore(state => state.bundleError);
+  const bundleWarnings = useStore(state => state.bundleWarnings);
+  const loadSymbolCatalog = useStore(state => state.loadSymbolCatalog);
+  const loadSymbolBundle = useStore(state => state.loadSymbolBundle);
+  const selectTimeframe = useStore(state => state.selectTimeframe);
 
   const autoLoadAttemptsRef = useRef(new Set());
   const selectedSignalSymbol = String(currentSignal?.symbol || '').toUpperCase();
   const hasSignalForSelectedSymbol = selectedSignalSymbol === String(selectedSymbol || '').toUpperCase();
 
+  const livePrice = Number(currentPrice) || Number(snapshot?.ltp) || 2400.00;
+  const dataSourceLabel = String(dataSource || 'NSE_API').toUpperCase();
+
+  // Load symbols catalog on mount
   useEffect(() => {
     if (!symbolCatalog.length) {
       void loadSymbolCatalog();
     }
   }, [symbolCatalog.length, loadSymbolCatalog]);
 
+  // Load symbol bundle
   useEffect(() => {
     const key = `${selectedSymbol}:${selectedTimeframe}`;
-
     if (bundleLoading || hasSignalForSelectedSymbol || autoLoadAttemptsRef.current.has(key)) {
       return;
     }
-
     autoLoadAttemptsRef.current.add(key);
-
-    if (import.meta.env.DEV) {
-      // eslint-disable-next-line no-console
-      console.log('[Dashboard] auto-loading bundle:', { selectedSymbol, selectedTimeframe });
-    }
-
     void loadSymbolBundle(selectedSymbol, selectedTimeframe).catch(() => null);
   }, [bundleLoading, hasSignalForSelectedSymbol, loadSymbolBundle, selectedSymbol, selectedTimeframe]);
 
+  // WebSocket Subscription management
   useEffect(() => {
     const normalized = String(selectedSymbol || '').trim().toUpperCase();
     if (!normalized) return undefined;
-
     wsManager.subscribe(normalized);
     return () => {
       wsManager.unsubscribe(normalized);
@@ -115,109 +81,123 @@ export default function Dashboard() {
     }
   }, [selectTimeframe, showToast]);
 
-  const liveSignalLabel = String(currentSignal?.signal || currentSignal?.type || 'HOLD').toUpperCase();
-
-  const livePrice = useMemo(() => {
-    const fromTicker = toFinite(priceBySymbol?.[selectedSymbol]);
-    if (fromTicker !== null && fromTicker > 0) return fromTicker;
-
-    const fromSignal = toFinite(currentSignal?.price ?? currentSignal?.currentPrice);
-    if (fromSignal !== null && fromSignal > 0) return fromSignal;
-
-    return null;
-  }, [currentSignal?.currentPrice, currentSignal?.price, priceBySymbol, selectedSymbol]);
-
-  const kpidata = [
-    { label: 'Total Equity', value: `₹${toNumber(balance, 0).toLocaleString('en-IN')}` },
-    { label: 'Today P&L', value: `₹${toNumber(todaysPnL, 0).toLocaleString('en-IN')}` },
-    { label: 'Win Rate', value: `${toNumber(winRate, 0).toFixed(1)}%` },
-    { label: 'Active Trades', value: activeTrades.length },
-  ];
+  const tradeLevels = {
+    entry: currentSignal?.entry || currentSignal?.price || livePrice,
+    stopLoss: currentSignal?.stopLoss || currentSignal?.stop_loss || livePrice * 0.98,
+    target: currentSignal?.target || currentSignal?.target_price || livePrice * 1.03
+  };
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto pb-10">
-      <KpiCards kpidata={kpidata} />
-
-      <Card className="space-y-4">
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <h3 className="text-xl font-bold text-white">All Stock Search</h3>
-          <Badge variant="info">Bundle API • 100 Candles</Badge>
-        </div>
-
-        <SmartSearchBar
-          selectedSymbol={selectedSymbol}
-          onSelectSymbol={handleSelectSymbol}
-          priceBySymbol={priceBySymbol}
-          catalog={symbolCatalog}
-          trendingSymbols={TRENDING_SYMBOLS}
-        />
-
-        <div className="flex gap-2 flex-wrap">
-          {TIMEFRAMES.map((item) => (
-            <Button
-              key={item}
-              type="button"
-              variant={selectedTimeframe === item ? 'primary' : 'secondary'}
-              size="sm"
-              onClick={() => handleChangeTimeframe(item)}
-            >
-              {item.toUpperCase()}
-            </Button>
-          ))}
-        </div>
-
-        <p className="text-xs text-gray-400">
-          Timeframes: 1m, 5m, 15m, 1h, 1d. Each selection loads last 100 candles using the bundle API.
-        </p>
-      </Card>
+    <div className="w-full h-full flex flex-col bg-[#050816] text-slate-200 overflow-hidden font-sans relative">
       
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <Card className="lg:col-span-2">
-          <div className="flex items-center justify-between gap-2 mb-4">
-            <h3 className="text-xl font-bold text-white">{selectedSymbol} Live Chart</h3>
-            {bundleLoading ? <Badge variant="info">Loading...</Badge> : null}
+      {/* Realtime Terminal Header */}
+      <Topbar handleSelectSymbol={handleSelectSymbol} />
+
+      {/* Main Split: Chart + AI Intel */}
+      <div className="flex-1 flex overflow-hidden w-full relative">
+        
+        {/* Chart Viewport (83%) */}
+        <main className="flex-1 h-full flex flex-col min-w-0 bg-[#050816]">
+          
+          {/* Chart Header Bar */}
+          <div className="h-[5vh] min-h-[38px] shrink-0 border-b border-white/5 bg-[#060A14] px-4 flex items-center justify-between select-none">
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-bold text-white tracking-widest font-mono">{selectedSymbol}</span>
+              <span className="text-[9px] text-slate-500 font-mono">({dataSourceLabel})</span>
+              
+              {/* Timeframe Controls */}
+              <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/5 ml-4">
+                {TIMEFRAMES.map((item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    onClick={() => handleChangeTimeframe(item)}
+                    className={`rounded px-2.5 py-0.5 text-[9px] font-bold font-mono transition-all ${
+                      selectedTimeframe === item
+                        ? 'text-cyan-300 bg-[#0C1425] border border-cyan-500/20 shadow-[0_0_8px_rgba(6,182,212,0.15)]'
+                        : 'text-slate-500 hover:text-slate-300'
+                    }`}
+                  >
+                    {item.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Indicator status panel */}
+            <div className="hidden sm:flex items-center gap-2">
+              <span className="text-[9px] text-slate-500 font-mono mr-2">ACTIVE ENGINES:</span>
+              <div className="px-2 py-0.5 rounded border border-cyan-500/20 bg-cyan-500/5 text-[8px] font-mono text-cyan-300 font-bold">EMA(20)</div>
+              <div className="px-2 py-0.5 rounded border border-cyan-500/20 bg-cyan-500/5 text-[8px] font-mono text-cyan-300 font-bold">EMA(50)</div>
+              <div className="px-2 py-0.5 rounded border border-amber-500/20 bg-amber-500/5 text-[8px] font-mono text-amber-300 font-bold">RSI(14)</div>
+            </div>
           </div>
 
-          {bundleError ? (
-            <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-              {bundleError}
+          {/* Interactive TradingView Canvas Container */}
+          <div className="flex-1 min-h-0 bg-[#050816] relative p-2 flex flex-col">
+            
+            {/* System Warnings / Alerts Banner */}
+            {bundleWarnings.length > 0 && (
+              <div className="mb-2 shrink-0 rounded-lg border border-amber-500/20 bg-amber-500/5 p-2 flex items-center gap-2 text-[10px] text-amber-300 font-mono">
+                <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0" />
+                <span>{bundleWarnings[0]}</span>
+              </div>
+            )}
+
+            <div className="flex-1 min-h-0 relative rounded-xl border border-white/5 overflow-hidden">
+              <CandlestickChart
+                candles={candles}
+                symbol={selectedSymbol}
+                timeframe={selectedTimeframe}
+                indicators={indicators}
+                isLoading={bundleLoading}
+                livePrice={livePrice}
+                signalType={currentSignal?.signal}
+                tradeLevels={tradeLevels}
+              />
+
+              {connectionStatus === 'RECONNECTING' && (
+                <div className="absolute inset-0 bg-[#050816]/75 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-20">
+                  <div className="h-9 w-9 rounded-full border-2 border-cyan-500/30 border-t-cyan-400 animate-spin" />
+                  <span className="text-xs font-bold text-cyan-300 font-mono tracking-widest uppercase animate-pulse">RECONNECTING LIVE FEED...</span>
+                </div>
+              )}
+
+              {connectionStatus === 'FAILED' && (
+                <div className="absolute inset-0 bg-[#050816]/85 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-20 px-4 text-center">
+                  <div className="h-10 w-10 rounded-lg border border-red-500/30 bg-red-500/10 flex items-center justify-center text-red-400">
+                    <AlertTriangle className="h-5 w-5" />
+                  </div>
+                  <span className="text-xs font-extrabold text-red-400 font-mono tracking-widest uppercase">LIVE STREAM DISCONNECTED</span>
+                  <p className="text-[10px] text-slate-500 max-w-sm mt-1 leading-normal font-mono">Maximum reconnection attempts exhausted. Terminal has automatically switched to degraded API polling backup mode.</p>
+                </div>
+              )}
             </div>
-          ) : null}
+          </div>
 
-          <CandlestickChart
-            candles={candles}
-            symbol={selectedSymbol}
-            timeframe={selectedTimeframe}
-            indicators={indicators}
-            isLoading={bundleLoading}
-          />
-        </Card>
-        
-        <div className="lg:col-span-1 space-y-6">
-          <Card>
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-lg font-bold text-white">Live Signal</h3>
-              <Badge variant={signalVariant(liveSignalLabel)}>
-                {liveSignalLabel}
-              </Badge>
-            </div>
+        </main>
 
-            <div className="space-y-2 text-sm">
-              <p className="text-gray-300">Symbol: <span className="font-semibold text-white">{selectedSymbol}</span></p>
-              <p className="text-gray-300">Price: <span className="font-semibold text-white">{formatOptionalCurrency(livePrice)}</span></p>
-              <p className="text-gray-300">Confidence: <span className="font-semibold text-white">{formatOptionalPercent(currentSignal?.confidence)}</span></p>
-              <p className="text-gray-300">Target: <span className="font-semibold text-green-300">{formatOptionalCurrency(currentSignal?.target)}</span></p>
-              <p className="text-gray-300">Stop Loss: <span className="font-semibold text-red-300">{formatOptionalCurrency(currentSignal?.stopLoss)}</span></p>
-            </div>
+        {/* AI Terminal Panel (17%) - Collapsed on Mobile fallback */}
+        <aside className="w-[17%] h-full bg-[#080E1B] border-l border-white/5 flex flex-col min-w-[300px] overflow-hidden select-none hidden lg:flex shadow-[[-4px_0_20px_rgba(0,0,0,0.2)]">
+          {/* Header */}
+          <div className="h-[5vh] min-h-[38px] shrink-0 px-3 border-b border-white/5 bg-[#0C1324] flex items-center justify-between">
+            <span className="text-[9px] uppercase font-bold tracking-[0.2em] text-slate-400 flex items-center gap-1.5 font-mono">
+              <Layers className="h-3.5 w-3.5 text-cyan-300 animate-pulse" /> AI Terminal Intel
+            </span>
+            <span className="px-2 py-0.5 rounded border border-cyan-500/20 bg-cyan-500/5 text-[8px] font-mono text-cyan-300">
+              LIVE
+            </span>
+          </div>
 
-            <p className="mt-3 text-xs text-gray-400 leading-relaxed">
-              {currentSignal?.reason || 'Waiting for latest signal update...'}
-            </p>
-          </Card>
+          {/* Scrolling Panel list */}
+          <AiTerminalPanel livePrice={livePrice} />
+        </aside>
 
-          <TopMovers />
-        </div>
       </div>
+
+      {/* Status Footer */}
+      <Bottombar livePrice={livePrice} />
+
     </div>
   );
 }

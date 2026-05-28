@@ -7,12 +7,20 @@ import {
   buildApiUrl as buildAbsoluteApiUrl,
   buildLiveWebSocketUrl,
 } from '../config/api';
+import {
+  API_TIMEOUT_MS,
+  API_TIMEOUT_MAX_MS,
+  MAX_API_RETRIES,
+  beginSingleFlightRequest,
+  isAbortLikeError as isAbortLikeRequestGateError,
+  normalizeTimeoutMs,
+} from './requestGate.js';
 
 const ACCESS_TOKEN_KEY = 'stockai_access_token';
 const REFRESH_TOKEN_KEY = 'stockai_refresh_token';
 const USER_KEY = 'stockai_user';
-const DEFAULT_TIMEOUT_MS = 8000;
-const AUTH_TIMEOUT_MS = 20000;
+const DEFAULT_TIMEOUT_MS = API_TIMEOUT_MS;
+const AUTH_TIMEOUT_MS = API_TIMEOUT_MS;
 const AUTH_LOGIN_ENDPOINT = '/auth/login';
 const API_BASE = CONFIG_API_BASE;
 
@@ -67,6 +75,8 @@ const buildIndicatorsFromRows = (rows = []) => {
     return acc;
   }, {});
 };
+
+const isBundleEndpoint = (endpoint) => /^\/bundle\//.test(String(endpoint || ''));
 
 const normalizePredictionPayload = (rawPayload, symbolHint = '') => {
   const payload = unwrapData(rawPayload);
@@ -126,15 +136,6 @@ const extractErrorMessage = (payload, fallback) => {
     payload.message ||
     payload.detail ||
     fallback
-  );
-};
-
-const isAbortLikeError = (error) => {
-  const message = String(error?.message || '');
-  return (
-    error?.name === 'AbortError' ||
-    /signal aborted without reason/i.test(message) ||
-    /operation was aborted/i.test(message)
   );
 };
 
@@ -208,7 +209,7 @@ export const buildWebSocketUrl = (token) => {
 };
 
 /**
- * Fetch wrapper with timeout, auto-JSON, error normalization and retry on network failure.
+ * Fetch wrapper with strict 500ms timeout, single-flight cancellation, and bounded retries.
  * @param {string} endpoint - API path (e.g. '/signal/RELIANCE')
  * @param {Object} options - Fetch options
  * @returns {Promise<any>} Response JSON data
@@ -222,8 +223,9 @@ async function apiFetch(endpoint, options = {}) {
     ...fetchOptions
   } = options;
   const timeoutMs = Number.isFinite(providedTimeoutMs) && providedTimeoutMs > 0
-    ? providedTimeoutMs
-    : (isAuthEndpoint ? AUTH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS);
+    ? normalizeTimeoutMs(providedTimeoutMs, isAuthEndpoint ? AUTH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS)
+    : normalizeTimeoutMs(isAuthEndpoint ? AUTH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS, API_TIMEOUT_MAX_MS);
+  const maxRetries = isAuthEndpoint ? 0 : MAX_API_RETRIES;
   const method = String(fetchOptions.method || 'GET').toUpperCase();
 
   if (normalizedEndpoint === AUTH_LOGIN_ENDPOINT && method !== 'POST') {
@@ -252,16 +254,11 @@ async function apiFetch(endpoint, options = {}) {
   });
 
   const attempt = async (retryCount) => {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeoutMs);
-
-    if (externalSignal) {
-      if (externalSignal.aborted) {
-        controller.abort();
-      } else {
-        externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
-      }
-    }
+    const gate = beginSingleFlightRequest({
+      externalSignal,
+      key: `${method}:${normalizedEndpoint}`,
+    });
+    const id = setTimeout(() => gate.abort('request_timeout'), timeoutMs);
 
     try {
       const token = getStoredAccessToken();
@@ -269,7 +266,7 @@ async function apiFetch(endpoint, options = {}) {
       const response = await fetch(url, {
         ...fetchOptions,
         method,
-        signal: controller.signal,
+        signal: gate.signal,
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -292,7 +289,7 @@ async function apiFetch(endpoint, options = {}) {
       }
 
       const payload = await response.json();
-      if (payload && typeof payload === 'object' && payload.success === false) {
+      if (payload && typeof payload === 'object' && payload.success === false && !(isBundleEndpoint(normalizedEndpoint) && payload.data)) {
         throw {
           status: payload.code || 400,
           message: extractErrorMessage(payload, 'Request failed'),
@@ -306,7 +303,8 @@ async function apiFetch(endpoint, options = {}) {
     } catch (error) {
       clearTimeout(id);
 
-      const isAbortError = isAbortLikeError(error);
+      const isAbortError = isAbortLikeRequestGateError(error);
+      const abortReason = String(gate.signal?.reason || '');
       const isNetworkError = isAbortError || error instanceof TypeError;
       const isGatewayError = isGatewayTimeoutLike(error?.status);
 
@@ -319,8 +317,8 @@ async function apiFetch(endpoint, options = {}) {
         isTypeError: error instanceof TypeError,
       });
 
-      if ((isNetworkError || isGatewayError) && retryCount < 2 && !isAuthEndpoint) {
-        console.warn(`[apiFetch] Network failure fetching ${endpoint}, retrying...`);
+      if ((isNetworkError || isGatewayError) && !isAbortError && retryCount < maxRetries && !isAuthEndpoint) {
+        console.warn(`[apiFetch] transient failure fetching ${endpoint}, retry ${retryCount + 1}/${maxRetries}`);
         return attempt(retryCount + 1);
       }
 
@@ -328,8 +326,13 @@ async function apiFetch(endpoint, options = {}) {
         ? error
         : {
             status: 0,
+            code: isAbortError
+              ? (abortReason === 'request_timeout' ? 'ERR_TIMEOUT' : 'ERR_CANCELED')
+              : undefined,
             message: isAbortError
-              ? `Request timed out after ${Math.round(timeoutMs / 1000)}s. Please check your connection and try again.`
+              ? (abortReason === 'request_timeout'
+                ? `Request timed out after ${timeoutMs}ms. Fail-fast triggered.`
+                : 'Request canceled by a newer request.')
               : (error instanceof TypeError
                 ? 'Network error: Unable to reach StockAI API. Please check your internet connection.'
                 : (error?.message || 'Network/API error occurred. Please try again.')),
@@ -348,6 +351,9 @@ async function apiFetch(endpoint, options = {}) {
       });
 
       throw normalizedError;
+    } finally {
+      clearTimeout(id);
+      gate.release();
     }
   };
 
@@ -355,7 +361,7 @@ async function apiFetch(endpoint, options = {}) {
 }
 
 export const api = {
-  getBundleRaw: async (symbol, interval = '1m', limit = 100, horizon = '15m') => {
+  getBundleRaw: async (symbol, interval = '1m', limit = 200, horizon = '15m') => {
     const qs = new URLSearchParams({
       interval,
       limit: String(limit),
@@ -366,7 +372,7 @@ export const api = {
     });
   },
 
-  getBundle: async (symbol, interval = '1m', limit = 100, horizon = '15m') => {
+  getBundle: async (symbol, interval = '1m', limit = 200, horizon = '15m') => {
     const normalizedSymbol = String(symbol || '').trim().toUpperCase();
     const normalizedInterval = String(interval || '1m').trim();
 
@@ -376,10 +382,36 @@ export const api = {
       return resolved;
     }
 
-    throw {
-      status: 0,
-      message: 'Failed to load market bundle',
-      url: `${API_BASE}/bundle/${normalizedSymbol}`,
+    return {
+      symbol: normalizedSymbol,
+      partial: true,
+      warnings: ['Bundle payload incomplete'],
+      history: { candles: [], count: 0, source: 'UNAVAILABLE', data_source: 'UNAVAILABLE' },
+      snapshot: {
+        symbol: normalizedSymbol,
+        price: 0,
+        ltp: 0,
+        open: 0,
+        high: 0,
+        low: 0,
+        close: 0,
+        change: 0,
+        volume: 0,
+        source: 'UNAVAILABLE',
+        data_source: 'UNAVAILABLE',
+        market_status: 'CLOSED',
+      },
+      prediction: {
+        symbol: normalizedSymbol,
+        signal: 'HOLD',
+        confidence: 0,
+        confidence_pct: 0,
+        prediction: 0,
+        target: 0,
+        stop_loss: 0,
+        reasoning: 'Prediction unavailable',
+      },
+      indicators: {},
     };
   },
 
@@ -411,12 +443,12 @@ export const api = {
     return payload?.data || payload;
   },
 
-  login: async ({ username, password }) => {
-    const normalizedUsername = String(username || '').trim();
+  login: async ({ email, password }) => {
+    const normalizedEmail = String(email || '').trim().toLowerCase();
     try {
       const payload = await apiFetch(AUTH_LOGIN_ENDPOINT, {
         method: 'POST',
-        body: JSON.stringify({ username: normalizedUsername, password }),
+        body: JSON.stringify({ email: normalizedEmail, password }),
         timeoutMs: AUTH_TIMEOUT_MS,
       });
       return payload?.data || payload;

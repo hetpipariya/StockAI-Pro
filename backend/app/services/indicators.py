@@ -3,6 +3,8 @@ from typing import Any, Dict, List
 import numpy as np
 import pandas as pd
 
+from app.services.native_accelerators import compute_indicator_frame
+
 
 class IndicatorEngine:
     """Calculates 20+ technical indicators in batch and real-time."""
@@ -22,6 +24,10 @@ class IndicatorEngine:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
+        native_df = compute_indicator_frame(df)
+        if native_df is not None and not native_df.empty:
+            df = native_df.copy()
+
         df = IndicatorEngine._calc_moving_averages(df)
         df = IndicatorEngine._calc_oscillators(df)
         df = IndicatorEngine._calc_volatility(df)
@@ -34,101 +40,116 @@ class IndicatorEngine:
 
     @staticmethod
     def _calc_moving_averages(df: pd.DataFrame) -> pd.DataFrame:
-        df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
-        df["ema15"] = df["close"].ewm(span=15, adjust=False).mean()
-        df["sma20"] = df["close"].rolling(window=20).mean()
+        if "ema9" not in df.columns:
+            df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
+        if "ema15" not in df.columns:
+            df["ema15"] = df["close"].ewm(span=15, adjust=False).mean()
+        if "sma20" not in df.columns:
+            df["sma20"] = df["close"].rolling(window=20).mean()
 
         # VWAP — guard against zero cumulative volume
-        q = df["volume"]
-        p = (df["high"] + df["low"] + df["close"]) / 3
-        cum_vol = q.cumsum()
-        cum_vol = cum_vol.replace(0, np.nan)  # avoid divide-by-zero
-        df["vwap"] = (p * q).cumsum() / cum_vol
+        if "vwap" not in df.columns:
+            q = df["volume"]
+            p = (df["high"] + df["low"] + df["close"]) / 3
+            cum_vol = q.cumsum()
+            cum_vol = cum_vol.replace(0, np.nan)  # avoid divide-by-zero
+            df["vwap"] = (p * q).cumsum() / cum_vol
         return df
 
     @staticmethod
     def _calc_oscillators(df: pd.DataFrame) -> pd.DataFrame:
         # RSI 9
-        delta = df["close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=9).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=9).mean()
-        loss = loss.replace(0, np.nan)  # avoid divide-by-zero
-        rs = gain / loss
-        df["rsi9"] = 100 - (100 / (1 + rs))
+        if "rsi9" not in df.columns:
+            delta = df["close"].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=9).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=9).mean()
+            loss = loss.replace(0, np.nan)  # avoid divide-by-zero
+            rs = gain / loss
+            df["rsi9"] = 100 - (100 / (1 + rs))
 
         # MACD
-        exp1 = df["close"].ewm(span=12, adjust=False).mean()
-        exp2 = df["close"].ewm(span=26, adjust=False).mean()
-        df["macd"] = exp1 - exp2
-        df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
-        df["macd_hist"] = df["macd"] - df["macd_signal"]
+        if "macd" not in df.columns:
+            exp1 = df["close"].ewm(span=12, adjust=False).mean()
+            exp2 = df["close"].ewm(span=26, adjust=False).mean()
+            df["macd"] = exp1 - exp2
+        if "macd_signal" not in df.columns:
+            df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+        if "macd_hist" not in df.columns:
+            df["macd_hist"] = df["macd"] - df["macd_signal"]
 
         # Stochastic Oscillator (14, 3)
-        low14 = df["low"].rolling(14).min()
-        high14 = df["high"].rolling(14).max()
-        stoch_range = high14 - low14
-        stoch_range = stoch_range.replace(0, np.nan)  # avoid divide-by-zero
-        df["stoch_k"] = 100 * ((df["close"] - low14) / stoch_range)
-        df["stoch_d"] = df["stoch_k"].rolling(3).mean()
+        if "stoch_k" not in df.columns or "stoch_d" not in df.columns:
+            low14 = df["low"].rolling(14).min()
+            high14 = df["high"].rolling(14).max()
+            stoch_range = high14 - low14
+            stoch_range = stoch_range.replace(0, np.nan)  # avoid divide-by-zero
+            df["stoch_k"] = 100 * ((df["close"] - low14) / stoch_range)
+            df["stoch_d"] = df["stoch_k"].rolling(3).mean()
 
         # CCI 20
-        tp = (df["high"] + df["low"] + df["close"]) / 3
-        sma = tp.rolling(20).mean()
-        mad = tp.rolling(20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-        mad = mad.replace(0, np.nan)  # avoid divide-by-zero
-        df["cci20"] = (tp - sma) / (0.015 * mad)
+        if "cci20" not in df.columns:
+            tp = (df["high"] + df["low"] + df["close"]) / 3
+            sma = tp.rolling(20).mean()
+            mad = tp.rolling(20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+            mad = mad.replace(0, np.nan)  # avoid divide-by-zero
+            df["cci20"] = (tp - sma) / (0.015 * mad)
 
         # ROC 9
-        df["roc9"] = df["close"].pct_change(periods=9) * 100
+        if "roc9" not in df.columns:
+            df["roc9"] = df["close"].pct_change(periods=9) * 100
 
         return df
 
     @staticmethod
     def _calc_volatility(df: pd.DataFrame) -> pd.DataFrame:
         # Bollinger Bands 20
-        sma = df["close"].rolling(20).mean()
-        std = df["close"].rolling(20).std()
-        df["bb_upper"] = sma + 2 * std
-        df["bb_lower"] = sma - 2 * std
+        if "bb_upper" not in df.columns or "bb_lower" not in df.columns:
+            sma = df["close"].rolling(20).mean()
+            std = df["close"].rolling(20).std()
+            df["bb_upper"] = sma + 2 * std
+            df["bb_lower"] = sma - 2 * std
 
         # ATR 14
-        tr1 = df["high"] - df["low"]
-        tr2 = abs(df["high"] - df["close"].shift())
-        tr3 = abs(df["low"] - df["close"].shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        df["atr14"] = tr.rolling(14).mean()
+        if "atr14" not in df.columns:
+            tr1 = df["high"] - df["low"]
+            tr2 = abs(df["high"] - df["close"].shift())
+            tr3 = abs(df["low"] - df["close"].shift())
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            df["atr14"] = tr.rolling(14).mean()
         return df
 
     @staticmethod
     def _calc_trend(df: pd.DataFrame) -> pd.DataFrame:
         # ADX 14 — Directional Movement
-        up_move = df["high"].diff()  # current high - previous high
-        down_move = df["low"].shift() - df["low"]  # previous low - current low
+        if "adx14" not in df.columns:
+            up_move = df["high"].diff()  # current high - previous high
+            down_move = df["low"].shift() - df["low"]  # previous low - current low
 
-        plus_dm = up_move.copy()
-        minus_dm = down_move.copy()
+            plus_dm = up_move.copy()
+            minus_dm = down_move.copy()
 
-        # +DM: up_move > down_move and up_move > 0, else 0
-        plus_dm[(up_move <= down_move) | (up_move < 0)] = 0
-        # -DM: down_move > up_move and down_move > 0, else 0
-        minus_dm[(down_move <= up_move) | (down_move < 0)] = 0
+            # +DM: up_move > down_move and up_move > 0, else 0
+            plus_dm[(up_move <= down_move) | (up_move < 0)] = 0
+            # -DM: down_move > up_move and down_move > 0, else 0
+            minus_dm[(down_move <= up_move) | (down_move < 0)] = 0
 
-        tr1 = df["high"] - df["low"]
-        tr2 = abs(df["high"] - df["close"].shift())
-        tr3 = abs(df["low"] - df["close"].shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(14).mean()
+            tr1 = df["high"] - df["low"]
+            tr2 = abs(df["high"] - df["close"].shift())
+            tr3 = abs(df["low"] - df["close"].shift())
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            atr = tr.rolling(14).mean()
 
-        plus_di = 100 * (plus_dm.rolling(14).mean() / atr)
-        minus_di = 100 * (minus_dm.rolling(14).mean() / atr)
-        di_sum = plus_di + minus_di
-        di_sum = di_sum.replace(0, np.nan)  # avoid divide-by-zero
-        dx = 100 * abs(plus_di - minus_di) / di_sum
-        df["adx14"] = dx.rolling(14).mean()
+            plus_di = 100 * (plus_dm.rolling(14).mean() / atr)
+            minus_di = 100 * (minus_dm.rolling(14).mean() / atr)
+            di_sum = plus_di + minus_di
+            di_sum = di_sum.replace(0, np.nan)  # avoid divide-by-zero
+            dx = 100 * abs(plus_di - minus_di) / di_sum
+            df["adx14"] = dx.rolling(14).mean()
 
         # SuperTrend (ATR multiplier = 3)
-        hl2 = (df["high"] + df["low"]) / 2
-        df["supertrend"] = hl2 - (3 * df["atr14"])  # Simplified logic
+        if "supertrend" not in df.columns:
+            hl2 = (df["high"] + df["low"]) / 2
+            df["supertrend"] = hl2 - (3 * df["atr14"])  # Simplified logic
 
         # ZigZag (simplified proxy)
         def _zigzag(x):
@@ -136,46 +157,53 @@ class IndicatorEngine:
             last = vals[-1]
             return last if (last == vals.max() or last == vals.min()) else np.nan
 
-        df["zigzag"] = df["close"].rolling(5).apply(_zigzag, raw=True).interpolate()
+        if "zigzag" not in df.columns:
+            df["zigzag"] = df["close"].rolling(5).apply(_zigzag, raw=True).interpolate()
         return df
 
     @staticmethod
     def _calc_volume(df: pd.DataFrame) -> pd.DataFrame:
         # OBV
-        df["obv"] = (np.sign(df["close"].diff()) * df["volume"]).fillna(0).cumsum()
+        if "obv" not in df.columns:
+            df["obv"] = (np.sign(df["close"].diff()) * df["volume"]).fillna(0).cumsum()
         return df
 
     @staticmethod
     def _calc_advanced(df: pd.DataFrame) -> pd.DataFrame:
         # Ichimoku Cloud
-        nine_period_high = df["high"].rolling(9).max()
-        nine_period_low = df["low"].rolling(9).min()
-        df["tenkan_sen"] = (nine_period_high + nine_period_low) / 2
+        if "tenkan_sen" not in df.columns:
+            nine_period_high = df["high"].rolling(9).max()
+            nine_period_low = df["low"].rolling(9).min()
+            df["tenkan_sen"] = (nine_period_high + nine_period_low) / 2
 
         # Parabolic SAR (simplified static proxy)
-        df["psar"] = df["close"].rolling(2).min()
+        if "psar" not in df.columns:
+            df["psar"] = df["close"].rolling(2).min()
 
         # Keltner Channels
-        ema20 = df["close"].ewm(span=20, adjust=False).mean()
-        df["kc_upper"] = ema20 + 2 * df["atr14"]
-        df["kc_lower"] = ema20 - 2 * df["atr14"]
+        if "kc_upper" not in df.columns or "kc_lower" not in df.columns:
+            ema20 = df["close"].ewm(span=20, adjust=False).mean()
+            df["kc_upper"] = ema20 + 2 * df["atr14"]
+            df["kc_lower"] = ema20 - 2 * df["atr14"]
 
         # Williams %R 14
-        highest_14 = df["high"].rolling(14).max()
-        lowest_14 = df["low"].rolling(14).min()
-        wr_range = (highest_14 - lowest_14).replace(0, np.nan)  # avoid divide-by-zero
-        df["williams_r"] = -100 * ((highest_14 - df["close"]) / wr_range)
+        if "williams_r" not in df.columns:
+            highest_14 = df["high"].rolling(14).max()
+            lowest_14 = df["low"].rolling(14).min()
+            wr_range = (highest_14 - lowest_14).replace(0, np.nan)  # avoid divide-by-zero
+            df["williams_r"] = -100 * ((highest_14 - df["close"]) / wr_range)
 
         # Money Flow Index 14
-        typical_price = (df["high"] + df["low"] + df["close"]) / 3
-        money_flow = typical_price * df["volume"]
-        positive_flow = np.where(typical_price > typical_price.shift(), money_flow, 0)
-        negative_flow = np.where(typical_price < typical_price.shift(), money_flow, 0)
-        pos_flow_sum = pd.Series(positive_flow, index=df.index).rolling(14).sum()
-        neg_flow_sum = pd.Series(negative_flow, index=df.index).rolling(14).sum()
-        neg_flow_sum = neg_flow_sum.replace(0, np.nan)  # avoid divide-by-zero
-        mfi_ratio = pos_flow_sum / neg_flow_sum
-        df["mfi14"] = 100 - (100 / (1 + mfi_ratio))
+        if "mfi14" not in df.columns:
+            typical_price = (df["high"] + df["low"] + df["close"]) / 3
+            money_flow = typical_price * df["volume"]
+            positive_flow = np.where(typical_price > typical_price.shift(), money_flow, 0)
+            negative_flow = np.where(typical_price < typical_price.shift(), money_flow, 0)
+            pos_flow_sum = pd.Series(positive_flow, index=df.index).rolling(14).sum()
+            neg_flow_sum = pd.Series(negative_flow, index=df.index).rolling(14).sum()
+            neg_flow_sum = neg_flow_sum.replace(0, np.nan)  # avoid divide-by-zero
+            mfi_ratio = pos_flow_sum / neg_flow_sum
+            df["mfi14"] = 100 - (100 / (1 + mfi_ratio))
 
         return df
 

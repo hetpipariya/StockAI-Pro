@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -15,6 +16,11 @@ try:
     import redis.asyncio as redis_asyncio
 except Exception:
     redis_asyncio = None
+
+try:
+    import orjson
+except ImportError:
+    orjson = None
 
 from app.config import REDIS_URL
 
@@ -45,14 +51,19 @@ _fallback_lock = threading.Lock()
 def _get_async_lock():
     global asyncio_lock
     if asyncio_lock is None:
-        import asyncio
-
         asyncio_lock = asyncio.Lock()
     return asyncio_lock
 
 
 def _serialize(value: Any) -> str:
-    return json.dumps(value) if not isinstance(value, str) else value
+    if isinstance(value, str):
+        return value
+    if orjson is not None:
+        try:
+            return orjson.dumps(value).decode("utf-8")
+        except Exception:
+            pass
+    return json.dumps(value)
 
 
 def _deserialize(value: Any) -> Any:
@@ -62,6 +73,11 @@ def _deserialize(value: Any) -> Any:
         value = value.decode("utf-8", errors="ignore")
     if not isinstance(value, str):
         return value
+    if orjson is not None:
+        try:
+            return orjson.loads(value)
+        except Exception:
+            pass
     try:
         return json.loads(value)
     except Exception:
@@ -132,8 +148,46 @@ def _fallback_delete(key: str) -> None:
         _fallback_cache.pop(key, None)
 
 
+_degraded_mode_active = False
+
+
+def is_degraded_mode() -> bool:
+    global _degraded_mode_active
+    return _degraded_mode_active
+
+
+def _trigger_circuit_breaker(exc: Exception, is_sync: bool = False) -> None:
+    global _async_redis, _async_failed, _sync_redis, _sync_failed, _degraded_mode_active
+    from app.services.metrics import REDIS_DEGRADED_MODE
+
+    _degraded_mode_active = True
+    try:
+        REDIS_DEGRADED_MODE.set(1)
+    except Exception:
+        pass
+
+    if is_sync:
+        _sync_redis = None
+        _sync_failed = True
+        logger.error(
+            "[REDIS][CIRCUIT-BREAKER] Sync Redis connection dropped: %s. Switched to Degraded Fallback mode.",
+            type(exc).__name__,
+        )
+    else:
+        _async_redis = None
+        _async_failed = True
+        logger.error(
+            "[REDIS][CIRCUIT-BREAKER] Async Redis connection dropped: %s. Switched to Degraded Fallback mode.",
+            type(exc).__name__,
+        )
+
+
 async def get_redis() -> Optional[Any]:
-    global _async_redis, _async_failed, _async_last_attempt
+    return await _get_redis(force_retry=False)
+
+
+async def _get_redis(*, force_retry: bool) -> Optional[Any]:
+    global _async_redis, _async_failed, _async_last_attempt, _degraded_mode_active
 
     if _async_redis is not None:
         return _async_redis
@@ -150,7 +204,11 @@ async def get_redis() -> Optional[Any]:
             return _async_redis
 
         now = time.monotonic()
-        if _async_failed and (now - _async_last_attempt) < _REDIS_RETRY_INTERVAL_SECONDS:
+        if (
+            _async_failed
+            and not force_retry
+            and (now - _async_last_attempt) < _REDIS_RETRY_INTERVAL_SECONDS
+        ):
             return None
 
         _async_last_attempt = now
@@ -166,17 +224,64 @@ async def get_redis() -> Optional[Any]:
             await client.ping()
             _async_redis = client
             _async_failed = False
-            logger.info("[REDIS] async connected")
+            _degraded_mode_active = False
+            try:
+                from app.services.metrics import REDIS_DEGRADED_MODE
+                REDIS_DEGRADED_MODE.set(0)
+            except Exception:
+                pass
+            logger.info("[REDIS] async connected & circuit breaker reset")
         except Exception as exc:
             _async_redis = None
             _async_failed = True
+            _degraded_mode_active = True
+            try:
+                from app.services.metrics import REDIS_DEGRADED_MODE
+                REDIS_DEGRADED_MODE.set(1)
+            except Exception:
+                pass
             logger.warning("[REDIS] async connection failed, fallback mode: %s", type(exc).__name__)
 
     return _async_redis
 
 
+async def initialize_redis(
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 1.0,
+) -> str:
+    attempts = max(1, int(max_attempts))
+
+    for attempt in range(1, attempts + 1):
+        client = await _get_redis(force_retry=True)
+        if client is not None:
+            if attempt > 1:
+                logger.info("[REDIS] startup connection recovered on attempt %d/%d", attempt, attempts)
+            return "redis"
+
+        if attempt < attempts:
+            logger.warning(
+                "[REDIS] startup connection failed on attempt %d/%d; retrying in %.1fs",
+                attempt,
+                attempts,
+                retry_delay_seconds,
+            )
+            await asyncio.sleep(max(0.1, float(retry_delay_seconds)))
+
+    logger.warning(
+        "[REDIS] startup initialization failed after %d attempts; using in-memory fallback cache",
+        attempts,
+    )
+    return "memory"
+
+
+def get_cache_backend_name() -> str:
+    if _async_redis is not None or _sync_redis is not None:
+        return "redis"
+    return "memory"
+
+
 def get_redis_sync() -> Optional[Any]:
-    global _sync_redis, _sync_failed, _sync_last_attempt
+    global _sync_redis, _sync_failed, _sync_last_attempt, _degraded_mode_active
 
     if _sync_redis is not None:
         return _sync_redis
@@ -208,40 +313,74 @@ def get_redis_sync() -> Optional[Any]:
             client.ping()
             _sync_redis = client
             _sync_failed = False
-            logger.info("[REDIS] sync connected")
+            _degraded_mode_active = False
+            try:
+                from app.services.metrics import REDIS_DEGRADED_MODE
+                REDIS_DEGRADED_MODE.set(0)
+            except Exception:
+                pass
+            logger.info("[REDIS] sync connected & circuit breaker reset")
         except Exception as exc:
             _sync_redis = None
             _sync_failed = True
+            _degraded_mode_active = True
+            try:
+                from app.services.metrics import REDIS_DEGRADED_MODE
+                REDIS_DEGRADED_MODE.set(1)
+            except Exception:
+                pass
             logger.warning("[REDIS] sync connection failed, fallback mode: %s", type(exc).__name__)
 
     return _sync_redis
 
 
 async def set_cache(key: str, value: Any, ttl: int = 60) -> None:
-    redis_client = await get_redis()
+    from app.services.metrics import REDIS_OPERATION_LATENCY
+    
+    start_time = time.perf_counter()
+    redis_client = None
+    
+    if not _degraded_mode_active:
+        redis_client = await get_redis()
+        
     if redis_client:
         try:
             await redis_client.setex(key, max(1, int(ttl)), _serialize(value))
             logger.debug("[CACHE] set key=%s ttl=%ss backend=redis", key, int(ttl))
+            try:
+                REDIS_OPERATION_LATENCY.labels(operation="set").observe(time.perf_counter() - start_time)
+            except Exception:
+                pass
             return
         except Exception as exc:
-            logger.warning("[CACHE] redis set failed key=%s: %s", key, type(exc).__name__)
+            _trigger_circuit_breaker(exc, is_sync=False)
 
     _fallback_set(key, value, ttl)
     logger.debug("[CACHE] set key=%s ttl=%ss backend=fallback", key, int(ttl))
 
 
 async def get_cache(key: str) -> Optional[Any]:
-    redis_client = await get_redis()
+    from app.services.metrics import REDIS_OPERATION_LATENCY
+    
+    start_time = time.perf_counter()
+    redis_client = None
+    
+    if not _degraded_mode_active:
+        redis_client = await get_redis()
+        
     if redis_client:
         try:
             value = await redis_client.get(key)
+            try:
+                REDIS_OPERATION_LATENCY.labels(operation="get").observe(time.perf_counter() - start_time)
+            except Exception:
+                pass
             if value is not None:
                 logger.debug("[CACHE] hit key=%s backend=redis", key)
                 return _deserialize(value)
             logger.debug("[CACHE] miss key=%s backend=redis", key)
         except Exception as exc:
-            logger.warning("[CACHE] redis get failed key=%s: %s", key, type(exc).__name__)
+            _trigger_circuit_breaker(exc, is_sync=False)
 
     value = _fallback_get(key)
     if value is not None:
@@ -252,45 +391,78 @@ async def get_cache(key: str) -> Optional[Any]:
 
 
 async def delete_cache(key: str) -> None:
-    redis_client = await get_redis()
+    from app.services.metrics import REDIS_OPERATION_LATENCY
+    
+    start_time = time.perf_counter()
+    redis_client = None
+    
+    if not _degraded_mode_active:
+        redis_client = await get_redis()
+        
     if redis_client:
         try:
             await redis_client.delete(key)
             logger.debug("[CACHE] delete key=%s backend=redis", key)
+            try:
+                REDIS_OPERATION_LATENCY.labels(operation="delete").observe(time.perf_counter() - start_time)
+            except Exception:
+                pass
             _fallback_delete(key)
             return
         except Exception as exc:
-            logger.warning("[CACHE] redis delete failed key=%s: %s", key, type(exc).__name__)
+            _trigger_circuit_breaker(exc, is_sync=False)
 
     _fallback_delete(key)
     logger.debug("[CACHE] delete key=%s backend=fallback", key)
 
 
 def set_cache_sync(key: str, value: Any, ttl: int = 60) -> None:
-    redis_client = get_redis_sync()
+    from app.services.metrics import REDIS_OPERATION_LATENCY
+    
+    start_time = time.perf_counter()
+    redis_client = None
+    
+    if not _degraded_mode_active:
+        redis_client = get_redis_sync()
+        
     if redis_client:
         try:
             redis_client.setex(key, max(1, int(ttl)), _serialize(value))
             logger.debug("[CACHE] set key=%s ttl=%ss backend=redis-sync", key, int(ttl))
+            try:
+                REDIS_OPERATION_LATENCY.labels(operation="set_sync").observe(time.perf_counter() - start_time)
+            except Exception:
+                pass
             return
         except Exception as exc:
-            logger.warning("[CACHE] redis-sync set failed key=%s: %s", key, type(exc).__name__)
+            _trigger_circuit_breaker(exc, is_sync=True)
 
     _fallback_set(key, value, ttl)
     logger.debug("[CACHE] set key=%s ttl=%ss backend=fallback", key, int(ttl))
 
 
 def get_cache_sync(key: str) -> Optional[Any]:
-    redis_client = get_redis_sync()
+    from app.services.metrics import REDIS_OPERATION_LATENCY
+    
+    start_time = time.perf_counter()
+    redis_client = None
+    
+    if not _degraded_mode_active:
+        redis_client = get_redis_sync()
+        
     if redis_client:
         try:
             value = redis_client.get(key)
+            try:
+                REDIS_OPERATION_LATENCY.labels(operation="get_sync").observe(time.perf_counter() - start_time)
+            except Exception:
+                pass
             if value is not None:
                 logger.debug("[CACHE] hit key=%s backend=redis-sync", key)
                 return _deserialize(value)
             logger.debug("[CACHE] miss key=%s backend=redis-sync", key)
         except Exception as exc:
-            logger.warning("[CACHE] redis-sync get failed key=%s: %s", key, type(exc).__name__)
+            _trigger_circuit_breaker(exc, is_sync=True)
 
     value = _fallback_get(key)
     if value is not None:
@@ -301,18 +473,30 @@ def get_cache_sync(key: str) -> Optional[Any]:
 
 
 def delete_cache_sync(key: str) -> None:
-    redis_client = get_redis_sync()
+    from app.services.metrics import REDIS_OPERATION_LATENCY
+    
+    start_time = time.perf_counter()
+    redis_client = None
+    
+    if not _degraded_mode_active:
+        redis_client = get_redis_sync()
+        
     if redis_client:
         try:
             redis_client.delete(key)
             logger.debug("[CACHE] delete key=%s backend=redis-sync", key)
+            try:
+                REDIS_OPERATION_LATENCY.labels(operation="delete_sync").observe(time.perf_counter() - start_time)
+            except Exception:
+                pass
             _fallback_delete(key)
             return
         except Exception as exc:
-            logger.warning("[CACHE] redis-sync delete failed key=%s: %s", key, type(exc).__name__)
+            _trigger_circuit_breaker(exc, is_sync=True)
 
     _fallback_delete(key)
     logger.debug("[CACHE] delete key=%s backend=fallback", key)
+
 
 
 async def store_session_token(token_data: dict) -> None:

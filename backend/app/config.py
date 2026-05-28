@@ -29,9 +29,21 @@ def _as_bool(value: Optional[str], default: bool = False) -> bool:
 
 SMARTAPI_API_KEY = os.getenv("SMARTAPI_API_KEY", "")
 SMARTAPI_CLIENT_ID = os.getenv("SMARTAPI_CLIENT_ID", "")
-SMARTAPI_CLIENT_PWD = os.getenv("SMARTAPI_CLIENT_PWD", "")
+SMARTAPI_PASSWORD = os.getenv("SMARTAPI_PASSWORD", os.getenv("SMARTAPI_CLIENT_PWD", ""))
+SMARTAPI_CLIENT_PWD = SMARTAPI_PASSWORD
 SMARTAPI_TOTP_SECRET = os.getenv("SMARTAPI_TOTP_SECRET", "")
 SMARTAPI_EXCHANGE = os.getenv("SMARTAPI_EXCHANGE", "NSE")
+
+UPSTOX_API_KEY = os.getenv("UPSTOX_API_KEY", "")
+UPSTOX_API_SECRET = os.getenv("UPSTOX_API_SECRET", "")
+UPSTOX_REDIRECT_URI = os.getenv("UPSTOX_REDIRECT_URI", "")
+UPSTOX_ACCESS_TOKEN = os.getenv("UPSTOX_ACCESS_TOKEN", "")
+UPSTOX_REFRESH_TOKEN = os.getenv("UPSTOX_REFRESH_TOKEN", "")
+UPSTOX_AUTH_CODE = os.getenv("UPSTOX_AUTH_CODE", "")
+UPSTOX_WS_URL = os.getenv("UPSTOX_WS_URL", "wss://api.upstox.com/v2/feed/market-data-feed")
+
+BROKER_PRIMARY = os.getenv("BROKER_PRIMARY", "smartapi").strip().lower() or "smartapi"
+BROKER_FALLBACK = os.getenv("BROKER_FALLBACK", "upstox").strip().lower() or "upstox"
 BACKEND_HOST = os.getenv("BACKEND_HOST", "0.0.0.0")
 BACKEND_PORT = int(os.getenv("PORT", os.getenv("BACKEND_PORT", "8000")))
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://stockai-pro.pages.dev")
@@ -73,9 +85,10 @@ else:
 
 JWT_SECRET: str = _jwt
 JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
-JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", "24"))
-ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+JWT_EXPIRY_HOURS = int(os.getenv("JWT_EXPIRY_HOURS", "1"))
+ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+MAX_BETA_USERS: int = int(os.getenv("MAX_BETA_USERS", "5"))
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -276,22 +289,15 @@ CORS_ORIGINS = os.getenv(
 # ─── Capital & Risk ───
 STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "100000"))
 MIN_ACCOUNT_BALANCE = float(os.getenv("MIN_ACCOUNT_BALANCE", "10000"))
-MAX_RISK_PER_TRADE_PCT = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "0.01"))
+MAX_RISK_PER_TRADE_PCT = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "0.02"))
 MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "10"))
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "3"))
-DAILY_LOSS_LIMIT_PCT = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.03"))
+DAILY_LOSS_LIMIT_PCT = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "0.035"))
 
 # ─── 5m Live Engine ───
-_default_live_5m_model = (
-    _REPO_ROOT
-    / "experiments_v2"
-    / "outputs"
-    / "models"
-    / "5m_profit_model"
-    / "xgb_5m_profit_model.joblib"
-)
+_default_live_5m_model = _BACKEND_DIR / "models" / "entry_5m" / "model.pkl"
 _fallback_live_5m_model = (
-    _BACKEND_DIR / "app" / "inference" / "model_5m_ensemble_smoke.joblib"
+    _BACKEND_DIR / "models" / "model.pkl"
 )
 
 if _default_live_5m_model.exists():
@@ -317,6 +323,8 @@ LIVE_5M_TREND_THRESHOLD = float(
 LIVE_5M_VOLATILITY_THRESHOLD = float(
     os.getenv("LIVE_5M_VOLATILITY_THRESHOLD", "0.001896510226652026")
 )
+LIVE_5M_ADX_THRESHOLD = float(os.getenv("LIVE_5M_ADX_THRESHOLD", "20"))
+LIVE_5M_BBWIDTH_THRESHOLD = float(os.getenv("LIVE_5M_BBWIDTH_THRESHOLD", "0.0005"))
 LIVE_5M_STOP_LOSS_PCT = float(os.getenv("LIVE_5M_STOP_LOSS_PCT", "0.005"))
 LIVE_5M_TAKE_PROFIT_PCT = float(os.getenv("LIVE_5M_TAKE_PROFIT_PCT", "0.015"))
 LIVE_5M_MAX_HOLDING_BARS = int(os.getenv("LIVE_5M_MAX_HOLDING_BARS", "6"))

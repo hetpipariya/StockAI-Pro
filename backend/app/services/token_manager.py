@@ -392,8 +392,7 @@ class TokenManager:
                     )
                     clear_session_sync()
                     self._session = None
-                    self._manual_relogin_required = True
-                    self._activate_cooldown()
+                    self._manual_relogin_required = False
                     break
 
             except Exception as exc:
@@ -408,7 +407,7 @@ class TokenManager:
             self._backoff(attempt)
 
         if is_stale_token:
-            logger.error("[TOKEN] Stale/invalid refresh token detected. User must re-login.")
+            logger.warning("[TOKEN] Stale refresh token invalidated; attempting controlled relogin.")
         elif last_error:
             logger.warning("[TOKEN] Refresh failed -> relogin (%s)", last_error)
         else:

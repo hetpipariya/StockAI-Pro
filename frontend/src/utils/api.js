@@ -1,4 +1,11 @@
 import { API_URL, buildApiUrl as buildAbsoluteApiUrl } from '../config/api'
+import {
+  API_TIMEOUT_MS,
+  MAX_API_RETRIES,
+  beginSingleFlightRequest,
+  isAbortLikeError,
+  normalizeTimeoutMs,
+} from '../api/requestGate.js'
 
 const DEFAULT_CACHE_TTL_MS = 3000
 const responseCache = new Map()
@@ -40,15 +47,19 @@ export const apiRequest = async (
     body,
     headers = {},
     signal,
-    timeoutMs = 12000,
+    timeoutMs = API_TIMEOUT_MS,
   } = {}
 ) => {
   const normalizedMethod = String(method || 'GET').toUpperCase()
   const url = buildApiUrl(path, params)
-  const controller = signal ? null : new AbortController()
+  const gate = beginSingleFlightRequest({
+    externalSignal: signal,
+    key: `${normalizedMethod}:${url}`,
+  })
+  const effectiveTimeoutMs = normalizeTimeoutMs(timeoutMs, API_TIMEOUT_MS)
   const timeoutId = setTimeout(() => {
-    controller?.abort()
-  }, timeoutMs)
+    gate.abort('request_timeout')
+  }, effectiveTimeoutMs)
 
   try {
     console.log('Calling API:', url)
@@ -62,7 +73,7 @@ export const apiRequest = async (
       method: normalizedMethod,
       headers: mergedHeaders,
       body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: signal || controller?.signal,
+      signal: gate.signal,
     })
 
     let payload = null
@@ -82,16 +93,27 @@ export const apiRequest = async (
 
     return payload
   } catch (error) {
-    const isAbortError =
-      error?.name === 'AbortError' ||
-      /signal aborted without reason/i.test(String(error?.message || '')) ||
-      /operation was aborted/i.test(String(error?.message || ''))
+    const isAbortError = isAbortLikeError(error)
 
     if (isAbortError) {
-      console.error('[API] Request aborted:', error?.message || 'Unknown abort reason')
-      const timeoutError = new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s. Please check your connection and try again.`)
-      timeoutError.status = 0
-      throw timeoutError
+      const abortReason = String(gate.signal?.reason || '')
+      console.error('[API] Request aborted:', abortReason || error?.message || 'Unknown abort reason')
+
+      if (abortReason === 'request_timeout') {
+        const timeoutError = new Error(`Request timed out after ${effectiveTimeoutMs}ms. Fail-fast triggered.`)
+        timeoutError.name = 'TimeoutError'
+        timeoutError.code = 'ERR_TIMEOUT'
+        timeoutError.status = 0
+        timeoutError.isTimeout = true
+        throw timeoutError
+      }
+
+      const cancelError = new Error('Request canceled by a newer request.')
+      cancelError.name = 'AbortError'
+      cancelError.code = 'ERR_CANCELED'
+      cancelError.status = 0
+      cancelError.isTimeout = false
+      throw cancelError
     }
 
     if (error instanceof TypeError) {
@@ -110,6 +132,7 @@ export const apiRequest = async (
     throw error
   } finally {
     clearTimeout(timeoutId)
+    gate.release()
   }
 }
 
@@ -118,8 +141,9 @@ export const apiPost = (path, body, options = {}) => apiRequest(path, { ...optio
 
 export const apiGetWithRetry = async (
   path,
-  { params, signal, retries = 1, retryDelayMs = 500, cacheTtlMs = DEFAULT_CACHE_TTL_MS, bypassCache = false } = {}
+  { params, signal, retries = 0, retryDelayMs = 100, cacheTtlMs = DEFAULT_CACHE_TTL_MS, bypassCache = false } = {}
 ) => {
+  const maxRetries = Math.max(0, Math.min(Number(retries) || 0, MAX_API_RETRIES))
   const cacheKey = `${String(path || '')}?${toQueryString(params)}`
   const now = Date.now()
 
@@ -130,7 +154,7 @@ export const apiGetWithRetry = async (
     }
   }
 
-  for (let i = 0; i <= retries; i++) {
+  for (let i = 0; i <= maxRetries; i++) {
     try {
       const data = await apiGet(path, { params, signal })
       if (!bypassCache && cacheTtlMs > 0) {
@@ -141,10 +165,10 @@ export const apiGetWithRetry = async (
       }
       return data
     } catch (error) {
-      if (signal?.aborted || error?.name === 'AbortError') {
+      if (signal?.aborted || isAbortLikeError(error)) {
         throw error
       }
-      if (i === retries) return null
+      if (i === maxRetries) return null
     }
 
     await new Promise((resolve) => setTimeout(resolve, retryDelayMs * (i + 1)))

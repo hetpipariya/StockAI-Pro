@@ -9,9 +9,9 @@ from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import func, select
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
@@ -37,7 +37,6 @@ _DUMMY_PASSWORD_HASH = "$2b$12$LJ3m4ys.ehaGPCWQB4z2/.FpFqjKJzMVhasO/5l.VoxTrSSCV
 
 _USER_LOOKUP_COLUMNS = (
     UserModel.id,
-    UserModel.username,
     UserModel.email,
     UserModel.is_active,
     UserModel.is_verified,
@@ -52,16 +51,9 @@ _LOGIN_LOOKUP_COLUMNS = _USER_LOOKUP_COLUMNS + (UserModel.password_hash,)
 
 
 class RegisterRequest(BaseModel):
-    username: str = Field(..., min_length=3, max_length=50)
+    model_config = ConfigDict(extra="ignore")
+    email: str = Field(..., max_length=255)
     password: str = Field(..., min_length=8, max_length=128)
-    email: Optional[str] = Field(None, max_length=255)
-
-    @field_validator("username")
-    @classmethod
-    def username_alphanumeric(cls, v: str) -> str:
-        if not re.match(r"^[a-zA-Z0-9_]+$", v):
-            raise ValueError("Username must contain only letters, numbers, and underscores")
-        return v.lower().strip()
 
     @field_validator("password")
     @classmethod
@@ -74,15 +66,26 @@ class RegisterRequest(BaseModel):
 
     @field_validator("email")
     @classmethod
-    def email_format(cls, v: Optional[str]) -> Optional[str]:
-        if v and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", v):
+    def email_format(cls, v: str) -> str:
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", v):
             raise ValueError("Invalid email format")
-        return v.lower().strip() if v else None
+        return v.lower().strip()
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(..., min_length=1, max_length=100)
+    model_config = ConfigDict(extra="ignore")
+    email: str = Field(..., max_length=255)
     password: str = Field(..., min_length=1)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return None
+        normalized = v.lower().strip()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", normalized):
+            raise ValueError("Invalid email format")
+        return normalized
 
 
 class RefreshRequest(BaseModel):
@@ -96,7 +99,7 @@ async def get_current_user(
     payload = decode_access_token(token)
 
     try:
-        user_id = int(payload["sub"])
+        user_id = int(payload.get("user_id", payload["sub"]))
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -138,7 +141,7 @@ async def get_optional_user(
 
 
 async def _issue_tokens_for_user(user: UserModel, session: AsyncSession) -> dict:
-    access_token = create_access_token(user.id, user.username)
+    access_token = create_access_token(user.id, user.email)
     refresh_token = create_refresh_token(user.id)
 
     user.refresh_token_hash = hash_refresh_token(refresh_token)
@@ -152,7 +155,6 @@ async def _issue_tokens_for_user(user: UserModel, session: AsyncSession) -> dict
         "expires_in": config.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         "user": {
             "id": user.id,
-            "username": user.username,
             "email": user.email,
             "trading_mode": user.trading_mode,
             "starting_capital": user.starting_capital,
@@ -165,27 +167,23 @@ async def register(
     data: RegisterRequest,
     session: AsyncSession = Depends(get_async_session),
 ):
-    existing = await session.execute(
-        select(UserModel).where(UserModel.username == data.username)
+    total_users = await session.scalar(select(func.count(UserModel.id)))
+    if int(total_users or 0) >= max(1, int(config.MAX_BETA_USERS)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User limit reached (beta phase)",
+        )
+
+    existing_email = await session.execute(
+        select(UserModel.id).where(UserModel.email == data.email).limit(1)
     )
-    if existing.scalars().first():
+    if existing_email.scalar_one_or_none() is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Username already taken. Please choose a different one.",
+            detail="Email already registered.",
         )
-
-    if data.email:
-        existing_email = await session.execute(
-            select(UserModel).where(UserModel.email == data.email)
-        )
-        if existing_email.scalars().first():
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Email already registered.",
-            )
 
     new_user = UserModel(
-        username=data.username,
         email=data.email,
         password_hash=hash_password(data.password),
         is_active=True,
@@ -204,9 +202,16 @@ async def register(
             status_code=status.HTTP_409_CONFLICT,
             detail="Registration failed due to conflict. Please try again.",
         ) from exc
+    except DBAPIError as exc:
+        await session.rollback()
+        logger.error("[AUTH] Registration failed due to database error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication temporarily unavailable. Please try again later.",
+        ) from exc
 
     tokens = await _issue_tokens_for_user(new_user, session)
-    logger.info("[AUTH] New user registered id=%s username=%s", new_user.id, new_user.username)
+    logger.info("[AUTH] New user registered id=%s email=%s", new_user.id, new_user.email)
 
     return {
         "status": "ok",
@@ -215,7 +220,7 @@ async def register(
     }
 
 
-@router.post("/signup", status_code=status.HTTP_201_CREATED, include_in_schema=False)
+@router.post("/signup", status_code=status.HTTP_201_CREATED)
 async def signup_alias(
     data: RegisterRequest,
     session: AsyncSession = Depends(get_async_session),
@@ -228,27 +233,33 @@ async def login(
     data: LoginRequest,
     session: AsyncSession = Depends(get_async_session),
 ):
-    username = data.username.lower().strip()
-
-    result = await session.execute(
-        select(UserModel)
-        .options(load_only(*_LOGIN_LOOKUP_COLUMNS))
-        .where(UserModel.username == username)
-    )
-    user = result.scalars().first()
+    email = data.email.lower().strip()
+    try:
+        result = await session.execute(
+            select(UserModel)
+            .options(load_only(*_LOGIN_LOOKUP_COLUMNS))
+            .where(UserModel.email == email)
+        )
+        user = result.scalars().first()
+    except DBAPIError as exc:
+        logger.error("[AUTH] Login lookup failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication temporarily unavailable. Please try again later.",
+        ) from exc
 
     if not user:
         verify_password(data.password, _DUMMY_PASSWORD_HASH)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password",
+            detail="Invalid email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
     if not verify_password(data.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password",
+            detail="Invalid email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -259,7 +270,7 @@ async def login(
         )
 
     tokens = await _issue_tokens_for_user(user, session)
-    logger.info("[AUTH] Login success user_id=%s username=%s", user.id, user.username)
+    logger.info("[AUTH] Login success user_id=%s email=%s", user.id, user.email)
 
     return {
         "status": "ok",
@@ -272,7 +283,7 @@ async def login(
 async def login_help():
     return {
         "status": "error",
-        "message": "Use POST /api/v1/auth/login with JSON {username, password}.",
+        "message": "Use POST /api/v1/auth/login with JSON {email, password}.",
         "hint": "For UI login, open /login on the frontend app.",
     }
 
@@ -282,7 +293,7 @@ async def login_form(
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: AsyncSession = Depends(get_async_session),
 ):
-    login_req = LoginRequest(username=form_data.username, password=form_data.password)
+    login_req = LoginRequest(email=form_data.username, password=form_data.password)
     return await login(login_req, session)
 
 
@@ -293,7 +304,6 @@ async def get_me(current_user: UserModel = Depends(get_current_user)):
         "message": "User profile",
         "data": {
             "id": current_user.id,
-            "username": current_user.username,
             "email": current_user.email,
             "is_active": current_user.is_active,
             "is_verified": current_user.is_verified,
@@ -346,7 +356,7 @@ async def refresh_token(
             detail="Refresh token has already been used or is invalid. Please login again.",
         )
 
-    new_access = create_access_token(user.id, user.username)
+    new_access = create_access_token(user.id, user.email)
     new_refresh = create_refresh_token(user.id)
 
     user.refresh_token_hash = hash_refresh_token(new_refresh)

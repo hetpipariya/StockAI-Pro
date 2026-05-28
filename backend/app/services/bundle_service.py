@@ -11,11 +11,13 @@ import numpy as np
 import pandas as pd
 
 from app import config
-from app.connectors.smartapi_connector import SmartAPIConnector
+from app.connectors import get_market_data_connector
 from app.inference.runner import PredictionResult, predict_symbol
 from app.services.candle_store import get_candles, get_last_candle, store_candles
 from app.services.db import PredictionModel, async_session, is_transient_db_error
+from app.services.native_accelerators import compute_feature_frame, compute_indicator_frame
 from app.services.indicators import IndicatorEngine
+from app.services.instrument_service import normalize_symbol_input
 from app.services.market_state import get_market_status as _raw_market_status
 from app.services.realtime_data_service import LiveMarketDataService
 from app.services.redis_client import get_cache, set_cache
@@ -23,20 +25,32 @@ from app.services.redis_client import get_cache, set_cache
 logger = logging.getLogger(__name__)
 
 # Bundle-specific cache profile for low-latency UI refreshes.
-HISTORY_CACHE_TTL_SECONDS = max(3, min(config.CACHE_TTL_CANDLES_SECONDS, 5))
-SNAPSHOT_CACHE_TTL_SECONDS = 1
-PREDICTION_CACHE_TTL_SECONDS = max(3, min(config.CACHE_TTL_PREDICTION_SECONDS, 5))
-BUNDLE_CACHE_TTL_SECONDS = max(3, min(config.CACHE_TTL_BUNDLE_SECONDS, 5))
+HISTORY_CACHE_TTL_SECONDS = max(5, min(config.CACHE_TTL_CANDLES_SECONDS, 10))
+SNAPSHOT_CACHE_TTL_SECONDS = max(2, min(config.CACHE_TTL_SNAPSHOT_SECONDS, 5))
+PREDICTION_CACHE_TTL_SECONDS = max(10, int(os.getenv("BUNDLE_PREDICTION_CACHE_TTL_SECONDS", "10")))
+BUNDLE_CACHE_TTL_SECONDS = max(5, min(config.CACHE_TTL_BUNDLE_SECONDS, 8))
+HISTORY_STALE_CACHE_TTL_SECONDS = max(30, int(os.getenv("BUNDLE_HISTORY_STALE_TTL_SECONDS", "120")))
+SNAPSHOT_STALE_CACHE_TTL_SECONDS = max(15, int(os.getenv("BUNDLE_SNAPSHOT_STALE_TTL_SECONDS", "45")))
+PREDICTION_STALE_CACHE_TTL_SECONDS = max(20, int(os.getenv("BUNDLE_PREDICTION_STALE_TTL_SECONDS", "60")))
+BUNDLE_STALE_CACHE_TTL_SECONDS = max(20, int(os.getenv("BUNDLE_STALE_TTL_SECONDS", "60")))
 
 # Guardrails for low-latency bundle responses under partial outages.
-DB_READ_TIMEOUT_SECONDS = 0.12
-SNAPSHOT_LIVE_TIMEOUT_SECONDS = 1.25
-HISTORY_LIVE_TIMEOUT_SECONDS = 2.0
-PREDICTION_TIMEOUT_SECONDS = 1.0
+DB_READ_TIMEOUT_SECONDS = max(1.0, float(os.getenv("BUNDLE_DB_TIMEOUT_SECONDS", "1.0")))
+SNAPSHOT_LIVE_TIMEOUT_SECONDS = max(3.0, float(os.getenv("BUNDLE_SNAPSHOT_TIMEOUT_SECONDS", "3.0")))
+HISTORY_LIVE_TIMEOUT_SECONDS = max(4.0, float(os.getenv("BUNDLE_HISTORY_TIMEOUT_SECONDS", "4.0")))
+PREDICTION_TIMEOUT_SECONDS = max(2.0, float(os.getenv("BUNDLE_PREDICTION_TIMEOUT_SECONDS", "2.0")))
+INDICATORS_TIMEOUT_SECONDS = max(2.0, float(os.getenv("BUNDLE_INDICATORS_TIMEOUT_SECONDS", "2.0")))
 CONNECTOR_COOLDOWN_SECONDS = 60.0
-MIN_CANDLES_FOR_FEATURES = 50
-MIN_CANDLES_FOR_BUNDLE = 100
+MIN_CANDLES_FOR_FEATURES = max(50, int(os.getenv("MIN_CANDLES_FOR_FEATURES", "200")))
+MIN_CANDLES_FOR_BUNDLE = max(
+    MIN_CANDLES_FOR_FEATURES,
+    int(os.getenv("MIN_CANDLES_FOR_BUNDLE", str(MIN_CANDLES_FOR_FEATURES))),
+)
 PREWARM_TIMEOUT_SECONDS = 6.0
+COMPONENT_CONCURRENCY_LIMIT = max(
+    1,
+    min(3, int(os.getenv("BUNDLE_COMPONENT_CONCURRENCY", "3"))),
+)
 DEFAULT_PREWARM_SYMBOLS = tuple(
     symbol.strip().upper()
     for symbol in os.getenv(
@@ -75,11 +89,23 @@ YF_INDEX_SYMBOLS = {
 }
 
 # Connector singleton.
-_connector: SmartAPIConnector | None = None
+_connector: Any | None = None
 _connector_blocked_until: float = 0.0
 _live_market_data_service: LiveMarketDataService | None = None
 _bundle_log_last_emitted: dict[str, float] = {}
 _BUNDLE_LOG_THROTTLE_SECONDS = 30.0
+_component_semaphore = asyncio.Semaphore(COMPONENT_CONCURRENCY_LIMIT)
+_bundle_metrics: dict[str, int] = {
+    "requests": 0,
+    "history_ok": 0,
+    "history_fail": 0,
+    "snapshot_ok": 0,
+    "snapshot_fail": 0,
+    "prediction_ok": 0,
+    "prediction_fail": 0,
+    "indicators_ok": 0,
+    "indicators_fail": 0,
+}
 
 
 def _should_emit_bundle_log(key: str) -> bool:
@@ -95,7 +121,11 @@ def _bundle_cache_key(symbol: str, interval: str, limit: int, horizon: str) -> s
     normalized_interval = str(interval or "1m").strip().lower() or "1m"
     normalized_horizon = str(horizon or "15m").strip().lower() or "15m"
     safe_limit = max(1, _to_int(limit, 100))
-    return f"bundle:v3:{symbol}:{normalized_interval}:{safe_limit}:{normalized_horizon}"
+    return f"bundle:v4:{symbol}:{normalized_interval}:{safe_limit}:{normalized_horizon}"
+
+
+def _stale_cache_key(cache_key: str) -> str:
+    return f"{cache_key}:stale"
 
 
 def _utc_now_iso() -> str:
@@ -122,7 +152,40 @@ def _to_int(value: Any, default: int = 0) -> int:
 
 
 def _normalize_symbol(symbol: str) -> str:
-    return str(symbol or "").strip().upper()
+    return normalize_symbol_input(symbol)
+
+
+async def _set_cached_payload(
+    cache_key: str,
+    payload: Any,
+    *,
+    ttl: int,
+    stale_ttl: int | None = None,
+) -> None:
+    await set_cache(cache_key, payload, ttl=ttl)
+    if stale_ttl and stale_ttl > ttl:
+        await set_cache(_stale_cache_key(cache_key), payload, ttl=stale_ttl)
+
+
+async def _get_stale_cached_payload(cache_key: str) -> Any:
+    return await get_cache(_stale_cache_key(cache_key))
+
+
+async def _run_component(name: str, coro):
+    async with _component_semaphore:
+        logger.debug("[BUNDLE] component_start name=%s", name)
+        return await coro
+
+
+async def _timed_component(name: str, coro):
+    started = time.perf_counter()
+    try:
+        result = await coro
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        return name, result, None, duration_ms
+    except Exception as exc:
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        return name, exc, exc, duration_ms
 
 
 def _normalize_confidence_score(value: Any) -> float:
@@ -293,6 +356,84 @@ def _to_candle_time_string(value: Any) -> str:
     return str(value)
 
 
+def _parse_timestamp(value: Any) -> datetime | None:
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return None
+    if isinstance(ts, pd.Timestamp):
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert("UTC").tz_localize(None)
+        return ts.to_pydatetime()
+    return None
+
+
+def _apply_history_requirements(
+    payload: dict[str, Any],
+    required_count: int,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+
+    candles = payload.get("candles") if isinstance(payload.get("candles"), list) else []
+    count = len(candles)
+    if count >= required_count:
+        return payload
+
+    warning = f"Insufficient candles ({count}/{required_count})"
+    updated = _as_partial_payload(payload, warning=warning, stale=bool(payload.get("stale")))
+    updated["count"] = count
+    return updated
+
+
+def _align_snapshot_with_history(
+    symbol: str,
+    snapshot: dict[str, Any],
+    history_payload: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(snapshot, dict):
+        return snapshot
+
+    candles = history_payload.get("candles") if isinstance(history_payload.get("candles"), list) else []
+    if not candles:
+        return snapshot
+
+    last_candle = candles[-1] if isinstance(candles[-1], dict) else None
+    if not last_candle:
+        return snapshot
+
+    snapshot_ts = _parse_timestamp(snapshot.get("last_ts") or snapshot.get("timestamp"))
+    candle_ts = _parse_timestamp(last_candle.get("time"))
+
+    should_override = False
+    if str(snapshot.get("data_source", "")).upper() in {"UNAVAILABLE", "STALE_CACHE"}:
+        should_override = True
+    if candle_ts and snapshot_ts and snapshot_ts < candle_ts:
+        should_override = True
+    if snapshot.get("ltp", 0.0) in (0, 0.0) and candle_ts:
+        should_override = True
+
+    if not should_override:
+        return snapshot
+
+    derived = _snapshot_from_candles(
+        symbol,
+        candles,
+        source=str(history_payload.get("source", "CACHE")),
+        data_source=str(history_payload.get("data_source", "CACHE")),
+    )
+    if not derived:
+        return snapshot
+
+    merged = {
+        **snapshot,
+        **derived,
+    }
+    if snapshot.get("partial") or history_payload.get("partial"):
+        merged["partial"] = True
+        merged["warning"] = merged.get("warning") or "Snapshot aligned with latest candle"
+    return merged
+
+
 def _frame_to_candles(frame: pd.DataFrame, limit: int) -> list[dict[str, Any]]:
     if frame is None or frame.empty:
         return []
@@ -415,7 +556,76 @@ def _unavailable_snapshot(symbol: str) -> dict[str, Any]:
         "last_ts": _utc_now_iso(),
         "source": "UNAVAILABLE",
         "data_source": "UNAVAILABLE",
+        "partial": True,
+        "stale": False,
+        "warning": "Live snapshot unavailable",
     }
+
+
+def _empty_history_payload(symbol: str, interval: str) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "candles": [],
+        "data": [],
+        "count": 0,
+        "source": "UNAVAILABLE",
+        "data_source": "UNAVAILABLE",
+        "partial": True,
+        "stale": False,
+        "warning": "History unavailable",
+    }
+
+
+def _empty_market_status_payload() -> dict[str, Any]:
+    return {
+        "state": "CLOSED",
+        "details": {},
+    }
+
+
+def _empty_indicators_payload(symbol: str) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "ema_20": 0.0,
+        "ema_50": 0.0,
+        "ema9": 0.0,
+        "ema15": 0.0,
+        "rsi": 0.0,
+        "rsi9": 0.0,
+        "macd": {
+            "value": 0.0,
+            "signal": 0.0,
+            "histogram": 0.0,
+        },
+        "bollinger": {
+            "upper": 0.0,
+            "middle": 0.0,
+            "lower": 0.0,
+        },
+        "partial": True,
+        "warning": "Indicators unavailable",
+    }
+
+
+def _as_partial_payload(
+    payload: dict[str, Any],
+    *,
+    source: str | None = None,
+    data_source: str | None = None,
+    warning: str | None = None,
+    stale: bool = True,
+) -> dict[str, Any]:
+    updated = dict(payload or {})
+    if source:
+        updated["source"] = source
+    if data_source:
+        updated["data_source"] = data_source
+    updated["partial"] = True
+    updated["stale"] = stale
+    if warning:
+        updated["warning"] = warning
+    return updated
 
 
 def _snapshot_from_candles(
@@ -464,6 +674,8 @@ def _prediction_fallback(symbol: str, ltp: float, reason: str) -> dict[str, Any]
     stop = round(safe_ltp * 0.996, 2) if safe_ltp > 0 else 0.0
     return {
         "symbol": symbol,
+        "partial": True,
+        "stale": False,
         "signal": "HOLD",
         "confidence": 0.0,
         "confidence_pct": 0,
@@ -562,6 +774,7 @@ def _prediction_fallback(symbol: str, ltp: float, reason: str) -> dict[str, Any]
         "reason": reason,
         "reasoning": reason,
         "explanation": reason,
+        "warning": reason,
     }
 
 
@@ -754,7 +967,7 @@ async def _save_prediction_record(
             return
 
 
-def _get_connector() -> SmartAPIConnector:
+def _get_connector() -> Any:
     global _connector, _connector_blocked_until
 
     now = time.monotonic()
@@ -763,9 +976,9 @@ def _get_connector() -> SmartAPIConnector:
         raise RuntimeError(f"Connector cooldown active ({wait_seconds}s)")
 
     if _connector is None:
-        _connector = SmartAPIConnector()
         try:
-            _connector.login()
+            _connector = get_market_data_connector()
+            _connector.ensure_login()
             _connector_blocked_until = 0.0
         except Exception:
             _connector_blocked_until = time.monotonic() + CONNECTOR_COOLDOWN_SECONDS
@@ -786,12 +999,13 @@ def _get_live_market_data_service() -> LiveMarketDataService:
 
 async def _fetch_snapshot(symbol: str) -> dict[str, Any]:
     live_data_service = _get_live_market_data_service()
+    normalized_symbol = _normalize_symbol(symbol)
     data = await live_data_service.fetch_snapshot(symbol)
     if not data:
-        raise ValueError(f"LTP not available for {symbol}")
+        raise ValueError(f"LTP not available for {normalized_symbol}")
 
     return {
-        "symbol": symbol,
+        "symbol": normalized_symbol,
         "ltp": _to_float(data.get("ltp", 0.0), 0.0),
         "open": _to_float(data.get("open", 0.0), 0.0),
         "high": _to_float(data.get("high", 0.0), 0.0),
@@ -863,12 +1077,12 @@ async def get_market_status() -> dict[str, Any]:
 
 async def get_snapshot(symbol: str, allow_live: bool = True) -> dict[str, Any]:
     normalized_symbol = _normalize_symbol(symbol)
-    _get_live_market_data_service().resolve_instrument(normalized_symbol)
-    cache_key = f"snap:v3:{normalized_symbol}"
+    cache_key = f"snap:v4:{normalized_symbol}"
 
     cached = await get_cache(cache_key)
     if isinstance(cached, dict):
         return cached
+    stale_cached = await _get_stale_cached_payload(cache_key)
 
     market_open = bool(_raw_market_status().get("is_open"))
     snapshot: dict[str, Any] | None = None
@@ -877,7 +1091,7 @@ async def get_snapshot(symbol: str, allow_live: bool = True) -> dict[str, Any]:
     # Prefer live quote during market hours.
     if market_open and allow_live:
         snapshot = await _with_timeout(
-            _fetch_snapshot(normalized_symbol),
+            _fetch_snapshot(symbol),
             SNAPSHOT_LIVE_TIMEOUT_SECONDS,
             None,
             f"live_snapshot:{normalized_symbol}",
@@ -889,7 +1103,7 @@ async def get_snapshot(symbol: str, allow_live: bool = True) -> dict[str, Any]:
     # If DB is empty after-hours, opportunistically try live quote once.
     if not snapshot and not market_open and allow_live:
         snapshot = await _with_timeout(
-            _fetch_snapshot(normalized_symbol),
+            _fetch_snapshot(symbol),
             SNAPSHOT_LIVE_TIMEOUT_SECONDS,
             None,
             f"live_snapshot_offhours:{normalized_symbol}",
@@ -908,7 +1122,7 @@ async def get_snapshot(symbol: str, allow_live: bool = True) -> dict[str, Any]:
     if not snapshot:
         history_payload = await _with_timeout(
             get_history(
-                normalized_symbol,
+                symbol,
                 interval="1m",
                 limit=2,
                 allow_live=allow_live,
@@ -927,10 +1141,27 @@ async def get_snapshot(symbol: str, allow_live: bool = True) -> dict[str, Any]:
             )
 
     if not snapshot:
-        snapshot = _unavailable_snapshot(normalized_symbol)
+        if isinstance(stale_cached, dict):
+            snapshot = _as_partial_payload(
+                stale_cached,
+                source="STALE_CACHE",
+                data_source=stale_cached.get("data_source") or "STALE_CACHE",
+                warning="Serving last known snapshot",
+            )
+        else:
+            snapshot = _unavailable_snapshot(normalized_symbol)
 
     normalized = _normalize_snapshot(snapshot)
-    await set_cache(cache_key, normalized, ttl=SNAPSHOT_CACHE_TTL_SECONDS)
+    if snapshot.get("partial"):
+        normalized["partial"] = True
+        normalized["stale"] = bool(snapshot.get("stale"))
+        normalized["warning"] = snapshot.get("warning")
+    await _set_cached_payload(
+        cache_key,
+        normalized,
+        ttl=SNAPSHOT_CACHE_TTL_SECONDS,
+        stale_ttl=SNAPSHOT_STALE_CACHE_TTL_SECONDS,
+    )
     return normalized
 
 
@@ -942,20 +1173,21 @@ async def get_history(
 ) -> dict[str, Any]:
     normalized_symbol = _normalize_symbol(symbol)
     live_data_service = _get_live_market_data_service()
-    live_data_service.resolve_instrument(normalized_symbol)
     requested_limit = max(1, min(int(limit), 1000))
-    cache_key = f"hist:v3:{normalized_symbol}:{interval}:{requested_limit}"
+    effective_limit = max(requested_limit, MIN_CANDLES_FOR_BUNDLE)
+    cache_key = f"hist:v4:{normalized_symbol}:{interval}:{effective_limit}"
 
     cached = await get_cache(cache_key)
     if isinstance(cached, dict):
         return cached
+    stale_cached = await _get_stale_cached_payload(cache_key)
 
     db_candles = await _with_timeout(
-        get_candles(normalized_symbol, interval, limit=requested_limit),
+        get_candles(normalized_symbol, interval, limit=effective_limit),
         DB_READ_TIMEOUT_SECONDS,
         [],
         f"db_candles:{normalized_symbol}:{interval}",
-        cancel_on_timeout=False,
+        cancel_on_timeout=True,
     )
 
     db_is_stale = True
@@ -969,7 +1201,7 @@ async def get_history(
         except (ValueError, KeyError):
             db_is_stale = True
 
-    if len(db_candles) >= requested_limit * 0.8 and not db_is_stale:
+    if len(db_candles) >= effective_limit * 0.8 and not db_is_stale:
         sanitized_db = _sanitize_candles(db_candles)
         payload = {
             "symbol": normalized_symbol,
@@ -980,10 +1212,16 @@ async def get_history(
             "source": "CACHE",
             "data_source": "CACHE",
         }
-        await set_cache(cache_key, payload, ttl=HISTORY_CACHE_TTL_SECONDS)
+        payload = _apply_history_requirements(payload, MIN_CANDLES_FOR_BUNDLE)
+        await _set_cached_payload(
+            cache_key,
+            payload,
+            ttl=HISTORY_CACHE_TTL_SECONDS,
+            stale_ttl=HISTORY_STALE_CACHE_TTL_SECONDS,
+        )
         return payload
 
-    should_try_live = len(db_candles) < requested_limit * 0.8 or db_is_stale
+    should_try_live = len(db_candles) < effective_limit * 0.8 or db_is_stale
     if should_try_live:
         if allow_live:
             try:
@@ -998,11 +1236,11 @@ async def get_history(
 
                 rows = await _with_timeout(
                     live_data_service.fetch_history_rows(
-                        normalized_symbol,
+                        symbol,
                         interval,
                         from_dt,
                         to_dt,
-                        requested_limit,
+                        effective_limit,
                     ),
                     HISTORY_LIVE_TIMEOUT_SECONDS,
                     [],
@@ -1019,7 +1257,12 @@ async def get_history(
                     if ohlcv:
                         ohlcv = _sanitize_candles(ohlcv)
                         if ohlcv:
-                            await store_candles(normalized_symbol, interval, ohlcv)
+                            await _with_timeout(
+                                store_candles(normalized_symbol, interval, ohlcv),
+                                DB_READ_TIMEOUT_SECONDS,
+                                0,
+                                f"db_store_candles:{normalized_symbol}:{interval}",
+                            )
                             payload = {
                                 "symbol": normalized_symbol,
                                 "interval": interval,
@@ -1029,7 +1272,13 @@ async def get_history(
                                 "source": "NSE_API",
                                 "data_source": "NSE_API",
                             }
-                            await set_cache(cache_key, payload, ttl=HISTORY_CACHE_TTL_SECONDS)
+                            payload = _apply_history_requirements(payload, MIN_CANDLES_FOR_BUNDLE)
+                            await _set_cached_payload(
+                                cache_key,
+                                payload,
+                                ttl=HISTORY_CACHE_TTL_SECONDS,
+                                stale_ttl=HISTORY_STALE_CACHE_TTL_SECONDS,
+                            )
                             return payload
             except Exception as exc:
                 logger.warning("[BUNDLE] History fetch failed for %s: %s", normalized_symbol, exc)
@@ -1039,7 +1288,7 @@ async def get_history(
                 _fetch_history_yfinance,
                 normalized_symbol,
                 interval,
-                requested_limit,
+                effective_limit,
             ),
             HISTORY_LIVE_TIMEOUT_SECONDS,
             [],
@@ -1047,7 +1296,12 @@ async def get_history(
         )
 
         if isinstance(yf_candles, list) and yf_candles:
-            await store_candles(normalized_symbol, interval, yf_candles)
+            await _with_timeout(
+                store_candles(normalized_symbol, interval, yf_candles),
+                DB_READ_TIMEOUT_SECONDS,
+                0,
+                f"db_store_yf_candles:{normalized_symbol}:{interval}",
+            )
             payload = {
                 "symbol": normalized_symbol,
                 "interval": interval,
@@ -1057,7 +1311,13 @@ async def get_history(
                 "source": "YFINANCE",
                 "data_source": "YFINANCE",
             }
-            await set_cache(cache_key, payload, ttl=HISTORY_CACHE_TTL_SECONDS)
+            payload = _apply_history_requirements(payload, MIN_CANDLES_FOR_BUNDLE)
+            await _set_cached_payload(
+                cache_key,
+                payload,
+                ttl=HISTORY_CACHE_TTL_SECONDS,
+                stale_ttl=HISTORY_STALE_CACHE_TTL_SECONDS,
+            )
             return payload
 
     if db_candles:
@@ -1071,19 +1331,31 @@ async def get_history(
             "source": "CACHE",
             "data_source": "CACHE",
         }
-        await set_cache(cache_key, payload, ttl=HISTORY_CACHE_TTL_SECONDS)
+        payload = _apply_history_requirements(payload, MIN_CANDLES_FOR_BUNDLE)
+        await _set_cached_payload(
+            cache_key,
+            payload,
+            ttl=HISTORY_CACHE_TTL_SECONDS,
+            stale_ttl=HISTORY_STALE_CACHE_TTL_SECONDS,
+        )
         return payload
 
-    payload = {
-        "symbol": normalized_symbol,
-        "interval": interval,
-        "candles": [],
-        "data": [],
-        "count": 0,
-        "source": "UNAVAILABLE",
-        "data_source": "UNAVAILABLE",
-    }
-    await set_cache(cache_key, payload, ttl=HISTORY_CACHE_TTL_SECONDS)
+    if isinstance(stale_cached, dict):
+        payload = _as_partial_payload(
+            stale_cached,
+            source="STALE_CACHE",
+            data_source=stale_cached.get("data_source") or "STALE_CACHE",
+            warning="Serving last cached candles",
+        )
+    else:
+        payload = _empty_history_payload(normalized_symbol, interval)
+    payload = _apply_history_requirements(payload, MIN_CANDLES_FOR_BUNDLE)
+    await _set_cached_payload(
+        cache_key,
+        payload,
+        ttl=HISTORY_CACHE_TTL_SECONDS,
+        stale_ttl=HISTORY_STALE_CACHE_TTL_SECONDS,
+    )
     return payload
 
 
@@ -1106,9 +1378,9 @@ async def get_indicators(
 ) -> dict[str, Any]:
     normalized_symbol = _normalize_symbol(symbol)
     resolved_history = history or await get_history(
-        normalized_symbol,
+        symbol,
         interval=interval,
-        limit=200,
+        limit=MIN_CANDLES_FOR_BUNDLE,
     )
     candles = resolved_history.get("candles") or resolved_history.get("data") or []
 
@@ -1125,12 +1397,19 @@ async def get_indicators(
             "bollinger": {"upper": 0.0, "middle": 0.0, "lower": 0.0},
         }
 
-    indicators_df = await _with_timeout(
-        asyncio.to_thread(IndicatorEngine.compute_all, candles),
-        PREDICTION_TIMEOUT_SECONDS,
-        None,
-        f"indicators_compute:{normalized_symbol}",
-    )
+    indicators_df = None
+    try:
+        indicators_df = compute_indicator_frame(candles)
+    except Exception as exc:
+        logger.debug("[BUNDLE] Native indicators failed for %s: %s", normalized_symbol, exc)
+
+    if indicators_df is None or indicators_df.empty:
+        indicators_df = await _with_timeout(
+            asyncio.to_thread(IndicatorEngine.compute_all, candles),
+            INDICATORS_TIMEOUT_SECONDS,
+            None,
+            f"indicators_compute:{normalized_symbol}",
+        )
     if indicators_df is None:
         return {
             "symbol": normalized_symbol,
@@ -1193,9 +1472,9 @@ async def get_prediction(
 ) -> dict[str, Any]:
     normalized_symbol = _normalize_symbol(symbol)
     resolved_history = history or await get_history(
-        normalized_symbol,
+        symbol,
         interval="1m",
-        limit=200,
+        limit=MIN_CANDLES_FOR_BUNDLE,
         allow_live=allow_live,
     )
     candles = resolved_history.get("candles") or resolved_history.get("data") or []
@@ -1212,21 +1491,33 @@ async def get_prediction(
         )
 
     last_candle_time = str(candles[-1].get("time", "na"))
-    cache_key = f"pred:v3:{normalized_symbol}:{horizon}:{last_candle_time}"
+    cache_key = f"pred:v4:{normalized_symbol}:{horizon}:{last_candle_time}"
 
     cached = await get_cache(cache_key)
     if isinstance(cached, dict):
         return cached
+    stale_cached = await _get_stale_cached_payload(cache_key)
 
-    resolved_snapshot = snapshot or await get_snapshot(normalized_symbol)
+    resolved_snapshot = snapshot or await get_snapshot(symbol)
     ltp = _to_float(
         resolved_snapshot.get("price", resolved_snapshot.get("ltp", 0.0)),
         _to_float(candles[-1].get("close", 0.0), 0.0),
     )
 
+    feature_df = None
+    try:
+        feature_df = compute_feature_frame(candles)
+    except Exception as exc:
+        logger.debug("[BUNDLE] Native feature frame failed for %s: %s", normalized_symbol, exc)
+
     if len(candles) < MIN_CANDLES_FOR_FEATURES:
         fallback = _prediction_fallback(normalized_symbol, ltp, "Insufficient data")
-        await set_cache(cache_key, fallback, ttl=PREDICTION_CACHE_TTL_SECONDS)
+        await _set_cached_payload(
+            cache_key,
+            fallback,
+            ttl=PREDICTION_CACHE_TTL_SECONDS,
+            stale_ttl=PREDICTION_STALE_CACHE_TTL_SECONDS,
+        )
         return fallback
 
     try:
@@ -1236,6 +1527,7 @@ async def get_prediction(
                 symbol=normalized_symbol,
                 timeframe=horizon,
                 latest_ltp=ltp,
+                features_df=feature_df,
                 ohlcv=candles,
             ),
             PREDICTION_TIMEOUT_SECONDS,
@@ -1243,8 +1535,20 @@ async def get_prediction(
             f"prediction:{normalized_symbol}:{horizon}",
         )
         if prediction is None:
-            fallback = _prediction_fallback(normalized_symbol, ltp, "Prediction timed out")
-            await set_cache(cache_key, fallback, ttl=PREDICTION_CACHE_TTL_SECONDS)
+            fallback = (
+                _as_partial_payload(
+                    stale_cached,
+                    warning="Serving last cached prediction",
+                )
+                if isinstance(stale_cached, dict)
+                else _prediction_fallback(normalized_symbol, ltp, "Prediction timed out")
+            )
+            await _set_cached_payload(
+                cache_key,
+                fallback,
+                ttl=PREDICTION_CACHE_TTL_SECONDS,
+                stale_ttl=PREDICTION_STALE_CACHE_TTL_SECONDS,
+            )
             return fallback
     except Exception as first_error:
         logger.warning(
@@ -1263,19 +1567,25 @@ async def get_prediction(
                     f"prediction_refresh:{normalized_symbol}",
                 )
             refreshed_history = await get_history(
-                normalized_symbol,
+                symbol,
                 interval="1m",
-                limit=200,
+                limit=MIN_CANDLES_FOR_BUNDLE,
                 allow_live=allow_live,
             )
             candles = refreshed_history.get("candles") or refreshed_history.get("data") or candles
             candles = _sanitize_candles(candles)
+            feature_df = None
+            try:
+                feature_df = compute_feature_frame(candles)
+            except Exception:
+                feature_df = None
             prediction = await _with_timeout(
                 asyncio.to_thread(
                     predict_symbol,
                     symbol=normalized_symbol,
                     timeframe=horizon,
                     latest_ltp=ltp,
+                    features_df=feature_df,
                     ohlcv=candles,
                 ),
                 PREDICTION_TIMEOUT_SECONDS,
@@ -1283,8 +1593,20 @@ async def get_prediction(
                 f"prediction_retry:{normalized_symbol}:{horizon}",
             )
             if prediction is None:
-                fallback = _prediction_fallback(normalized_symbol, ltp, "Prediction unavailable")
-                await set_cache(cache_key, fallback, ttl=PREDICTION_CACHE_TTL_SECONDS)
+                fallback = (
+                    _as_partial_payload(
+                        stale_cached,
+                        warning="Serving last cached prediction",
+                    )
+                    if isinstance(stale_cached, dict)
+                    else _prediction_fallback(normalized_symbol, ltp, "Prediction unavailable")
+                )
+                await _set_cached_payload(
+                    cache_key,
+                    fallback,
+                    ttl=PREDICTION_CACHE_TTL_SECONDS,
+                    stale_ttl=PREDICTION_STALE_CACHE_TTL_SECONDS,
+                )
                 return fallback
         except Exception as second_error:
             logger.error(
@@ -1292,13 +1614,30 @@ async def get_prediction(
                 normalized_symbol,
                 second_error,
             )
-            fallback = _prediction_fallback(normalized_symbol, ltp, "Prediction pipeline failed")
-            await set_cache(cache_key, fallback, ttl=PREDICTION_CACHE_TTL_SECONDS)
+            fallback = (
+                _as_partial_payload(
+                    stale_cached,
+                    warning="Serving last cached prediction",
+                )
+                if isinstance(stale_cached, dict)
+                else _prediction_fallback(normalized_symbol, ltp, "Prediction pipeline failed")
+            )
+            await _set_cached_payload(
+                cache_key,
+                fallback,
+                ttl=PREDICTION_CACHE_TTL_SECONDS,
+                stale_ttl=PREDICTION_STALE_CACHE_TTL_SECONDS,
+            )
             return fallback
 
     normalized = _normalize_prediction(normalized_symbol, prediction, ltp)
     await _save_prediction_record(normalized_symbol, horizon, normalized)
-    await set_cache(cache_key, normalized, ttl=PREDICTION_CACHE_TTL_SECONDS)
+    await _set_cached_payload(
+        cache_key,
+        normalized,
+        ttl=PREDICTION_CACHE_TTL_SECONDS,
+        stale_ttl=PREDICTION_STALE_CACHE_TTL_SECONDS,
+    )
     return normalized
 
 
@@ -1311,7 +1650,20 @@ async def get_bundle(
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
     normalized_symbol = _normalize_symbol(symbol)
-    cache_key = _bundle_cache_key(normalized_symbol, interval, limit, horizon)
+    effective_limit = max(_to_int(limit, 100), MIN_CANDLES_FOR_BUNDLE)
+    cache_key = _bundle_cache_key(normalized_symbol, interval, effective_limit, horizon)
+
+    _bundle_metrics["requests"] += 1
+
+    logger.info(
+        "[PIPELINE] symbol_received raw=%s normalized=%s interval=%s limit=%s effective_limit=%s horizon=%s",
+        symbol,
+        normalized_symbol,
+        interval,
+        limit,
+        effective_limit,
+        horizon,
+    )
 
     cached_bundle = await get_cache(cache_key)
     if isinstance(cached_bundle, dict):
@@ -1322,95 +1674,178 @@ async def get_bundle(
             horizon,
         )
         return cached_bundle
+    stale_bundle = await _get_stale_cached_payload(cache_key)
 
-    history_task = asyncio.create_task(
-        get_history(
-            normalized_symbol,
-            interval=interval,
-            limit=limit,
-            allow_live=allow_live,
-        )
+    phase_one_results = await asyncio.gather(
+        _run_component(
+            "history",
+            _timed_component(
+                "history",
+                get_history(
+                    symbol,
+                    interval=interval,
+                    limit=effective_limit,
+                    allow_live=allow_live,
+                ),
+            ),
+        ),
+        _run_component(
+            "snapshot",
+            _timed_component(
+                "snapshot",
+                get_snapshot(symbol, allow_live=allow_live),
+            ),
+        ),
+        _run_component(
+            "market_status",
+            _timed_component(
+                "market_status",
+                get_market_status(),
+            ),
+        ),
     )
-    snapshot_task = asyncio.create_task(
-        get_snapshot(normalized_symbol, allow_live=allow_live)
-    )
-    status_task = asyncio.create_task(get_market_status())
 
-    history_payload, snapshot_payload, market_status = await asyncio.gather(
-        history_task,
-        snapshot_task,
-        status_task,
-    )
+    component_timings: dict[str, dict[str, Any]] = {}
+    history_payload = None
+    snapshot_payload = None
+    market_status = None
 
-    if not isinstance(history_payload, dict):
-        history_payload = {
-            "symbol": normalized_symbol,
-            "interval": interval,
-            "candles": [],
-            "data": [],
-            "count": 0,
-            "source": "UNAVAILABLE",
-            "data_source": "UNAVAILABLE",
+    for name, result, error, duration_ms in phase_one_results:
+        component_timings[name] = {
+            "status": "error" if error else "ok",
+            "duration_ms": round(duration_ms, 2),
         }
+        if name == "history":
+            history_payload = result if not error else error
+            _bundle_metrics["history_fail" if error else "history_ok"] += 1
+        elif name == "snapshot":
+            snapshot_payload = result if not error else error
+            _bundle_metrics["snapshot_fail" if error else "snapshot_ok"] += 1
+        elif name == "market_status":
+            market_status = result if not error else error
 
-    if not isinstance(snapshot_payload, dict):
+    if isinstance(history_payload, Exception):
+        logger.warning(
+            "[BUNDLE] History stage failed for %s: %s",
+            normalized_symbol,
+            history_payload,
+        )
+        history_payload = _empty_history_payload(normalized_symbol, interval)
+    elif not isinstance(history_payload, dict):
+        history_payload = _empty_history_payload(normalized_symbol, interval)
+
+    if isinstance(snapshot_payload, Exception):
+        logger.warning(
+            "[BUNDLE] Snapshot stage failed for %s: %s",
+            normalized_symbol,
+            snapshot_payload,
+        )
+        snapshot_payload = _unavailable_snapshot(normalized_symbol)
+    elif not isinstance(snapshot_payload, dict):
         snapshot_payload = _unavailable_snapshot(normalized_symbol)
 
-    if not isinstance(market_status, dict):
-        market_status = {
-            "state": "CLOSED",
-            "details": {},
-        }
+    if isinstance(market_status, Exception):
+        logger.warning(
+            "[BUNDLE] Market-status stage failed for %s: %s",
+            normalized_symbol,
+            market_status,
+        )
+        market_status = _empty_market_status_payload()
+    elif not isinstance(market_status, dict):
+        market_status = _empty_market_status_payload()
+
+    snapshot_payload = _align_snapshot_with_history(
+        normalized_symbol,
+        snapshot_payload,
+        history_payload,
+    )
 
     history_candles = history_payload.get("candles", []) if isinstance(history_payload, dict) else []
     history_count = len(history_candles) if isinstance(history_candles, list) else 0
+
+    logger.info(
+        "[PIPELINE] candles_fetched symbol=%s count=%d source=%s",
+        normalized_symbol,
+        history_count,
+        history_payload.get("data_source", "UNKNOWN"),
+    )
 
     snapshot_payload = {
         **snapshot_payload,
         "market_status": market_status.get("state", "CLOSED"),
     }
 
-    indicators_task = asyncio.create_task(
-        get_indicators(
-            normalized_symbol,
-            interval=interval,
-            history=history_payload,
-        )
-    )
-    prediction_task = asyncio.create_task(
-        get_prediction(
-            normalized_symbol,
-            horizon=horizon,
-            history=history_payload,
-            snapshot=snapshot_payload,
-            allow_live=allow_live,
-        )
+    logger.info(
+        "[PIPELINE] snapshot_ready symbol=%s ltp=%.2f source=%s",
+        normalized_symbol,
+        _to_float(snapshot_payload.get("ltp", 0.0), 0.0),
+        snapshot_payload.get("data_source", "UNKNOWN"),
     )
 
-    indicators_payload, prediction_payload = await asyncio.gather(indicators_task, prediction_task)
+    phase_two_results = await asyncio.gather(
+        _run_component(
+            "indicators",
+            _timed_component(
+                "indicators",
+                get_indicators(
+                    normalized_symbol,
+                    interval=interval,
+                    history=history_payload,
+                ),
+            ),
+        ),
+        _run_component(
+            "prediction",
+            _timed_component(
+                "prediction",
+                get_prediction(
+                    normalized_symbol,
+                    horizon=horizon,
+                    history=history_payload,
+                    snapshot=snapshot_payload,
+                    allow_live=allow_live,
+                ),
+            ),
+        ),
+    )
 
-    if not isinstance(indicators_payload, dict):
-        indicators_payload = {
-            "symbol": normalized_symbol,
-            "ema_20": 0.0,
-            "ema_50": 0.0,
-            "ema9": 0.0,
-            "ema15": 0.0,
-            "rsi": 0.0,
-            "rsi9": 0.0,
-            "macd": {
-                "value": 0.0,
-                "signal": 0.0,
-                "histogram": 0.0,
-            },
-            "bollinger": {
-                "upper": 0.0,
-                "middle": 0.0,
-                "lower": 0.0,
-            },
+    indicators_payload = None
+    prediction_payload = None
+
+    for name, result, error, duration_ms in phase_two_results:
+        component_timings[name] = {
+            "status": "error" if error else "ok",
+            "duration_ms": round(duration_ms, 2),
         }
+        if name == "indicators":
+            indicators_payload = result if not error else error
+            _bundle_metrics["indicators_fail" if error else "indicators_ok"] += 1
+        elif name == "prediction":
+            prediction_payload = result if not error else error
+            _bundle_metrics["prediction_fail" if error else "prediction_ok"] += 1
 
-    if not isinstance(prediction_payload, dict):
+    if isinstance(indicators_payload, Exception):
+        logger.warning(
+            "[BUNDLE] Indicators stage failed for %s: %s",
+            normalized_symbol,
+            indicators_payload,
+        )
+        indicators_payload = _empty_indicators_payload(normalized_symbol)
+    elif not isinstance(indicators_payload, dict):
+        indicators_payload = _empty_indicators_payload(normalized_symbol)
+
+    if isinstance(prediction_payload, Exception):
+        logger.warning(
+            "[BUNDLE] Prediction stage failed for %s: %s",
+            normalized_symbol,
+            prediction_payload,
+        )
+        prediction_payload = _prediction_fallback(
+            normalized_symbol,
+            _to_float(snapshot_payload.get("ltp", 0.0), 0.0),
+            "Prediction unavailable",
+        )
+    elif not isinstance(prediction_payload, dict):
         prediction_payload = _prediction_fallback(
             normalized_symbol,
             _to_float(snapshot_payload.get("ltp", 0.0), 0.0),
@@ -1424,7 +1859,31 @@ async def get_bundle(
             f"Insufficient validated history (< {MIN_CANDLES_FOR_BUNDLE} candles)",
         )
 
+    logger.info(
+        "[PIPELINE] prediction_generated symbol=%s signal=%s confidence=%.2f",
+        normalized_symbol,
+        str(prediction_payload.get("signal", "HOLD")).upper(),
+        _to_float(prediction_payload.get("confidence", 0.0), 0.0),
+    )
+
     latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+    warnings: list[str] = []
+
+    for component_name, payload, empty_warning in (
+        ("history", history_payload, "History unavailable"),
+        ("snapshot", snapshot_payload, "Snapshot unavailable"),
+        ("prediction", prediction_payload, "Prediction unavailable"),
+        ("indicators", indicators_payload, "Indicators unavailable"),
+    ):
+        if isinstance(payload, dict):
+            warning = str(payload.get("warning") or "").strip()
+            if warning:
+                warnings.append(f"{component_name}: {warning}")
+            elif payload.get("partial"):
+                warnings.append(f"{component_name}: {empty_warning}")
+
+    if history_count == 0:
+        warnings.append("history: No candles available")
 
     response_payload = {
         "symbol": normalized_symbol,
@@ -1446,9 +1905,67 @@ async def get_bundle(
         "market_status": market_status.get("state", "CLOSED"),
         "market": market_status.get("details", {}),
         "latency_ms": latency_ms,
+        "partial": bool(warnings),
+        "warnings": list(dict.fromkeys(warnings)),
+        "components": {
+            "history": "partial" if bool(history_payload.get("partial")) else "ok",
+            "snapshot": "partial" if bool(snapshot_payload.get("partial")) else "ok",
+            "prediction": "partial" if bool(prediction_payload.get("partial")) else "ok",
+            "indicators": "partial" if bool(indicators_payload.get("partial")) else "ok",
+        },
+        "component_timings": component_timings,
     }
 
-    await set_cache(cache_key, response_payload, ttl=BUNDLE_CACHE_TTL_SECONDS)
+    should_fallback_to_stale_bundle = (
+        isinstance(stale_bundle, dict)
+        and (
+            history_count == 0
+            or str(snapshot_payload.get("data_source", "UNKNOWN")).upper() == "UNAVAILABLE"
+        )
+    )
+
+    if response_payload["partial"] and should_fallback_to_stale_bundle:
+        fallback_bundle = dict(stale_bundle)
+        fallback_bundle["partial"] = True
+        fallback_bundle["warnings"] = list(
+            dict.fromkeys(
+                [
+                    *(
+                        fallback_bundle.get("warnings")
+                        if isinstance(fallback_bundle.get("warnings"), list)
+                        else []
+                    ),
+                    *response_payload["warnings"],
+                    "bundle: Serving last cached bundle while dependencies recover",
+                ]
+            )
+        )
+        fallback_bundle["timestamp"] = _utc_now_iso()
+        fallback_bundle["latency_ms"] = latency_ms
+        fallback_bundle["component_timings"] = component_timings
+        response_payload = fallback_bundle
+
+    logger.info(
+        "[BUNDLE] complete symbol=%s interval=%s horizon=%s count=%d partial=%s latency_ms=%.2f",
+        normalized_symbol,
+        interval,
+        horizon,
+        history_count,
+        response_payload.get("partial"),
+        latency_ms,
+    )
+    logger.debug(
+        "[BUNDLE] components symbol=%s timings=%s",
+        normalized_symbol,
+        component_timings,
+    )
+
+    await _set_cached_payload(
+        cache_key,
+        response_payload,
+        ttl=BUNDLE_CACHE_TTL_SECONDS,
+        stale_ttl=BUNDLE_STALE_CACHE_TTL_SECONDS,
+    )
     return response_payload
 
 

@@ -1,0 +1,150 @@
+{
+  "pipeline": "train_5m_v3_leakage_free",
+  "model_type": "ENTRY_MODEL",
+  "timeframe": "5m",
+  "classes": {
+    "0": "SELL",
+    "1": "HOLD",
+    "2": "BUY"
+  },
+  "feature_count": 36,
+  "feature_list": [
+    "ret_1",
+    "ret_3",
+    "ret_6",
+    "log_ret_1",
+    "log_ret_3",
+    "rsi_14",
+    "roc_5",
+    "roc_10",
+    "ema_spread",
+    "trend_strength_local",
+    "macd_hist",
+    "atr_pct",
+    "volatility_12",
+    "bb_width_pct",
+    "volume_ratio_20",
+    "volume_zscore_20",
+    "vwap_deviation",
+    "obv_slope_5",
+    "body_pct",
+    "upper_wick_pct",
+    "lower_wick_pct",
+    "close_location",
+    "breakout_up_20",
+    "breakout_down_20",
+    "session_progress",
+    "sin_tod",
+    "cos_tod",
+    "trend_strength_1h",
+    "rsi_14_1h",
+    "macd_hist_1h",
+    "atr_pct_1h",
+    "volatility_12_1h",
+    "volume_ratio_20_1h",
+    "ema_spread_1h",
+    "ret_3_1h",
+    "regime_score_1h"
+  ],
+  "has_1h_context": true,
+  "label_config": {
+    "type": "forward_return_fixed_horizon",
+    "future_bars": 6,
+    "buy_threshold_pct": 0.5,
+    "sell_threshold_pct": 0.5
+  },
+  "sim_config": {
+    "tp_pct": 0.5,
+    "sl_pct": 0.35000000000000003,
+    "slippage_pct": 0.05,
+    "max_hold_bars": 12,
+    "sl_priority": true
+  },
+  "inference_thresholds": {
+    "buy": 0.38,
+    "sell": 0.38
+  },
+  "calibration_method": "softmax_logistic_regression",
+  "train_rows": 1248665,
+  "valid_rows": 267571,
+  "test_rows": 267572,
+  "test_metrics": {
+    "accuracy_all": 0.6952296951848475,
+    "accuracy_trades_only": 0.5932203389830508,
+    "trade_rate": 0.0004410027955092461,
+    "precision_buy": 0.5803571428571429,
+    "precision_sell": 0.8333333333333334,
+    "ece_buy": 0.012054507865692838,
+    "ece_sell": 0.023946627347211886,
+    "brier_buy": 0.11869904484594217,
+    "brier_sell": 0.12537117004039608,
+    "confusion_matrix": [
+      [
+        5,
+        42991,
+        17
+      ],
+      [
+        0,
+        185954,
+        30
+      ],
+      [
+        1,
+        38509,
+        65
+      ]
+    ],
+    "classification_report": {
+      "SELL": {
+        "precision": 0.8333333333333334,
+        "recall": 0.00011624392625485318,
+        "f1-score": 0.00023245542667193567,
+        "support": 43013.0
+      },
+      "HOLD": {
+        "precision": 0.6952747014439866,
+        "recall": 0.9998386958017894,
+        "f1-score": 0.8201959253525289,
+        "support": 185984.0
+      },
+      "BUY": {
+        "precision": 0.5803571428571429,
+        "recall": 0.0016850291639662995,
+        "f1-score": 0.0033603019102023935,
+        "support": 38575.0
+      },
+      "accuracy": 0.6952296951848475,
+      "macro avg": {
+        "precision": 0.7029883925448209,
+        "recall": 0.33387998963067017,
+        "f1-score": 0.27459622756313445,
+        "support": 267572.0
+      },
+      "weighted avg": {
+        "precision": 0.700900742700056,
+        "recall": 0.6952296951848475,
+        "f1-score": 0.5706237619490016,
+        "support": 267572.0
+      }
+    },
+    "n_samples": 267572,
+    "n_traded": 118,
+    "thresholds": {
+      "buy": 0.38,
+      "sell": 0.38
+    }
+  },
+  "profit_simulation": {
+    "total_trades": 118,
+    "win_rate": 0.4830508474576271,
+    "profit_factor": 1.0512295081967213,
+    "expectancy_pct": 0.010593220338983057,
+    "max_drawdown_pct": -3.9,
+    "total_return_pct": 1.250000000000001,
+    "rr_ratio": 1.43,
+    "sl_priority": true
+  },
+  "zero_fill_allowed": false,
+  "feature_contract_v": "v3.0"
+}

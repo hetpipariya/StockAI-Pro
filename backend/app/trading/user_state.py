@@ -1,15 +1,8 @@
 """
 Per-user trading state management.
-Replaces global singleton pattern with user-isolated instances.
 
-Each user gets their own:
-  - Capital tracking
-  - Open positions
-  - Risk limits (daily loss, trade count)
-  - Kill-switch
-  - Mode (PAPER / LIVE)
-
-Thread-safe via asyncio.Lock per user state instance.
+Each user gets an isolated runtime state cached in-memory and persisted to DB.
+This avoids shared global trading context while keeping request-time lookups fast.
 """
 
 from __future__ import annotations
@@ -18,11 +11,48 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Optional
+from typing import Any, Optional
+
+from sqlalchemy import select
 
 from app import config
+from app.services.db import AsyncSessionLocal, UserModel, UserTradingStateModel
 
 logger = logging.getLogger(__name__)
+
+_MAX_PERSISTED_ORDERS = 500
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        return default
+    return parsed if parsed == parsed else default
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _normalize_mode(value: Any, fallback: str = "PAPER") -> str:
+    mode = str(value or fallback).strip().upper()
+    return mode if mode in {"PAPER", "LIVE"} else fallback
+
+
+def _parse_opened_at(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        normalized = value.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized)
+        except Exception:
+            pass
+    return datetime.utcnow()
 
 
 @dataclass
@@ -92,7 +122,7 @@ class UserRiskState:
             self.trades_today = 0
             self.halted = False
             self.last_reset_date = today
-            logger.info(f"[User {self.user_id}] Daily risk state reset for {today}")
+            logger.info("[User %s] Daily risk state reset for %s", self.user_id, today)
 
 
 class UserTradingState:
@@ -102,21 +132,27 @@ class UserTradingState:
     """
 
     def __init__(
-        self, user_id: int, starting_capital: float = 100_000.0, mode: str = "PAPER"
+        self,
+        user_id: int,
+        starting_capital: float = 100_000.0,
+        mode: str = "PAPER",
     ):
-        self.user_id = user_id
-        self.mode = mode.upper()
+        safe_capital = max(0.0, _to_float(starting_capital, config.STARTING_CAPITAL))
+        self.user_id = int(user_id)
+        self.mode = _normalize_mode(mode)
         self.positions: dict[str, UserPosition] = {}
-        self.trade_journal: list[dict] = []
+        self.trade_journal: list[dict[str, Any]] = []
         self.risk = UserRiskState(
-            user_id=user_id,
-            starting_capital=starting_capital,
-            current_capital=starting_capital,
+            user_id=self.user_id,
+            starting_capital=safe_capital,
+            current_capital=safe_capital,
         )
         self._lock = asyncio.Lock()
         logger.info(
-            f"[TradingState] Created state for user_id={user_id} "
-            f"capital=₹{starting_capital:,.0f} mode={mode}"
+            "[TradingState] Created state for user_id=%s capital=Rs%.2f mode=%s",
+            self.user_id,
+            safe_capital,
+            self.mode,
         )
 
     def can_trade(self) -> tuple[bool, str]:
@@ -154,7 +190,10 @@ class UserTradingState:
             self.risk.halted = True
             return (
                 False,
-                f"HALTED: Capital {self.risk.current_capital:,.0f} below minimum {self.risk.min_account_balance:,.0f}",
+                (
+                    f"HALTED: Capital {self.risk.current_capital:,.0f} below minimum "
+                    f"{self.risk.min_account_balance:,.0f}"
+                ),
             )
 
         return True, "OK"
@@ -167,18 +206,21 @@ class UserTradingState:
         async with self._lock:
             can, reason = self.can_trade()
             if not can:
-                logger.warning(f"[User {self.user_id}] Trade blocked: {reason}")
+                logger.warning("[User %s] Trade blocked: %s", self.user_id, reason)
                 return False, reason
 
-            if pos.symbol in self.positions:
-                msg = f"Position already open for {pos.symbol}"
-                logger.warning(f"[User {self.user_id}] {msg}")
+            symbol = str(pos.symbol or "").upper().strip()
+            if symbol in self.positions:
+                msg = f"Position already open for {symbol}"
+                logger.warning("[User %s] %s", self.user_id, msg)
                 return False, msg
 
-            self.positions[pos.symbol] = pos
+            pos.symbol = symbol
+            pos.mode = str(pos.mode or self.mode).lower()
+            self.positions[symbol] = pos
             self.risk.open_position_count = len(self.positions)
 
-            # Log to journal
+            # Log to journal (chronological)
             self.trade_journal.append(
                 {
                     "event": "OPEN",
@@ -196,22 +238,36 @@ class UserTradingState:
                 }
             )
 
+            if len(self.trade_journal) > _MAX_PERSISTED_ORDERS:
+                self.trade_journal = self.trade_journal[-_MAX_PERSISTED_ORDERS:]
+
+            await self.persist()
+
             logger.info(
-                f"[User {self.user_id}] Opened {pos.direction} "
-                f"{pos.symbol} @ ₹{pos.entry_price:.2f} qty={pos.quantity} "
-                f"SL=₹{pos.stop_loss:.2f} TP=₹{pos.target:.2f}"
+                "[User %s] Opened %s %s @ Rs%.2f qty=%s SL=Rs%.2f TP=Rs%.2f",
+                self.user_id,
+                pos.direction,
+                pos.symbol,
+                pos.entry_price,
+                pos.quantity,
+                pos.stop_loss,
+                pos.target,
             )
             return True, "Position opened"
 
     async def close_position(
-        self, symbol: str, exit_price: float, reason: str = ""
+        self,
+        symbol: str,
+        exit_price: float,
+        reason: str = "",
     ) -> Optional[float]:
         """
         Close a position and calculate PnL.
         Returns realized PnL or None if no position existed.
         """
         async with self._lock:
-            pos = self.positions.pop(symbol, None)
+            normalized_symbol = str(symbol or "").upper().strip()
+            pos = self.positions.pop(normalized_symbol, None)
             if not pos:
                 return None
 
@@ -225,12 +281,12 @@ class UserTradingState:
             self.risk.current_capital += pnl
             self.risk.open_position_count = len(self.positions)
 
-            # Log to journal
+            # Log to journal (chronological)
             self.trade_journal.append(
                 {
                     "event": "CLOSE",
                     "user_id": self.user_id,
-                    "symbol": symbol,
+                    "symbol": normalized_symbol,
                     "direction": pos.direction,
                     "quantity": pos.quantity,
                     "entry_price": pos.entry_price,
@@ -242,19 +298,29 @@ class UserTradingState:
                 }
             )
 
+            if len(self.trade_journal) > _MAX_PERSISTED_ORDERS:
+                self.trade_journal = self.trade_journal[-_MAX_PERSISTED_ORDERS:]
+
+            await self.persist()
+
             logger.info(
-                f"[User {self.user_id}] Closed {pos.direction} {symbol} "
-                f"@ ₹{exit_price:.2f} pnl=₹{pnl:+,.2f} reason={reason}"
+                "[User %s] Closed %s %s @ Rs%.2f pnl=Rs%+.2f reason=%s",
+                self.user_id,
+                pos.direction,
+                normalized_symbol,
+                exit_price,
+                pnl,
+                reason,
             )
             return pnl
 
     def get_position(self, symbol: str) -> Optional[UserPosition]:
-        return self.positions.get(symbol)
+        return self.positions.get(str(symbol or "").upper().strip())
 
     def has_position(self, symbol: str) -> bool:
-        return symbol in self.positions
+        return str(symbol or "").upper().strip() in self.positions
 
-    def get_all_positions(self) -> list[dict]:
+    def get_all_positions(self) -> list[dict[str, Any]]:
         return [
             {
                 "symbol": p.symbol,
@@ -273,16 +339,18 @@ class UserTradingState:
         ]
 
     def toggle_kill_switch(self, halt: bool):
-        self.risk.halted = halt
+        self.risk.halted = bool(halt)
         logger.warning(
-            f"[User {self.user_id}] Kill-switch {'ACTIVATED' if halt else 'DEACTIVATED'}"
+            "[User %s] Kill-switch %s",
+            self.user_id,
+            "ACTIVATED" if halt else "DEACTIVATED",
         )
 
-    def get_journal(self, limit: int = 50) -> list[dict]:
+    def get_journal(self, limit: int = 50) -> list[dict[str, Any]]:
         """Return most recent trade journal entries."""
-        return self.trade_journal[-limit:][::-1]  # Newest first
+        return self.trade_journal[-max(1, int(limit)) :][::-1]  # Newest first
 
-    def get_summary(self) -> dict:
+    def get_summary(self) -> dict[str, Any]:
         self.risk.reset_if_new_day()
         can, reason = self.can_trade()
         return {
@@ -304,15 +372,91 @@ class UserTradingState:
             "live_confirmed": config.LIVE_CONFIRMED,
         }
 
+    def apply_persisted_payload(
+        self,
+        balance: float,
+        positions_payload: Any,
+        orders_payload: Any,
+    ) -> None:
+        self.risk.current_capital = max(0.0, _to_float(balance, self.risk.current_capital))
+
+        restored_positions: dict[str, UserPosition] = {}
+        if isinstance(positions_payload, list):
+            for item in positions_payload:
+                if not isinstance(item, dict):
+                    continue
+
+                symbol = str(item.get("symbol", "")).strip().upper()
+                if not symbol:
+                    continue
+
+                restored_positions[symbol] = UserPosition(
+                    user_id=self.user_id,
+                    symbol=symbol,
+                    direction=str(item.get("direction", "BUY")).upper(),
+                    quantity=max(0, _to_int(item.get("quantity", 0), 0)),
+                    entry_price=_to_float(item.get("entry_price", 0.0), 0.0),
+                    stop_loss=_to_float(item.get("stop_loss", 0.0), 0.0),
+                    target=_to_float(item.get("target", 0.0), 0.0),
+                    confidence=max(0, _to_int(item.get("confidence", 0), 0)),
+                    mode=str(item.get("mode", self.mode)).lower(),
+                    reason=str(item.get("reason", "")),
+                    opened_at=_parse_opened_at(item.get("opened_at")),
+                    order_id=str(item.get("order_id", "")),
+                )
+
+        restored_journal: list[dict[str, Any]] = []
+        if isinstance(orders_payload, list):
+            for item in orders_payload[-_MAX_PERSISTED_ORDERS:]:
+                if isinstance(item, dict):
+                    restored_journal.append(dict(item))
+
+        self.positions = restored_positions
+        self.trade_journal = restored_journal
+        self.risk.open_position_count = len(self.positions)
+
+    async def persist(self) -> None:
+        """Flush runtime state to the user_trading_state table."""
+        positions_payload = self.get_all_positions()
+        orders_payload = self.trade_journal[-_MAX_PERSISTED_ORDERS:]
+
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(UserTradingStateModel)
+                    .where(UserTradingStateModel.user_id == self.user_id)
+                    .limit(1)
+                )
+                row = result.scalars().first()
+
+                if row is None:
+                    row = UserTradingStateModel(
+                        user_id=self.user_id,
+                        balance=float(self.risk.current_capital),
+                        positions=positions_payload,
+                        orders=orders_payload,
+                        last_updated=datetime.utcnow(),
+                    )
+                    session.add(row)
+                else:
+                    row.balance = float(self.risk.current_capital)
+                    row.positions = positions_payload
+                    row.orders = orders_payload
+                    row.last_updated = datetime.utcnow()
+
+                await session.commit()
+        except Exception as exc:
+            logger.warning(
+                "[TradingState] Persist failed for user_id=%s: %s",
+                self.user_id,
+                exc,
+            )
+
 
 class TradingManager:
     """
-    Central registry that maps user_id → UserTradingState.
+    Central registry that maps user_id -> UserTradingState.
     Thread-safe. Provides user isolation for the entire trading subsystem.
-
-    Usage:
-        state = await trading_manager.get_state(user_id=42)
-        await state.open_position(pos)
     """
 
     _instance: Optional["TradingManager"] = None
@@ -327,40 +471,122 @@ class TradingManager:
             cls._instance = TradingManager()
         return cls._instance
 
+    async def _load_or_create_state(
+        self,
+        user_id: int,
+        starting_capital: Optional[float],
+        mode: Optional[str],
+    ) -> UserTradingState:
+        resolved_capital = _to_float(
+            starting_capital,
+            max(0.0, _to_float(config.STARTING_CAPITAL, 100_000.0)),
+        )
+        resolved_mode = _normalize_mode(mode, config.TRADING_MODE)
+
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(
+                        UserModel.starting_capital,
+                        UserModel.trading_mode,
+                        UserTradingStateModel,
+                    )
+                    .outerjoin(
+                        UserTradingStateModel,
+                        UserTradingStateModel.user_id == UserModel.id,
+                    )
+                    .where(UserModel.id == user_id)
+                    .limit(1)
+                )
+                row = result.first()
+
+                if row is not None:
+                    user_capital, user_mode, persisted_state = row
+
+                    if starting_capital is None:
+                        resolved_capital = _to_float(user_capital, resolved_capital)
+                    if mode is None:
+                        resolved_mode = _normalize_mode(user_mode, resolved_mode)
+
+                    state = UserTradingState(
+                        user_id=user_id,
+                        starting_capital=resolved_capital,
+                        mode=resolved_mode,
+                    )
+
+                    if persisted_state is not None:
+                        state.apply_persisted_payload(
+                            balance=_to_float(persisted_state.balance, resolved_capital),
+                            positions_payload=persisted_state.positions,
+                            orders_payload=persisted_state.orders,
+                        )
+                    else:
+                        # Create baseline persisted row eagerly for reconnect-safe WS snapshots.
+                        session.add(
+                            UserTradingStateModel(
+                                user_id=user_id,
+                                balance=float(state.risk.current_capital),
+                                positions=state.get_all_positions(),
+                                orders=[],
+                                last_updated=datetime.utcnow(),
+                            )
+                        )
+                        await session.commit()
+
+                    return state
+        except Exception as exc:
+            logger.warning(
+                "[TradingManager] DB state bootstrap failed for user_id=%s: %s",
+                user_id,
+                exc,
+            )
+
+        # Fallback: keep trading path available even if DB bootstrap fails.
+        return UserTradingState(
+            user_id=user_id,
+            starting_capital=resolved_capital,
+            mode=resolved_mode,
+        )
+
     async def get_state(
-        self, user_id: int, starting_capital: float = 100_000.0, mode: str = "PAPER"
+        self,
+        user_id: int,
+        starting_capital: Optional[float] = None,
+        mode: Optional[str] = None,
     ) -> UserTradingState:
         """
         Get or create isolated trading state for a user.
-        The state persists for the server lifetime.
+        The state is cached in-memory and persisted in DB.
         """
+        key = int(user_id)
         async with self._lock:
-            if user_id not in self._states:
-                # Use config mode as default if not explicitly set
-                actual_mode = getattr(config, "TRADING_MODE", mode)
-                self._states[user_id] = UserTradingState(
-                    user_id=user_id,
+            if key not in self._states:
+                self._states[key] = await self._load_or_create_state(
+                    user_id=key,
                     starting_capital=starting_capital,
-                    mode=actual_mode,
+                    mode=mode,
                 )
-            return self._states[user_id]
+            elif mode is not None:
+                self._states[key].mode = _normalize_mode(mode, self._states[key].mode)
+            return self._states[key]
 
     async def remove_state(self, user_id: int):
-        """Remove state when user logs out / session ends."""
+        """Drop in-memory state cache for a user (persistent DB state remains)."""
         async with self._lock:
-            state = self._states.pop(user_id, None)
+            state = self._states.pop(int(user_id), None)
             if state:
                 logger.info(
-                    f"[TradingManager] Removed state for user_id={user_id} "
-                    f"(had {len(state.positions)} open positions)"
+                    "[TradingManager] Removed in-memory state for user_id=%s (had %s open positions)",
+                    user_id,
+                    len(state.positions),
                 )
 
     def get_active_user_count(self) -> int:
         return len(self._states)
 
-    def get_all_summaries(self) -> list[dict]:
+    def get_all_summaries(self) -> list[dict[str, Any]]:
         return [state.get_summary() for state in self._states.values()]
 
 
-# ── Module-level singleton accessor ──
+# Module-level singleton accessor
 trading_manager = TradingManager.get_instance()

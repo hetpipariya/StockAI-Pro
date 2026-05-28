@@ -46,19 +46,26 @@ def _utc_now_iso() -> str:
     )
 
 
-def _extract_rate_key(request: Request, client_ip: str) -> str:
-    """Prefer authenticated user key, fallback to IP key."""
+def _extract_authenticated_user_id(request: Request) -> str | None:
+    """Extract authenticated user id from Bearer token when present."""
     auth = request.headers.get("authorization", "").strip()
     if auth.lower().startswith("bearer "):
         token = auth.split(" ", 1)[1].strip()
         if token:
             try:
                 payload = decode_access_token(token)
-                user_id = str(payload.get("sub", "")).strip()
+                user_id = str(payload.get("user_id", payload.get("sub", ""))).strip()
                 if user_id:
-                    return f"user:{user_id}"
+                    return user_id
             except Exception:
                 pass
+    return None
+
+
+def _extract_rate_key(client_ip: str, user_id: str | None = None) -> str:
+    """Prefer authenticated user key, fallback to IP key."""
+    if user_id:
+        return f"user:{user_id}"
     return f"ip:{client_ip}"
 
 
@@ -289,7 +296,9 @@ def add_production_middleware(app: FastAPI) -> None:
             (request.headers.get("X-Request-ID") or "").strip() or uuid.uuid4().hex
         )
         context_token = set_request_id(request_id)
-        rate_key = _extract_rate_key(request, client_ip)
+        authenticated_user_id = _extract_authenticated_user_id(request)
+        request.state.user_id = authenticated_user_id
+        rate_key = _extract_rate_key(client_ip, authenticated_user_id)
         now = time.monotonic()
 
         try:
@@ -304,6 +313,7 @@ def add_production_middleware(app: FastAPI) -> None:
                 while attempts and attempts[0] < cutoff:
                     attempts.popleft()
                 if len(attempts) >= _LOGIN_RATE_LIMIT:
+                    retry_after = int(max(1, _LOGIN_RATE_WINDOW - (now - attempts[0])))
                     response = JSONResponse(
                         status_code=429,
                         content={
@@ -315,6 +325,7 @@ def add_production_middleware(app: FastAPI) -> None:
                             "timestamp": _utc_now_iso(),
                         },
                     )
+                    response.headers["Retry-After"] = str(retry_after)
                     return _corsify_error_response(request, response, request_id)
                 attempts.append(now)
 

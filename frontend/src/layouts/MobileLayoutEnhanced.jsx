@@ -275,6 +275,7 @@ const MobileLayoutEnhanced = ({
                 timeframe={timeframe}
                 indicators={indicators}
                 isLoading={(isLoading || isFetching) && candles.length === 0}
+                livePrice={displayPrice}
               />
             </section>
 

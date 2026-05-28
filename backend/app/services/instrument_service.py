@@ -54,6 +54,17 @@ class InstrumentRecord:
 class InstrumentService:
     """Dynamic instrument token service backed by OpenAPI + Redis + DB."""
 
+    _KNOWN_EXCHANGES = {
+        "NSE",
+        "BSE",
+        "NFO",
+        "BFO",
+        "MCX",
+        "CDS",
+        "NSE_IDX",
+        "BSE_IDX",
+    }
+
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._refresh_lock = asyncio.Lock()
@@ -86,6 +97,40 @@ class InstrumentService:
         if normalized.endswith("-EQ"):
             normalized = normalized[:-3]
         return normalized
+
+    @classmethod
+    def _split_prefixed_symbol(cls, value: str) -> tuple[Optional[str], str]:
+        raw = str(value or "").strip().upper()
+        if not raw:
+            return None, ""
+
+        for separator in (":", "|"):
+            if separator not in raw:
+                continue
+            prefix, remainder = raw.split(separator, 1)
+            normalized_prefix = cls._normalize_exchange(prefix)
+            if normalized_prefix in cls._KNOWN_EXCHANGES and remainder.strip():
+                return normalized_prefix, remainder.strip()
+
+        return None, raw
+
+    @classmethod
+    def resolve_symbol_input(
+        cls,
+        symbol: str,
+        exchange: Optional[str] = None,
+    ) -> tuple[str, str]:
+        prefixed_exchange, raw_symbol = cls._split_prefixed_symbol(symbol)
+        resolved_exchange = cls._normalize_exchange(
+            prefixed_exchange or exchange or config.SMARTAPI_EXCHANGE
+        )
+        resolved_symbol = cls._normalize_symbol(raw_symbol)
+        return resolved_exchange, resolved_symbol
+
+    @classmethod
+    def normalize_symbol_input(cls, symbol: str) -> str:
+        _, resolved_symbol = cls.resolve_symbol_input(symbol)
+        return resolved_symbol
 
     @staticmethod
     def _safe_float(value: Any) -> Optional[float]:
@@ -131,20 +176,34 @@ class InstrumentService:
             if not isinstance(item, dict):
                 continue
 
+            # Angel OpenAPI fields are not consistently cased across deployments.
+            # Make key lookup case-insensitive to avoid loading "0 symbols".
+            lower_item = {str(k).lower(): v for k, v in item.items()}
+
             exchange = self._normalize_exchange(
-                item.get("exch_seg")
-                or item.get("exchange")
-                or item.get("exchange_segment")
+                lower_item.get("exch_seg")
+                or lower_item.get("exchseg")
+                or lower_item.get("exchange")
+                or lower_item.get("exchange_segment")
+                or lower_item.get("exchangesegment")
                 or ""
             )
+
             raw_symbol = str(
-                item.get("symbol")
-                or item.get("tradingsymbol")
-                or item.get("trading_symbol")
+                lower_item.get("symbol")
+                or lower_item.get("tradingsymbol")
+                or lower_item.get("trading_symbol")
+                or lower_item.get("trading_symbol")
                 or ""
             ).strip()
+
             token = self._normalize_token(
-                item.get("token") or item.get("symboltoken") or item.get("instrument_token")
+                lower_item.get("token")
+                or lower_item.get("symboltoken")
+                or lower_item.get("symbol_token")
+                or lower_item.get("instrument_token")
+                or lower_item.get("instrumenttoken")
+                or ""
             )
 
             if not exchange or not raw_symbol or not token:
@@ -155,9 +214,12 @@ class InstrumentService:
             if not symbol:
                 continue
 
-            name = str(item.get("name") or symbol).strip() or symbol
+            name = str(lower_item.get("name") or symbol).strip() or symbol
             instrument_type = str(
-                item.get("instrumenttype") or item.get("instrument_type") or ""
+                lower_item.get("instrumenttype")
+                or lower_item.get("instrument_type")
+                or lower_item.get("instrumenttype".lower())
+                or ""
             ).strip().upper()
 
             record = InstrumentRecord(
@@ -167,11 +229,13 @@ class InstrumentService:
                 tradingsymbol=tradingsymbol,
                 name=name,
                 instrument_type=instrument_type,
-                expiry=str(item.get("expiry") or "").strip(),
-                strike=self._safe_float(item.get("strike")),
-                lot_size=max(1, self._safe_int(item.get("lotsize") or item.get("lot_size"), 1)),
-                tick_size=self._safe_float(item.get("tick_size") or item.get("ticksize")),
-                isin=str(item.get("isin") or "").strip(),
+                expiry=str(lower_item.get("expiry") or "").strip(),
+                strike=self._safe_float(lower_item.get("strike")),
+                lot_size=max(1, self._safe_int(lower_item.get("lotsize") or lower_item.get("lot_size"), 1)),
+                tick_size=self._safe_float(
+                    lower_item.get("tick_size") or lower_item.get("ticksize") or lower_item.get("tickSize")
+                ),
+                isin=str(lower_item.get("isin") or "").strip(),
             )
             records.append(record)
 
@@ -641,15 +705,16 @@ class InstrumentService:
 
     def get_token_by_symbol(self, symbol: str, exchange: str = "NSE") -> str:
         self._ensure_loaded_sync()
-        s_key = self._symbol_key(exchange, symbol)
+        resolved_exchange, resolved_symbol = self.resolve_symbol_input(symbol, exchange)
+        s_key = self._symbol_key(resolved_exchange, resolved_symbol)
 
         with self._lock:
             token = self._symbol_to_token.get(s_key)
             if token:
                 return token
 
-        normalized_symbol = self._normalize_symbol(symbol)
-        normalized_exchange = self._normalize_exchange(exchange)
+        normalized_symbol = resolved_symbol
+        normalized_exchange = resolved_exchange
         cached_exchange = get_cache_sync(f"{_REDIS_EXCHANGE_KEY_PREFIX}:{normalized_exchange}")
         if isinstance(cached_exchange, dict):
             token_map = cached_exchange.get("symbol_to_token") or {}
@@ -690,13 +755,14 @@ class InstrumentService:
 
     def get_tradingsymbol(self, symbol: str, exchange: str = "NSE") -> str:
         self._ensure_loaded_sync()
-        s_key = self._symbol_key(exchange, symbol)
+        resolved_exchange, resolved_symbol = self.resolve_symbol_input(symbol, exchange)
+        s_key = self._symbol_key(resolved_exchange, resolved_symbol)
         with self._lock:
             info = self._symbol_to_info.get(s_key)
             if info and info.get("tradingsymbol"):
                 return str(info["tradingsymbol"])
 
-        normalized = self._normalize_symbol(symbol)
+        normalized = resolved_symbol
         return f"{normalized}-EQ" if " " not in normalized else normalized
 
     def search_symbols(
@@ -860,3 +926,14 @@ def get_last_refresh_at() -> Optional[str]:
 
 def get_bootstrap_counts() -> dict[str, int]:
     return _service.get_bootstrap_counts()
+
+
+def resolve_symbol_input(
+    symbol: str,
+    exchange: Optional[str] = None,
+) -> tuple[str, str]:
+    return _service.resolve_symbol_input(symbol=symbol, exchange=exchange)
+
+
+def normalize_symbol_input(symbol: str) -> str:
+    return _service.normalize_symbol_input(symbol)

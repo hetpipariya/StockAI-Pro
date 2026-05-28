@@ -1,123 +1,97 @@
-"""
-Tests for the canonical feature engineering module.
-Ensures feature computation is deterministic, correct, and aligned.
-"""
+"""Tests for the canonical 20-feature C++ bridge."""
 
-from app.inference.feature_engineering import (FEATURE_COLUMNS,
-                                               FEATURE_VERSION,
-                                               compute_features,
-                                               get_feature_summary,
-                                               validate_features)
+from __future__ import annotations
+
 import sys
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import pytest
 
-# Ensure backend is importable
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.inference.feature_engineering import (  # noqa: E402
+    EXPECTED_FEATURE_COUNT,
+    FEATURE_COLUMNS,
+    FEATURE_VERSION,
+    align_feature_frame,
+    build_canonical_nifty_daily_dataset,
+    compute_features,
+    get_feature_summary,
+    validate_feature_contract,
+    validate_features,
+)
+
+
+EXPECTED_COLUMNS = [
+    "ema9",
+    "ema21",
+    "ema50",
+    "ema_ratio",
+    "linreg_slope",
+    "rsi14",
+    "macd_hist",
+    "roc10",
+    "cci20",
+    "vwap_distance",
+    "volume_ratio",
+    "mfi14",
+    "atr14",
+    "bb_width",
+    "bb_percent_b",
+    "adx14",
+    "candle_body_ratio",
+    "mtf_15m_direction",
+    "daily_alignment",
+    "nifty_direction",
+]
 
 
 class TestFeatureColumns:
-    """Test the canonical feature column definitions."""
-
     def test_feature_count(self):
-        assert len(FEATURE_COLUMNS) == 19
+        assert len(FEATURE_COLUMNS) == EXPECTED_FEATURE_COUNT == 20
 
-    def test_feature_version_exists(self):
-        assert FEATURE_VERSION is not None
-        assert isinstance(FEATURE_VERSION, str)
+    def test_feature_names_match_cpp_contract(self):
+        assert FEATURE_COLUMNS == EXPECTED_COLUMNS
 
     def test_no_duplicate_columns(self):
         assert len(FEATURE_COLUMNS) == len(set(FEATURE_COLUMNS))
 
-    def test_v20_contract_columns_present(self):
-        for col in [
-            "price_change",
-            "volume_change",
-            "rolling_mean_10",
-            "ema_12",
-            "ema_26",
-            "bollinger_upper",
-            "bollinger_lower",
-            "lag_3",
-        ]:
-            assert col in FEATURE_COLUMNS
-
-    def test_ohlcv_not_in_feature_vector(self):
-        for col in ["open", "high", "low", "close", "volume"]:
-            assert col not in FEATURE_COLUMNS
-
-    def test_key_indicators_present(self):
-        for col in [
-            "rsi",
-            "ema_12",
-            "ema_26",
-            "macd",
-            "bollinger_upper",
-            "bollinger_lower",
-            "volatility",
-            "lag_1",
-        ]:
-            assert col in FEATURE_COLUMNS
+    def test_feature_version_exists(self):
+        assert isinstance(FEATURE_VERSION, str)
+        assert FEATURE_VERSION
 
 
 class TestComputeFeatures:
-    """Test compute_features() function."""
-
-    def test_returns_correct_columns(self, mock_ohlcv_df):
+    def test_returns_canonical_columns(self, mock_ohlcv_df):
         result = compute_features(mock_ohlcv_df)
         assert list(result.columns) == FEATURE_COLUMNS
 
-    def test_returns_correct_column_count(self, mock_ohlcv_df):
+    def test_returns_expected_row_count(self, mock_ohlcv_df):
         result = compute_features(mock_ohlcv_df)
-        assert result.shape[1] == 19
-
-    def test_row_count_preserved(self, mock_ohlcv_df):
-        result = compute_features(mock_ohlcv_df)
-        assert len(result) == len(mock_ohlcv_df)
+        assert 0 < len(result) <= len(mock_ohlcv_df) - 49
 
     def test_too_short_returns_empty(self, short_ohlcv_df):
         result = compute_features(short_ohlcv_df)
-        assert len(result) == 0
+        assert result.empty
         assert list(result.columns) == FEATURE_COLUMNS
 
     def test_none_returns_empty(self):
         result = compute_features(None)
-        assert len(result) == 0
+        assert result.empty
         assert list(result.columns) == FEATURE_COLUMNS
 
     def test_no_nan_in_output(self, mock_ohlcv_df):
         result = compute_features(mock_ohlcv_df)
-        assert result.isna().sum().sum() == 0
+        assert int(result.isna().sum().sum()) == 0
 
     def test_no_inf_in_output(self, mock_ohlcv_df):
         result = compute_features(mock_ohlcv_df)
-        assert not np.isinf(result.values).any()
-
-    def test_ema_values_reasonable(self, mock_ohlcv_df):
-        result = compute_features(mock_ohlcv_df)
-        # EMAs should be close to price
-        close_mean = mock_ohlcv_df["close"].mean()
-        assert abs(result["ema_12"].mean() - close_mean) < close_mean * 0.1
-        assert abs(result["ema_26"].mean() - close_mean) < close_mean * 0.1
-
-    def test_rsi_range(self, mock_ohlcv_df):
-        result = compute_features(mock_ohlcv_df)
-        # After backfill, RSI should be in reasonable range (may have 0s from fill)
-        rsi = result["rsi"]
-        assert rsi.max() <= 100
-        assert rsi.min() >= 0
-
-    def test_missing_columns_returns_empty(self):
-        """DataFrame missing required OHLCV columns should return empty."""
-        df = pd.DataFrame({"foo": [1, 2, 3] * 10, "bar": [4, 5, 6] * 10})
-        result = compute_features(df)
-        assert len(result) == 0
+        assert not np.isinf(result.to_numpy(dtype=float)).any()
 
     def test_handles_string_prices(self):
-        """Should handle string values via pd.to_numeric(errors='coerce')."""
         n = 60
         df = pd.DataFrame(
             {
@@ -129,154 +103,114 @@ class TestComputeFeatures:
             }
         )
         result = compute_features(df)
-        assert len(result) == n
+        assert len(result) == n - 49
         assert result.isna().sum().sum() == 0
 
-    def test_bullish_momentum_positive(self, bullish_ohlcv_df):
+    def test_bullish_momentum_reflects_in_trend_fields(self, bullish_ohlcv_df):
         result = compute_features(bullish_ohlcv_df)
-        # In a strong uptrend, momentum should be positive at the end.
-        assert result["momentum"].iloc[-1] > 0
+        latest = result.iloc[-1]
+        assert latest["ema_ratio"] > 1.0
+        assert latest["linreg_slope"] > 0.0
 
-    def test_include_legacy_aliases(self, mock_ohlcv_df):
-        result = compute_features(mock_ohlcv_df, include_legacy=True)
-        for col in [
-            "ema_50",
-            "rsi_14",
-            "atr_14",
-            "volume_spike",
-            "vwap",
-            "body_strength_score",
-            "upper_wick_pct",
-            "lower_wick_pct",
-            "bullish_engulfing",
-            "bearish_engulfing",
-            "doji_flag",
-            "consecutive_green",
-            "consecutive_red",
-            "streak_strength_score",
-        ]:
-            assert col in result.columns
-
-    def test_price_action_legacy_values_are_bounded(self, mock_ohlcv_df):
-        result = compute_features(mock_ohlcv_df, include_legacy=True)
-
-        assert ((result["body_strength_score"] >= 0) & (result["body_strength_score"] <= 1)).all()
-        assert ((result["upper_wick_pct"] >= 0) & (result["upper_wick_pct"] <= 1)).all()
-        assert ((result["lower_wick_pct"] >= 0) & (result["lower_wick_pct"] <= 1)).all()
-        assert ((result["streak_strength_score"] >= 0) & (result["streak_strength_score"] <= 1)).all()
-
-    def test_price_action_legacy_detects_bullish_engulfing(self):
-        n = 60
-        df = pd.DataFrame(
-            {
-                "open": [100.0] * n,
-                "high": [101.0] * n,
-                "low": [99.0] * n,
-                "close": [100.2] * n,
-                "volume": [10000] * n,
-            }
-        )
-
-        # Previous candle (bearish, smaller body)
-        df.loc[n - 2, "open"] = 101.0
-        df.loc[n - 2, "high"] = 101.3
-        df.loc[n - 2, "low"] = 99.9
-        df.loc[n - 2, "close"] = 100.2
-
-        # Current candle (bullish engulfing)
-        df.loc[n - 1, "open"] = 99.9
-        df.loc[n - 1, "high"] = 102.4
-        df.loc[n - 1, "low"] = 99.8
-        df.loc[n - 1, "close"] = 102.1
-
-        result = compute_features(df, include_legacy=True)
-
-        assert int(result["bullish_engulfing"].iloc[-1]) == 1
-        assert int(result["bearish_engulfing"].iloc[-1]) == 0
-
-    def test_price_action_legacy_detects_doji(self):
-        n = 60
-        df = pd.DataFrame(
-            {
-                "open": [100.0] * n,
-                "high": [101.0] * n,
-                "low": [99.0] * n,
-                "close": [100.2] * n,
-                "volume": [10000] * n,
-            }
-        )
-
-        # Make the final candle a doji: body < 10% of range
-        df.loc[n - 1, "open"] = 100.0
-        df.loc[n - 1, "high"] = 101.0
-        df.loc[n - 1, "low"] = 99.0
-        df.loc[n - 1, "close"] = 100.05
-
-        result = compute_features(df, include_legacy=True)
-
-        assert int(result["doji_flag"].iloc[-1]) == 1
+    def test_missing_ohlcv_columns_returns_empty(self):
+        df = pd.DataFrame({"foo": [1, 2, 3] * 10, "bar": [4, 5, 6] * 10})
+        result = compute_features(df)
+        assert result.empty
+        assert list(result.columns) == FEATURE_COLUMNS
 
     def test_deterministic(self, mock_ohlcv_df):
-        """Same input should produce identical output."""
-        r1 = compute_features(mock_ohlcv_df)
-        r2 = compute_features(mock_ohlcv_df)
-        pd.testing.assert_frame_equal(r1, r2)
+        pd.testing.assert_frame_equal(compute_features(mock_ohlcv_df), compute_features(mock_ohlcv_df))
 
 
 class TestValidateFeatures:
-    """Test validate_features() function."""
-
     def test_matching_passes(self):
         validate_features(FEATURE_COLUMNS, FEATURE_COLUMNS, "test")
 
     def test_missing_column_raises(self):
-        wrong = FEATURE_COLUMNS[:-1]  # Drop last column
         with pytest.raises(RuntimeError, match="Missing"):
-            validate_features(wrong, FEATURE_COLUMNS, "test")
+            validate_features(FEATURE_COLUMNS[:-1], FEATURE_COLUMNS, "test")
 
     def test_extra_column_raises(self):
-        wrong = FEATURE_COLUMNS + ["extra_col"]
         with pytest.raises(RuntimeError, match="Extra"):
-            validate_features(wrong, FEATURE_COLUMNS, "test")
+            validate_features(FEATURE_COLUMNS + ["extra_col"], FEATURE_COLUMNS, "test")
 
     def test_wrong_order_raises(self):
-        wrong = list(reversed(FEATURE_COLUMNS))
         with pytest.raises(RuntimeError, match="Order mismatch"):
-            validate_features(wrong, FEATURE_COLUMNS, "test")
+            validate_features(list(reversed(FEATURE_COLUMNS)), FEATURE_COLUMNS, "test")
 
-    def test_completely_different_raises(self):
-        wrong = ["a", "b", "c"]
-        with pytest.raises(RuntimeError):
-            validate_features(wrong, FEATURE_COLUMNS, "test")
+    def test_frame_nan_rows_raise(self):
+        frame = pd.DataFrame([[0.0] * len(FEATURE_COLUMNS)], columns=FEATURE_COLUMNS)
+        frame.iloc[0, 0] = np.nan
+        with pytest.raises(RuntimeError, match="NaN rows"):
+            validate_feature_contract(frame, FEATURE_COLUMNS, context="test_frame")
 
 
-class TestGetFeatureSummary:
-    """Test get_feature_summary() function."""
+class TestAlignAndSummary:
+    def test_align_feature_frame_keeps_order(self):
+        shuffled = pd.DataFrame([[1.0] * len(FEATURE_COLUMNS)], columns=list(reversed(FEATURE_COLUMNS)))
+        aligned = align_feature_frame(shuffled[list(FEATURE_COLUMNS)], FEATURE_COLUMNS, context="align")
+        assert list(aligned.columns) == FEATURE_COLUMNS
 
-    def test_returns_all_features(self, mock_ohlcv_df):
+    def test_summary_contains_latest_features(self, mock_ohlcv_df):
         features = compute_features(mock_ohlcv_df)
         summary = get_feature_summary(features)
-        for col in FEATURE_COLUMNS:
-            assert col in summary
+        for column in FEATURE_COLUMNS:
+            assert column in summary
+            assert isinstance(summary[column], float)
+        assert summary["_rows_used"] == len(features)
+        assert summary["_feature_version"] == FEATURE_VERSION
 
-    def test_empty_returns_error(self):
+    def test_empty_summary_returns_error(self):
         summary = get_feature_summary(pd.DataFrame())
         assert "error" in summary
 
-    def test_none_returns_error(self):
-        summary = get_feature_summary(None)
-        assert "error" in summary
 
-    def test_metadata_present(self, mock_ohlcv_df):
-        features = compute_features(mock_ohlcv_df)
-        summary = get_feature_summary(features)
-        assert "_rows_used" in summary
-        assert "_nan_count" in summary
-        assert "_inf_count" in summary
-        assert "_feature_version" in summary
+class TestNiftyDatasetPipeline:
+    def test_build_canonical_nifty_daily_dataset_writes_csv(self, tmp_path):
+        data = pd.DataFrame(
+            {
+                "date": ["2024-01-01", "2024-01-02", "2024-01-02", "2024-01-03"],
+                "open": [100, 101, 101, 102],
+                "high": [101, 102, 102, 103],
+                "low": [99, 100, 100, 101],
+                "close": [100.5, 101.5, 101.5, 102.5],
+                "volume": [1000, 1100, 1100, 1200],
+            }
+        )
+        source_file = tmp_path / "nifty_sample.csv"
+        data.to_csv(source_file, index=False)
+        output_file = tmp_path / "nifty_canonical.csv"
 
-    def test_values_are_floats(self, mock_ohlcv_df):
-        features = compute_features(mock_ohlcv_df)
-        summary = get_feature_summary(features)
-        for col in FEATURE_COLUMNS:
-            assert isinstance(summary[col], float)
+        result = build_canonical_nifty_daily_dataset(
+            source=source_file,
+            output_path=output_file,
+            target_timezone="Asia/Kolkata",
+            strict=True,
+        )
+
+        assert output_file.exists()
+        assert result["timestamp"].dt.tz == ZoneInfo("Asia/Kolkata")
+        assert result["timestamp"].iloc[0] < result["timestamp"].iloc[1]
+        assert result["timestamp"].nunique() == len(result)
+        assert result["close"].tolist() == [100.5, 101.5, 102.5]
+
+    def test_build_canonical_nifty_daily_dataset_rejects_invalid_rows(self, tmp_path):
+        data = pd.DataFrame(
+            {
+                "date": ["2024-01-01", "2024-01-02"],
+                "open": [100, -1],
+                "high": [101, 102],
+                "low": [99, 100],
+                "close": [100.5, 101.5],
+                "volume": [1000, 1100],
+            }
+        )
+        source_file = tmp_path / "nifty_invalid.csv"
+        data.to_csv(source_file, index=False)
+
+        with pytest.raises(RuntimeError, match="invalid OHLCV rows"):
+            build_canonical_nifty_daily_dataset(
+                source=source_file,
+                target_timezone="Asia/Kolkata",
+                strict=True,
+            )

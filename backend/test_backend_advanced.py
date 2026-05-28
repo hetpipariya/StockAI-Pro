@@ -55,8 +55,8 @@ async def test_redis_db_integration():
             logger.info("✓ Database: Connection successful")
         
         # Get session for testing
-        from app.core.database import get_db
-        async for session in get_db():
+        from app.core.database import get_session
+        async for session in get_session():
             # Try a real query
             from sqlalchemy import text
             result = await session.execute(text("SELECT COUNT(*) as cnt FROM users"))
@@ -100,13 +100,13 @@ logger.info("STEP 5: WebSocket Endpoint Testing")
 logger.info("=" * 60)
 
 try:
-    from app.websocket.handler import manager
+    from app.websocket.handler import socket_manager
     logger.info("✓ WebSocket manager imported")
     
     # Check the handler has required methods
     required_methods = ['connect', 'disconnect', 'broadcast', 'send_personal']
     for method in required_methods:
-        if hasattr(manager, method):
+        if hasattr(socket_manager, method):
             logger.info(f"✓ WebSocket manager has '{method}' method")
         else:
             logger.warning(f"⚠ WebSocket manager missing '{method}' method")
@@ -153,16 +153,13 @@ async def test_predict_endpoint():
                 logger.info(f"    - {route.path} [{', '.join(methods)}]")
         
         # Test model loading
-        from app.core.models import model_manager
-        logger.info("✓ Model manager initialized")
+        from app.inference.models import ModelEnsemble, ensure_models_loaded
+        logger.info("✓ ModelEnsemble imported")
         
         # Try to get a prediction signature
         try:
-            # This doesn't actually call the model, just checks it's loadable
-            if hasattr(model_manager, 'forecast'):
-                logger.info("✓ Model has 'forecast' method")
-            if hasattr(model_manager, 'predict'):
-                logger.info("✓ Model has 'predict' method")
+            if hasattr(ModelEnsemble, 'predict'):
+                logger.info("✓ ModelEnsemble has 'predict' method")
         except Exception as e:
             logger.warning(f"⚠ Model method check: {e}")
             
@@ -180,8 +177,8 @@ logger.info("=" * 60)
 
 try:
     # Check exception handlers in middleware
-    from app.middleware import exception_handlers
-    logger.info(f"✓ {len(exception_handlers) if hasattr(exception_handlers, '__len__') else '?'} exception handlers configured")
+    from app.middleware import add_exception_handlers
+    logger.info("✓ add_exception_handlers imported successfully")
     
     # Check for custom error responses
     from app.server import app

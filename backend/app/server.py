@@ -16,8 +16,9 @@ from app.core.database import healthcheck as db_healthcheck
 from app.logging_setup import configure_logging
 from app.middleware import (add_exception_handlers, add_production_middleware,
                             configure_cors)
-from app.routes import (auth, backtest, bundle, indicators, instruments, market, news,
+from app.routes import (auth, auth_signup, backtest, bundle, indicators, instruments, market, news,
                         portfolio, predict, sentiment, signals, symbols,
+                        trade_api, trade_decision,
                         trades, trading)
 from app.services.redis_client import get_cache, set_cache
 from app.websocket.handler import (get_last_tick_age_seconds, get_ws_state,
@@ -76,6 +77,7 @@ add_exception_handlers(app)
 Instrumentator().instrument(app).expose(app)
 
 app.include_router(auth.router)
+app.include_router(auth_signup.router)
 app.include_router(news.router)
 app.include_router(sentiment.router)
 app.include_router(backtest.router)
@@ -87,9 +89,11 @@ app.include_router(symbols.router)
 app.include_router(instruments.router)
 app.include_router(instruments.legacy_router)
 app.include_router(trading.router)
+app.include_router(trade_api.router)
 app.include_router(trades.router)
 app.include_router(portfolio.router)
 app.include_router(signals.router)
+app.include_router(trade_decision.router)
 setup_websocket_routes(app)
 
 
@@ -151,6 +155,52 @@ async def ping():
     return {"status": "pong"}
 
 
+@app.get("/health/live")
+async def health_live():
+    """Lightweight live health check confirming that ASGI is processing loop frames."""
+    return {"status": "ok", "uptime": "nominal"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    """Deep readiness check asserting database connection, Redis, and ML pipeline health."""
+    from app.services.db import check_db_connection
+    from app.services.redis_client import get_redis, is_degraded_mode
+    from app.websocket.handler import get_ws_state
+    from app.inference.production_pipeline import _process_executor
+    from fastapi.responses import JSONResponse
+
+    db_ok = await check_db_connection(retries=1, delay=0.0)
+
+    redis_ok = False
+    redis_client = await get_redis()
+    if redis_client:
+        try:
+            await redis_client.ping()
+            redis_ok = True
+        except Exception:
+            pass
+
+    ml_ok = _process_executor is not None
+    ws_state = get_ws_state()
+
+    # Database is critical; Redis is nominal if active OR running degraded local mode
+    is_ready = db_ok and (redis_ok or is_degraded_mode())
+    status_code = 200 if is_ready else 503
+
+    payload = {
+        "status": "ready" if is_ready else "not_ready",
+        "subsystems": {
+            "database": "nominal" if db_ok else "unreachable",
+            "redis": "nominal" if redis_ok else ("degraded_fallback" if is_degraded_mode() else "unreachable"),
+            "ml_workers": "active" if ml_ok else "idle",
+            "websocket_stream": ws_state,
+        }
+    }
+    return JSONResponse(content=payload, status_code=status_code)
+
+
+
 @app.get("/api/v1/health/detailed")
 async def detailed_health():
     """Detailed health check with component status."""
@@ -167,12 +217,12 @@ async def detailed_health():
     broker_status = "unknown"
     broker_session_age_minutes = None
     try:
-        from app.connectors.smartapi_connector import SmartAPIConnector
-        connector = SmartAPIConnector()
-        is_logged_in = connector.is_logged_in
-        session_age = connector.session_age_minutes
-        broker_session_age_minutes = round(session_age, 1) if session_age != float("inf") else None
-        broker_status = "connected" if is_logged_in else "disconnected"
+        from app.connectors import get_market_data_connector
+
+        connector = get_market_data_connector()
+        state = connector.active_snapshot()
+        broker_status = state.get("active_broker", "unknown")
+        broker_session_age_minutes = None
     except Exception as e:
         broker_status = f"error: {str(e)[:50]}"
 

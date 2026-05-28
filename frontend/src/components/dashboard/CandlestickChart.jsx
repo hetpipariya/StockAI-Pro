@@ -3,6 +3,19 @@ import { createChart } from 'lightweight-charts';
 import { motion } from 'framer-motion';
 import { BarChart3 } from 'lucide-react';
 
+const normalizeTimestampString = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.includes('T')) return raw;
+
+  const normalized = raw.replace(' ', 'T');
+  if (/[zZ]$/.test(normalized) || /[+-]\d{2}:\d{2}$/.test(normalized)) {
+    return normalized;
+  }
+
+  return `${normalized}Z`;
+};
+
 const toChartTime = (value) => {
   if (typeof value === 'number') {
     if (value > 1_000_000_000_000) return Math.floor(value / 1000);
@@ -10,7 +23,7 @@ const toChartTime = (value) => {
   }
 
   if (typeof value === 'string') {
-    const normalized = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
+    const normalized = normalizeTimestampString(value);
     const millis = Date.parse(normalized);
     if (Number.isFinite(millis)) return Math.floor(millis / 1000);
   }
@@ -49,7 +62,14 @@ const normalizeCandles = (candles) => {
     .filter(Boolean)
     .sort((left, right) => left.time - right.time);
 
-  return normalized;
+  // Lightweight Charts requires strictly increasing unique timestamps.
+  // Keep the latest candle for duplicate timestamps to avoid runtime rendering errors.
+  const deduped = new Map();
+  normalized.forEach((candle) => {
+    deduped.set(candle.time, candle);
+  });
+
+  return Array.from(deduped.values()).sort((left, right) => left.time - right.time);
 };
 
 const computeEmaSeries = (candles, period) => {
@@ -90,20 +110,39 @@ const CandlestickChart = memo(function CandlestickChart({
   timeframe,
   isLoading,
   indicators,
+  livePrice,
+  tradeLevels,
+  signalType,
 }) {
   const [showEma, setShowEma] = useState(true);
   const [showRsi, setShowRsi] = useState(true);
   const [showMacd, setShowMacd] = useState(false);
+  const [chartError, setChartError] = useState(null);
 
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const candleSeriesRef = useRef(null);
   const ema20Ref = useRef(null);
   const ema50Ref = useRef(null);
+  const livePriceLineRef = useRef(null);
+  const entryLineRef = useRef(null);
+  const stopLineRef = useRef(null);
+  const targetLineRef = useRef(null);
+  const hasManualZoomRef = useRef(false);
 
   const normalizedCandles = useMemo(() => normalizeCandles(candles), [candles]);
   const ema20Series = useMemo(() => computeEmaSeries(normalizedCandles, 20), [normalizedCandles]);
   const ema50Series = useMemo(() => computeEmaSeries(normalizedCandles, 50), [normalizedCandles]);
+  const safeSymbol = useMemo(() => String(symbol || 'SYMBOL').toUpperCase(), [symbol]);
+  const safeTimeframe = useMemo(() => String(timeframe || '--').toUpperCase(), [timeframe]);
+  const normalizedLivePrice = useMemo(() => {
+    const parsed = toFiniteNumber(livePrice);
+    return parsed !== null && parsed > 0 ? parsed : null;
+  }, [livePrice]);
+
+  useEffect(() => {
+    hasManualZoomRef.current = false;
+  }, [safeSymbol, safeTimeframe]);
 
   useEffect(() => {
     if (!containerRef.current || chartRef.current) return undefined;
@@ -147,7 +186,7 @@ const CandlestickChart = memo(function CandlestickChart({
       borderVisible: false,
       wickUpColor: '#00FF9F',
       wickDownColor: '#FF3366',
-      priceLineVisible: true,
+      priceLineVisible: false,
     });
 
     const ema20 = chart.addLineSeries({
@@ -179,61 +218,179 @@ const CandlestickChart = memo(function CandlestickChart({
 
     resizeObserver.observe(containerRef.current);
 
+    const markManualZoom = () => {
+      hasManualZoomRef.current = true;
+    };
+
+    containerRef.current.addEventListener('wheel', markManualZoom, { passive: true });
+    containerRef.current.addEventListener('pointerdown', markManualZoom);
+    containerRef.current.addEventListener('touchstart', markManualZoom, { passive: true });
+
     return () => {
       resizeObserver.disconnect();
+      containerRef.current?.removeEventListener('wheel', markManualZoom);
+      containerRef.current?.removeEventListener('pointerdown', markManualZoom);
+      containerRef.current?.removeEventListener('touchstart', markManualZoom);
+      if (candleSeriesRef.current && livePriceLineRef.current) {
+        candleSeriesRef.current.removePriceLine(livePriceLineRef.current);
+      }
+      if (candleSeriesRef.current && entryLineRef.current) candleSeriesRef.current.removePriceLine(entryLineRef.current);
+      if (candleSeriesRef.current && stopLineRef.current) candleSeriesRef.current.removePriceLine(stopLineRef.current);
+      if (candleSeriesRef.current && targetLineRef.current) candleSeriesRef.current.removePriceLine(targetLineRef.current);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
       ema20Ref.current = null;
       ema50Ref.current = null;
+      livePriceLineRef.current = null;
+      entryLineRef.current = null;
+      stopLineRef.current = null;
+      targetLineRef.current = null;
     };
   }, []);
 
+  const latestLivePriceRef = useRef(normalizedLivePrice);
+  const latestCandlesRef = useRef(normalizedCandles);
+  const ema20SeriesRef = useRef(ema20Series);
+  const ema50SeriesRef = useRef(ema50Series);
+
+  const candlesDirtyRef = useRef(false);
+  const priceDirtyRef = useRef(false);
+
   useEffect(() => {
-    if (!candleSeriesRef.current || !ema20Ref.current || !ema50Ref.current) return;
+    latestLivePriceRef.current = normalizedLivePrice;
+    priceDirtyRef.current = true;
+  }, [normalizedLivePrice]);
 
-    candleSeriesRef.current.setData(normalizedCandles);
-    ema20Ref.current.setData(showEma ? ema20Series : []);
-    ema50Ref.current.setData(showEma ? ema50Series : []);
+  useEffect(() => {
+    latestCandlesRef.current = normalizedCandles;
+    ema20SeriesRef.current = ema20Series;
+    ema50SeriesRef.current = ema50Series;
+    candlesDirtyRef.current = true;
+  }, [normalizedCandles, ema20Series, ema50Series]);
 
-    if (normalizedCandles.length > 0) {
-      chartRef.current?.timeScale().fitContent();
+  useEffect(() => {
+    let animationFrameId;
+    let lastUpdateMs = 0;
+    const UPDATE_INTERVAL_MS = 60; // Max ~16 FPS visual chart refresh boundary is completely smooth but saves massive CPU
+
+    const flushUpdates = () => {
+      const now = Date.now();
+      if (now - lastUpdateMs >= UPDATE_INTERVAL_MS) {
+        lastUpdateMs = now;
+
+        // 1. Flush candles if dirty
+        if (candlesDirtyRef.current && candleSeriesRef.current && latestCandlesRef.current) {
+          try {
+            candleSeriesRef.current.setData(latestCandlesRef.current);
+            ema20Ref.current?.setData(showEma ? ema20SeriesRef.current : []);
+            ema50Ref.current?.setData(showEma ? ema50SeriesRef.current : []);
+            candlesDirtyRef.current = false;
+            setChartError(null);
+
+            if (latestCandlesRef.current.length > 0 && !hasManualZoomRef.current) {
+              chartRef.current?.timeScale().fitContent();
+            }
+          } catch (error) {
+            setChartError('Chart rendering failed for current candle set. Waiting for next update.');
+            candleSeriesRef.current?.setData([]);
+            ema20Ref.current?.setData([]);
+            ema50Ref.current?.setData([]);
+          }
+        }
+
+        // 2. Flush live price line if dirty
+        if (priceDirtyRef.current && candleSeriesRef.current) {
+          const price = latestLivePriceRef.current;
+          try {
+            if (price === null) {
+              if (livePriceLineRef.current) {
+                candleSeriesRef.current.removePriceLine(livePriceLineRef.current);
+                livePriceLineRef.current = null;
+              }
+            } else {
+              if (!livePriceLineRef.current) {
+                livePriceLineRef.current = candleSeriesRef.current.createPriceLine({
+                  price: price,
+                  color: '#38bdf8',
+                  lineWidth: 1.5,
+                  lineStyle: 2,
+                  axisLabelVisible: true,
+                  title: 'LIVE',
+                });
+              } else {
+                livePriceLineRef.current.applyOptions({ price });
+              }
+            }
+            priceDirtyRef.current = false;
+          } catch (error) {
+            // silent catch
+          }
+        }
+      }
+      animationFrameId = requestAnimationFrame(flushUpdates);
+    };
+
+    animationFrameId = requestAnimationFrame(flushUpdates);
+    return () => cancelAnimationFrame(animationFrameId);
+  }, [showEma]);
+
+  useEffect(() => {
+    if (!candleSeriesRef.current) return;
+
+    try {
+      const entry = toFiniteNumber(tradeLevels?.entry);
+      const stop = toFiniteNumber(tradeLevels?.stopLoss);
+      const target = toFiniteNumber(tradeLevels?.target);
+
+      if (entryLineRef.current) candleSeriesRef.current.removePriceLine(entryLineRef.current);
+      if (stopLineRef.current) candleSeriesRef.current.removePriceLine(stopLineRef.current);
+      if (targetLineRef.current) candleSeriesRef.current.removePriceLine(targetLineRef.current);
+      entryLineRef.current = null;
+      stopLineRef.current = null;
+      targetLineRef.current = null;
+
+      if (entry !== null && entry > 0) {
+        entryLineRef.current = candleSeriesRef.current.createPriceLine({ price: entry, color: '#00ff9f', lineWidth: 1, lineStyle: 0, axisLabelVisible: true, title: 'ENTRY' });
+      }
+      if (stop !== null && stop > 0) {
+        stopLineRef.current = candleSeriesRef.current.createPriceLine({ price: stop, color: '#ff4d4f', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL' });
+      }
+      if (target !== null && target > 0) {
+        targetLineRef.current = candleSeriesRef.current.createPriceLine({ price: target, color: '#22c55e', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'TGT' });
+      }
+    } catch (error) {
+      if (import.meta.env.DEV) {
+        // eslint-disable-next-line no-console
+        console.error('[CandlestickChart] trade level update failed', error);
+      }
     }
-  }, [normalizedCandles, showEma, ema20Series, ema50Series, symbol, timeframe]);
+  }, [tradeLevels]);
 
   const rsi = toFiniteNumber(indicators?.rsi);
   const macdValue = toFiniteNumber(indicators?.macd?.value ?? indicators?.macd_value);
   const macdSignal = toFiniteNumber(indicators?.macd?.signal ?? indicators?.macd_signal);
 
   return (
-    <div className="rounded-2xl border border-white/10 bg-[#080C12] hover:border-stockai-neon/40 transition-all duration-300 shadow-[0_0_0_rgba(0,255,159,0)] hover:shadow-[0_0_30px_rgba(0,255,159,0.08)]">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
-        <div className="flex items-center gap-3">
-          <BarChart3 className="w-4 h-4 text-stockai-neon" />
-          <p className="text-sm text-white font-semibold">{symbol} · {timeframe.toUpperCase()}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <ToggleButton active={showEma} label="EMA" onClick={() => setShowEma((value) => !value)} />
-          <ToggleButton active={showRsi} label="RSI" onClick={() => setShowRsi((value) => !value)} />
-          <ToggleButton active={showMacd} label="MACD" onClick={() => setShowMacd((value) => !value)} />
-        </div>
-      </div>
-
+    <div className="w-full h-full flex flex-col bg-[#050816] border border-white/5 rounded-xl overflow-hidden hover:border-[#00F5FF]/35 transition-all duration-300 shadow-[0_0_30px_rgba(0,245,255,0.02)]">
+      
+      {/* Top indicator stats */}
       {(showRsi || showMacd) && (
-        <div className="px-4 py-2 border-b border-white/5 flex items-center gap-4 text-xs text-stockai-muted">
-          {showRsi && <span>RSI: {rsi === null ? '--' : rsi.toFixed(2)}</span>}
-          {showMacd && <span>MACD: {macdValue === null ? '--' : macdValue.toFixed(2)} / {macdSignal === null ? '--' : macdSignal.toFixed(2)}</span>}
+        <div className="px-4 py-1.5 border-b border-white/5 flex flex-wrap items-center gap-4 text-[10px] text-slate-500 font-mono select-none">
+          {showRsi && <span>RSI: <strong className="text-amber-400">{rsi === null ? '--' : rsi.toFixed(2)}</strong></span>}
+          {showMacd && <span>MACD: <strong className="text-cyan-300">{macdValue === null ? '--' : macdValue.toFixed(2)} / {macdSignal === null ? '--' : macdSignal.toFixed(2)}</strong></span>}
         </div>
       )}
 
-      <div className="relative h-[420px]">
+      {/* Main Chart container */}
+      <div className="flex-1 relative w-full min-h-[300px]">
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.28 }}
           ref={containerRef}
           className={`absolute inset-0 transition-opacity duration-300 ${
-            !isLoading && normalizedCandles.length > 0 ? 'opacity-100' : 'opacity-0'
+            !isLoading && !chartError && normalizedCandles.length > 0 ? 'opacity-100' : 'opacity-0'
           }`}
         />
 
@@ -243,12 +400,19 @@ const CandlestickChart = memo(function CandlestickChart({
           </div>
         )}
 
-        {!isLoading && normalizedCandles.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center text-sm text-stockai-muted">
+        {!isLoading && chartError && (
+          <div className="absolute inset-0 flex items-center justify-center text-sm text-rose-300 px-4 text-center">
+            {chartError}
+          </div>
+        )}
+
+        {!isLoading && !chartError && normalizedCandles.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center text-xs text-slate-600 font-mono uppercase tracking-widest">
             Chart data unavailable for this symbol/timeframe.
           </div>
         )}
       </div>
+
     </div>
   );
 });

@@ -4,17 +4,39 @@ import ErrorBoundary from './components/ErrorBoundary';
 import { ToastProvider } from './components/Toast';
 import ProtectedRoute from './components/ProtectedRoute';
 import { AppInitializer } from './components/AppInitializer';
+import { AuthProvider } from './context/AuthContext';
 import Dashboard from './pages/Dashboard';
-import Signals from './pages/Signals';
-import Trades from './pages/Trades';
-import Settings from './pages/Settings';
 import Login from './pages/Login';
+import SignupPage from './pages/SignupPage';
 import ForgotPassword from './pages/ForgotPassword';
 import Landing from './pages/Landing';
 import DesktopLayout from './layouts/DesktopLayout';
+import MobileLayout from './layouts/MobileLayout';
+import { LivePriceProvider } from './context/LivePriceContext';
 
 const MOBILE_BREAKPOINT = 768;
 
+
+function ResponsiveLayout({ children }) {
+  const [isMobile, setIsMobile] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return window.innerWidth < MOBILE_BREAKPOINT;
+  });
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT - 1}px)`);
+    const onChange = (event) => setIsMobile(event.matches);
+    setIsMobile(mediaQuery.matches);
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', onChange);
+      return () => mediaQuery.removeEventListener('change', onChange);
+    }
+    mediaQuery.addListener(onChange);
+    return () => mediaQuery.removeListener(onChange);
+  }, []);
+
+  return isMobile ? <MobileLayout>{children}</MobileLayout> : <DesktopLayout>{children}</DesktopLayout>;
+}
 function LandingEntry() {
   const [isMobile, setIsMobile] = useState(() => {
     if (typeof window === 'undefined') return false;
@@ -49,57 +71,32 @@ export default function App() {
   return (
     <ErrorBoundary>
       <ToastProvider>
-        <AppInitializer>
-          <BrowserRouter>
-            <Routes>
-              <Route path="/" element={<LandingEntry />} />
-              <Route path="/landing" element={<LandingEntry />} />
-              <Route path="/login" element={<Login />} />
-              <Route path="/forgot-password" element={<ForgotPassword />} />
-              <Route
-                path="/dashboard"
-                element={
-                  <ProtectedRoute>
-                    <DesktopLayout>
-                      <Dashboard />
-                    </DesktopLayout>
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/signals"
-                element={
-                  <ProtectedRoute>
-                    <DesktopLayout>
-                      <Signals />
-                    </DesktopLayout>
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/trades"
-                element={
-                  <ProtectedRoute>
-                    <DesktopLayout>
-                      <Trades />
-                    </DesktopLayout>
-                  </ProtectedRoute>
-                }
-              />
-              <Route
-                path="/settings"
-                element={
-                  <ProtectedRoute>
-                    <DesktopLayout>
-                      <Settings />
-                    </DesktopLayout>
-                  </ProtectedRoute>
-                }
-              />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </BrowserRouter>
-        </AppInitializer>
+        <AuthProvider>
+          <AppInitializer>
+            <LivePriceProvider>
+              <BrowserRouter>
+                <Routes>
+                  <Route path="/" element={<LandingEntry />} />
+                  <Route path="/landing" element={<LandingEntry />} />
+                  <Route path="/login" element={<Login />} />
+                  <Route path="/signup" element={<SignupPage />} />
+                  <Route path="/forgot-password" element={<ForgotPassword />} />
+                  <Route
+                    path="/dashboard"
+                    element={
+                      <ProtectedRoute>
+                        <ResponsiveLayout>
+                          <Dashboard />
+                        </ResponsiveLayout>
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route path="*" element={<Navigate to="/dashboard" replace />} />
+                </Routes>
+              </BrowserRouter>
+            </LivePriceProvider>
+          </AppInitializer>
+        </AuthProvider>
       </ToastProvider>
     </ErrorBoundary>
   );

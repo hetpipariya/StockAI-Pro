@@ -7,20 +7,21 @@ import math
 import threading
 import time
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
 from app import config
-from app.connectors import SmartAPIConnector
+from app.connectors import BrokerRouter, get_market_data_connector
 from app.services.candle_store import store_candles
 from app.services.instrument_service import (get_symbol_by_token,
                                              get_token_by_symbol)
 from app.services.market_state import is_market_open
 from app.services.tick_aggregator import tick_aggregator
-from app.websocket.relay import (broadcast_candle, broadcast_signal,
-                                 broadcast_tick, socket_manager)
+from app.websocket.relay import (RECONNECT_GRACE_SECONDS, broadcast_candle,
+                                 broadcast_signal, broadcast_tick,
+                                 socket_manager)
 
 logger = logging.getLogger(__name__)
 
@@ -43,17 +44,21 @@ DEFAULT_WATCHLIST = [
 ]
 
 _smartapi_ws_started = False
-_ws_connector: Optional[SmartAPIConnector] = None
+_ws_connector: Optional[BrokerRouter] = None
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 _cached_candle_builder_15m = None
 _cached_candle_builder_5m = None
 _last_live_tick_time = 0.0
 _last_known_prices: dict[str, float] = {}
+_last_known_prices_lock = threading.Lock()
+_ip_connection_attempts: dict[str, list[float]] = {}
+_ip_connection_lock = threading.Lock()
 _ws_state = "DISCONNECTED"
 _ws_reconnect_attempt = 0
 _ws_reconnect_task = None
 _ws_subscription_lock = threading.Lock()
 _ws_subscribed_symbols: set[str] = set()
+
 
 _WS_BASE_BACKOFF_SECONDS = 1
 _WS_MAX_BACKOFF_SECONDS = 60
@@ -125,21 +130,21 @@ def set_event_loop(loop: asyncio.AbstractEventLoop) -> None:
     _event_loop = loop
 
 
-def set_ws_connector(connector: Optional[SmartAPIConnector]) -> None:
+def set_ws_connector(connector: Optional[BrokerRouter]) -> None:
     global _ws_connector
     _ws_connector = connector
     if connector is None:
         _set_ws_state("DISCONNECTED")
 
 
-def get_ws_connector() -> Optional[SmartAPIConnector]:
+def get_ws_connector() -> Optional[BrokerRouter]:
     return _ws_connector
 
 
-def get_or_create_ws_connector() -> SmartAPIConnector:
+def get_or_create_ws_connector() -> BrokerRouter:
     global _ws_connector
     if _ws_connector is None:
-        _ws_connector = SmartAPIConnector()
+        _ws_connector = get_market_data_connector()
     return _ws_connector
 
 
@@ -162,6 +167,20 @@ def get_last_tick_age_seconds() -> float:
     return max(0.0, time.time() - _last_live_tick_time)
 
 
+def get_last_known_price(symbol: str) -> float | None:
+    normalized = str(symbol or "").strip().upper()
+    if not normalized:
+        return None
+
+    with _last_known_prices_lock:
+        value = _last_known_prices.get(normalized)
+    if not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(float(value)) or float(value) <= 0:
+        return None
+    return round(float(value), 2)
+
+
 def _resolve_mock_base_price(symbol: str) -> tuple[float, bool]:
     """Resolve a deterministic fallback LTP for mock ticks.
 
@@ -171,11 +190,13 @@ def _resolve_mock_base_price(symbol: str) -> tuple[float, bool]:
     if not normalized_symbol:
         return 1.0, True
 
-    cached = _last_known_prices.get(normalized_symbol)
+    with _last_known_prices_lock:
+        cached = _last_known_prices.get(normalized_symbol)
     if isinstance(cached, (int, float)) and math.isfinite(cached) and cached > 0:
         normalized_cached = _normalize_watchlist_price(normalized_symbol, float(cached), 0.0)
         if normalized_cached > 0:
-            _last_known_prices[normalized_symbol] = normalized_cached
+            with _last_known_prices_lock:
+                _last_known_prices[normalized_symbol] = normalized_cached
             return normalized_cached, False
 
     seeded_price = _MOCK_BASE_PRICE.get(normalized_symbol)
@@ -188,8 +209,10 @@ def _resolve_mock_base_price(symbol: str) -> tuple[float, bool]:
     if normalized_seeded <= 0:
         normalized_seeded = max(1.0, float(seeded_price))
 
-    _last_known_prices[normalized_symbol] = normalized_seeded
+    with _last_known_prices_lock:
+        _last_known_prices[normalized_symbol] = normalized_seeded
     return normalized_seeded, True
+
 
 
 async def mock_ws_data_job() -> None:
@@ -451,22 +474,35 @@ def _on_smartapi_tick(msg):
         if not isinstance(msg, dict):
             return
 
-        token = str(msg.get("token", msg.get("symboltoken", "")))
+        token = str(
+            msg.get(
+                "token",
+                msg.get("symboltoken", msg.get("instrument_key", msg.get("instrumentKey", ""))),
+            )
+        )
         try:
             symbol = get_symbol_by_token(token, exchange=config.SMARTAPI_EXCHANGE)
         except KeyError:
-            symbol = str(msg.get("tradingsymbol", token)).replace("-EQ", "")
+            symbol = str(
+                msg.get(
+                    "tradingsymbol",
+                    msg.get("symbol", msg.get("instrument_key", token)),
+                )
+            ).replace("-EQ", "")
 
         raw_ltp = float(
             msg.get("ltp", msg.get("last_traded_price", msg.get("lastprice", 0)))
         )
         vol = int(msg.get("volume", msg.get("volume_trade_for_the_day", 0)) or 0)
-        ref_price = _last_known_prices.get(symbol)
+        with _last_known_prices_lock:
+            ref_price = _last_known_prices.get(symbol)
         ltp = _normalize_watchlist_price(symbol, raw_ltp, float(ref_price or 0.0))
         if ltp <= 0:
             return
 
-        _last_known_prices[symbol] = ltp
+        with _last_known_prices_lock:
+            _last_known_prices[symbol] = ltp
+
 
         best_bid = ltp
         best_ask = ltp
@@ -537,11 +573,17 @@ def start_smartapi_ws(symbols_list: list[str]):
         return
 
     connector = get_or_create_ws_connector()
+    use_symbol_tokens = connector.active_broker == "upstox"
 
     tokens: list[str] = []
     with _ws_subscription_lock:
         for symbol in normalized_symbols:
             if _smartapi_ws_started and symbol in _ws_subscribed_symbols:
+                continue
+
+            if use_symbol_tokens:
+                tokens.append(symbol)
+                _ws_subscribed_symbols.add(symbol)
                 continue
 
             try:
@@ -572,7 +614,11 @@ def start_smartapi_ws(symbols_list: list[str]):
 
     token_list = [{"exchangeType": 1, "tokens": tokens}]
     try:
-        connector.start_ws(token_list, _on_smartapi_tick)
+        if connector.active_broker == "upstox":
+            upstox_tokens = [{"exchangeType": 1, "tokens": normalized_symbols}]
+            connector.start_ws(upstox_tokens, _on_smartapi_tick)
+        else:
+            connector.start_ws(token_list, _on_smartapi_tick)
         _smartapi_ws_started = True
         _ws_reconnect_attempt = 0
         _set_ws_state("CONNECTED")
@@ -609,18 +655,30 @@ async def _retry_ws_connect(symbols_list: list[str]):
             logger.info("[WS] Circuit breaker reset. Resuming reconnection attempts.")
             continue
 
-        # Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s
-        wait_s = min(
+        # Exponential backoff with randomized ±15% jitter to prevent reconnect storms
+        base_wait = min(
             _WS_BASE_BACKOFF_SECONDS * (2 ** (_ws_reconnect_attempt - 1)),
             _WS_MAX_BACKOFF_SECONDS,
         )
+        import random
+        jitter = random.uniform(-0.15, 0.15) * base_wait
+        wait_s = max(1.0, min(_WS_MAX_BACKOFF_SECONDS, base_wait + jitter))
+
         logger.warning(
-            "[WS] Reconnect attempt %d/%d in %.1fs (exponential backoff)",
+            "[WS] Reconnect attempt %d/%d in %.1fs (exponential backoff with jitter)",
             _ws_reconnect_attempt,
             _WS_MAX_RETRY_ATTEMPTS,
             wait_s,
         )
+        
+        try:
+            from app.services.metrics import WS_RECONNECT_ATTEMPTS
+            WS_RECONNECT_ATTEMPTS.inc()
+        except Exception:
+            pass
+
         await asyncio.sleep(wait_s)
+
 
         try:
             start_smartapi_ws(symbols_list)
@@ -661,9 +719,16 @@ async def auto_start_ws():
 async def _resolve_websocket_user_id(token: str) -> int | None:
     from app.services.db import AsyncSessionLocal, UserModel, is_transient_db_error
     from app.utils.auth_utils import decode_access_token
+    from app.services.redis_client import get_cache, set_cache
 
     payload = decode_access_token(token)
-    user_id = int(payload["sub"])
+    user_id = int(payload.get("user_id", payload["sub"]))
+
+    # Check cached auth token to protect the database connection pool
+    cache_key = f"auth:user_ws_resolve:{user_id}"
+    cached_id = await get_cache(cache_key)
+    if cached_id is not None:
+        return int(cached_id)
 
     auth_timeout = max(0.5, float(config.WS_AUTH_DB_TIMEOUT_SECONDS))
     max_attempts = max(1, min(config.DB_MAX_RETRIES, 3))
@@ -681,7 +746,10 @@ async def _resolve_websocket_user_id(token: str) -> int | None:
                     timeout=auth_timeout,
                 )
                 resolved_id = result.scalar_one_or_none()
-                return int(resolved_id) if resolved_id is not None else None
+                if resolved_id is not None:
+                    await set_cache(cache_key, int(resolved_id), ttl=300)
+                    return int(resolved_id)
+                return None
         except Exception as exc:
             transient = is_transient_db_error(exc)
             if transient and attempt < max_attempts:
@@ -692,16 +760,65 @@ async def _resolve_websocket_user_id(token: str) -> int | None:
     return None
 
 
+async def _build_user_state_payload(user_id: int) -> dict[str, Any]:
+    from app.trading.user_state import trading_manager
+
+    state = await trading_manager.get_state(user_id=user_id)
+    summary = state.get_summary()
+
+    return {
+        "type": "user_state",
+        "user_id": user_id,
+        "mode": summary.get("mode", "PAPER"),
+        "balance": summary.get("capital", 0.0),
+        "daily_pnl": summary.get("daily_pnl", 0.0),
+        "daily_pnl_pct": summary.get("daily_pnl_pct", 0.0),
+        "can_trade": summary.get("can_trade", False),
+        "can_trade_reason": summary.get("can_trade_reason", ""),
+        "positions": state.get_all_positions(),
+        "orders": state.get_journal(limit=50),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+async def _send_user_state_snapshot(
+    websocket: WebSocket,
+    user_id: int,
+    source: str,
+) -> None:
+    payload = await _build_user_state_payload(user_id=user_id)
+    payload["source"] = source
+    await websocket.send_json(payload)
+
+
 async def websocket_live(
     websocket: WebSocket, token: Optional[str] = Query(default=None)
 ):
     """Authenticated websocket endpoint: /ws?token=<jwt> (legacy alias: /live)."""
     client_host = websocket.client.host if websocket.client else "unknown"
 
+    # IP Handshake Rate Limiting (max 5 connection attempts per 10 seconds per IP)
+    now = time.time()
+    with _ip_connection_lock:
+        attempts = _ip_connection_attempts.setdefault(client_host, [])
+        attempts = [t for t in attempts if now - t < 10.0]
+        if len(attempts) >= 5:
+            logger.warning("[WS][RATE-LIMIT] IP %s triggered connection storm limit. Rejecting connection.", client_host)
+            try:
+                from app.services.metrics import WS_THROTTLED_CONNECTIONS
+                WS_THROTTLED_CONNECTIONS.inc()
+            except Exception:
+                pass
+            await websocket.close(code=4029, reason="Too many connection attempts")
+            return
+        attempts.append(now)
+        _ip_connection_attempts[client_host] = attempts
+
     if not token:
         await websocket.close(code=4001, reason="Authentication required")
         logger.warning("[WS] Rejected unauthenticated connection from %s", client_host)
         return
+
 
     try:
         user_id = await _resolve_websocket_user_id(token)
@@ -719,6 +836,7 @@ async def websocket_live(
 
 async def _handle_ws_connection(websocket: WebSocket, user_id: int):
     client_id = await socket_manager.connect(websocket, user_id)
+    restored_symbols = socket_manager.pop_restored_symbols(client_id)
 
     try:
         await websocket.send_json(
@@ -727,8 +845,25 @@ async def _handle_ws_connection(websocket: WebSocket, user_id: int):
                 "user_id": user_id,
                 "message": "WebSocket connected. Send subscribe message.",
                 "connection_state": get_ws_state(),
+                "restored_symbols": restored_symbols,
+                "reconnect_grace_seconds": RECONNECT_GRACE_SECONDS,
                 "timestamp": datetime.utcnow().isoformat(),
             }
+        )
+
+        if restored_symbols:
+            await websocket.send_json(
+                {
+                    "type": "restored_subscriptions",
+                    "symbols": restored_symbols,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            )
+
+        await _send_user_state_snapshot(
+            websocket=websocket,
+            user_id=user_id,
+            source="connect",
         )
 
         while True:
@@ -758,7 +893,18 @@ async def _handle_ws_connection(websocket: WebSocket, user_id: int):
                 break
 
     finally:
-        await socket_manager.disconnect(client_id)
+        # Clean up client subscriptions and trigger unsubscription of inactive symbols
+        unsubscribed_tokens = await socket_manager.disconnect(client_id)
+        if unsubscribed_tokens:
+            connector = get_ws_connector()
+            if connector:
+                try:
+                    connector.unsubscribe(unsubscribed_tokens)
+                except Exception as exc:
+                    logger.warning("[WS] Failed to unsubscribe tokens from broker on disconnect: %s", exc)
+            with _ws_subscription_lock:
+                for sym in unsubscribed_tokens:
+                    _ws_subscribed_symbols.discard(sym)
 
 
 async def _process_ws_message(
@@ -767,32 +913,58 @@ async def _process_ws_message(
     action = msg.get("action")
 
     if action == "subscribe":
-        from app.services.ticker_map import VALID_SYMBOLS
-
         symbols = msg.get("symbols", [])
+        
+        # Max subscriptions guard per client to protect server memory bounds (max 50)
+        current_subs = socket_manager._subscriptions.get(client_id, set())
+        if isinstance(symbols, list) and len(current_subs) + len(symbols) > 50:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": f"Subscription limit exceeded. Max 50 symbols allowed. Current count: {len(current_subs)}",
+                }
+            )
+            return
+
         valid: list[str] = []
+        rejected: list[str] = []
         if isinstance(symbols, list):
+
             for symbol in symbols:
                 if not isinstance(symbol, str):
                     continue
                 normalized = symbol.strip().upper()
-                if normalized in VALID_SYMBOLS and normalized not in valid:
+                if not normalized or normalized in valid or normalized in rejected:
+                    continue
+
+                # Validate using live instrument service (not static watchlist) so
+                # users can subscribe to any token-resolvable NSE symbol.
+                try:
+                    get_token_by_symbol(normalized, exchange=config.SMARTAPI_EXCHANGE)
                     valid.append(normalized)
+                except KeyError:
+                    rejected.append(normalized)
 
         await socket_manager.subscribe(client_id, valid)
-        if valid and not _smartapi_ws_started:
+        if valid:
+            # start_smartapi_ws handles both initial start and incremental adds.
             start_smartapi_ws(valid)
 
         await websocket.send_json(
             {
                 "type": "subscribed",
                 "symbols": valid,
+                "rejected_symbols": rejected,
                 "connection_state": get_ws_state(),
                 "timestamp": datetime.utcnow().isoformat(),
             }
         )
         logger.info(
-            "[WS] user_id=%d client_id=%s subscribed=%s", user_id, client_id, valid
+            "[WS] user_id=%d client_id=%s subscribed=%s rejected=%s",
+            user_id,
+            client_id,
+            valid,
+            rejected,
         )
 
     elif action == "unsubscribe":
@@ -802,7 +974,18 @@ async def _process_ws_message(
             if isinstance(symbols, list)
             else []
         )
-        await socket_manager.unsubscribe(client_id, normalized)
+        unsubscribed_tokens = await socket_manager.unsubscribe(client_id, normalized)
+        if unsubscribed_tokens:
+            connector = get_ws_connector()
+            if connector:
+                try:
+                    connector.unsubscribe(unsubscribed_tokens)
+                except Exception as exc:
+                    logger.warning("[WS] Failed to unsubscribe tokens from broker: %s", exc)
+            with _ws_subscription_lock:
+                for sym in unsubscribed_tokens:
+                    _ws_subscribed_symbols.discard(sym)
+                    
         await websocket.send_json({"type": "unsubscribed", "symbols": normalized})
 
     elif action == "pong":
@@ -814,6 +997,13 @@ async def _process_ws_message(
                 "type": "pong",
                 "timestamp": datetime.utcnow().isoformat(),
             }
+        )
+
+    elif action in {"sync_state", "state", "get_state"}:
+        await _send_user_state_snapshot(
+            websocket=websocket,
+            user_id=user_id,
+            source="manual",
         )
 
     else:

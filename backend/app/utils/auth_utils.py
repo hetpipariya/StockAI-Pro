@@ -52,16 +52,17 @@ _REFRESH_EXPIRE = config.REFRESH_TOKEN_EXPIRE_DAYS  # 7 days
 
 
 def create_access_token(
-    user_id: int, username: str, extra_claims: Optional[dict] = None
+    user_id: int, email: str, extra_claims: Optional[dict] = None
 ) -> str:
     """
-    Create a short-lived access token (24 hours default).
-    Contains: user_id, username, token type, expiry.
+    Create a short-lived access token (1 hour default).
+    Contains: user_id, email, token type, expiry.
     """
     now = datetime.now(tz=timezone.utc)
     payload = {
         "sub": str(user_id),
-        "username": username,
+        "user_id": int(user_id),
+        "email": email,
         "type": "access",
         "iat": now,
         "exp": now + timedelta(minutes=_ACCESS_EXPIRE),
@@ -98,6 +99,11 @@ def decode_access_token(token: str) -> dict:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token type",
             )
+        if payload.get("user_id") is None and payload.get("sub") is not None:
+            try:
+                payload["user_id"] = int(payload["sub"])
+            except Exception:
+                payload["user_id"] = payload.get("sub")
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(

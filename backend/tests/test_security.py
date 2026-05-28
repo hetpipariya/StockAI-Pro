@@ -4,11 +4,12 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app import config
-from app.server import app
+from app.websocket.handler import setup_websocket_routes
 
 
 @pytest.mark.anyio
@@ -35,7 +36,7 @@ async def test_expired_access_token_is_rejected(client):
     expired_token = jwt.encode(
         {
             "sub": "9999",
-            "username": "expired_user",
+            "email": "expired_user@example.com",
             "type": "access",
             "iat": now - timedelta(hours=2),
             "exp": now - timedelta(minutes=5),
@@ -61,14 +62,14 @@ async def test_login_bruteforce_rate_limit_blocks_after_threshold(client):
     for _ in range(5):
         attempt = await client.post(
             "/api/v1/auth/login",
-            json={"username": "unknown_user", "password": "WrongPass123"},
+            json={"email": "unknown_user@example.com", "password": "WrongPass123"},
             headers=headers,
         )
         assert attempt.status_code == 401
 
     blocked = await client.post(
         "/api/v1/auth/login",
-        json={"username": "unknown_user", "password": "WrongPass123"},
+        json={"email": "unknown_user@example.com", "password": "WrongPass123"},
         headers=headers,
     )
     assert blocked.status_code == 429
@@ -81,11 +82,10 @@ async def test_login_bruteforce_rate_limit_blocks_after_threshold(client):
 
 
 @pytest.mark.anyio
-async def test_signup_rejects_sql_injection_username(client):
+async def test_signup_rejects_invalid_email_format(client):
     payload = {
-        "username": "' OR 1=1 --",
         "password": "SecurePass123",
-        "email": "sql_injection@example.com",
+        "email": "' OR 1=1 --",
     }
 
     response = await client.post("/api/v1/auth/signup", json=payload)
@@ -97,11 +97,10 @@ async def test_signup_rejects_sql_injection_username(client):
 
 
 @pytest.mark.anyio
-async def test_signup_rejects_xss_payload_username(client):
+async def test_signup_rejects_xss_payload_email(client):
     payload = {
-        "username": "<script>alert(1)</script>",
         "password": "SecurePass123",
-        "email": "xss_test@example.com",
+        "email": "<script>alert(1)</script>",
     }
 
     response = await client.post("/api/v1/auth/signup", json=payload)
@@ -132,9 +131,17 @@ async def test_unhandled_exceptions_are_sanitized(client, monkeypatch):
     assert response.headers.get("access-control-allow-credentials") == "true"
 
 
+@pytest.fixture
+def websocket_test_app() -> FastAPI:
+    """Minimal app containing only websocket routes for auth handshake tests."""
+    ws_app = FastAPI()
+    setup_websocket_routes(ws_app)
+    return ws_app
+
+
 @pytest.mark.parametrize("path", ["/ws", "/live"])
-def test_websocket_rejects_missing_auth_token(path):
-    with TestClient(app) as test_client:
+def test_websocket_rejects_missing_auth_token(path, websocket_test_app):
+    with TestClient(websocket_test_app) as test_client:
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with test_client.websocket_connect(path):
                 pass
@@ -143,8 +150,8 @@ def test_websocket_rejects_missing_auth_token(path):
 
 
 @pytest.mark.parametrize("path", ["/ws", "/live"])
-def test_websocket_rejects_invalid_auth_token(path):
-    with TestClient(app) as test_client:
+def test_websocket_rejects_invalid_auth_token(path, websocket_test_app):
+    with TestClient(websocket_test_app) as test_client:
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with test_client.websocket_connect(f"{path}?token=invalid.jwt.token"):
                 pass

@@ -2,16 +2,243 @@ import { create } from 'zustand';
 import { TradeService } from '../api/services/trade.service.js';
 import { PortfolioService } from '../api/services/portfolio.service.js';
 import { SignalService } from '../api/services/signal.service.js';
-import { fetchMarketSymbols, fetchStockBundle } from '../lib/api.js';
+import { fetchMarketSymbols, fetchStockBundle, fetchTradeDecision } from '../lib/api.js';
+import {
+  API_TIMEOUT_MS,
+  LATENCY_LIVE_MS,
+  LATENCY_MAX_MS,
+  LATENCY_OVERLOAD_MS,
+  cancelActiveRequest,
+  isAbortLikeError,
+} from '../api/requestGate.js';
+import { API_BASE } from '../config/api.js';
 
 const DEFAULT_SYMBOL = 'RELIANCE';
 const DEFAULT_TIMEFRAME = '1m';
-const BUNDLE_CANDLE_LIMIT = 100;
+const BUNDLE_CANDLE_LIMIT = 200;
+const BUNDLE_REQUEST_TIMEOUT_MS = 8000;
+const DECISION_REQUEST_TIMEOUT_MS = 2500;
 const ALLOWED_TIMEFRAMES = new Set(['1m', '5m', '15m', '1h', '1d']);
 
 const toNumber = (value, fallback = 0) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const toFiniteNumber = (value, fallback = null) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const PRICE_SOURCE = {
+  WS: 'WS',
+  API: 'API',
+  UNKNOWN: 'UNKNOWN',
+};
+
+const LIVE_HEALTH = {
+  LIVE: 'LIVE',
+  DELAYED: 'DELAYED',
+  STALE: 'STALE',
+};
+
+const bundleRequestControllers = new Map();
+const decisionRequestControllers = new Map();
+
+const isBundleRequestActive = (symbol) => bundleRequestControllers.has(symbol);
+const isDecisionRequestActive = (symbol) => decisionRequestControllers.has(symbol);
+
+const replaceRequestController = (map, key) => {
+  const previous = map.get(key);
+  if (previous) {
+    previous.abort('superseded_by_new_request');
+  }
+  const nextController = new AbortController();
+  map.set(key, nextController);
+  return nextController;
+};
+
+const releaseRequestController = (map, key, controller) => {
+  if (map.get(key) === controller) {
+    map.delete(key);
+  }
+};
+
+const abortControllerMap = (map, reason) => {
+  for (const controller of map.values()) {
+    controller.abort(reason);
+  }
+  map.clear();
+};
+
+const toLatencyHealth = (latencyMs) => {
+  const parsed = toFiniteNumber(latencyMs, null);
+  if (parsed === null) return LIVE_HEALTH.STALE;
+  if (parsed <= LATENCY_LIVE_MS) return LIVE_HEALTH.LIVE;
+  if (parsed <= LATENCY_MAX_MS) return LIVE_HEALTH.DELAYED;
+  return LIVE_HEALTH.STALE;
+};
+
+const SOURCE_PRIORITY = {
+  [PRICE_SOURCE.WS]: 3,
+  [PRICE_SOURCE.API]: 2,
+  [PRICE_SOURCE.UNKNOWN]: 1,
+};
+
+const normalizePriceSource = (value) => {
+  const raw = String(value || '').trim().toUpperCase();
+  if (raw === 'WS' || raw === 'WEBSOCKET') return PRICE_SOURCE.WS;
+  if (raw === 'API') return PRICE_SOURCE.API;
+  return PRICE_SOURCE.UNKNOWN;
+};
+
+const parseTimestampMs = (value, fallback = Date.now()) => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1e12 ? Math.floor(value) : Math.floor(value * 1000);
+  }
+
+  const asNumber = Number(value);
+  if (Number.isFinite(asNumber)) {
+    return asNumber > 1e12 ? Math.floor(asNumber) : Math.floor(asNumber * 1000);
+  }
+
+  const parsed = Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const resolveSafePrice = (incomingPrice, previousMeta) => {
+  const parsed = toFiniteNumber(incomingPrice, null);
+  if (parsed !== null && parsed > 0) {
+    return parsed;
+  }
+
+  const fallback = toFiniteNumber(previousMeta?.lastValidPrice ?? previousMeta?.currentPrice, null);
+  return fallback;
+};
+
+const shouldAcceptIncomingPrice = ({ previousMeta, nextTimestamp, nextSource }) => {
+  if (nextSource !== PRICE_SOURCE.WS) {
+    return false;
+  }
+
+  const latencyMs = Math.max(0, Date.now() - nextTimestamp);
+  if (latencyMs > LATENCY_MAX_MS) {
+    return false;
+  }
+
+  if (!previousMeta) {
+    return true;
+  }
+
+  const previousTimestamp = toFiniteNumber(previousMeta.lastUpdatedTimestamp, 0);
+  const previousSource = normalizePriceSource(previousMeta.dataSource);
+
+  if (nextTimestamp < previousTimestamp) {
+    return false;
+  }
+
+  if (nextTimestamp > previousTimestamp) {
+    return true;
+  }
+
+  const nextPriority = SOURCE_PRIORITY[nextSource] || 0;
+  const previousPriority = SOURCE_PRIORITY[previousSource] || 0;
+  if (nextPriority > previousPriority) {
+    return true;
+  }
+  if (nextPriority < previousPriority) {
+    return false;
+  }
+
+  return true;
+};
+
+const mergeSymbolPriceState = (state, symbol, incomingPrice, options = {}) => {
+  const normalizedSymbol = normalizeSymbol(symbol);
+  if (!normalizedSymbol) {
+    return { state, accepted: false, resolvedPrice: null };
+  }
+
+  const previousMeta = state.livePriceBySymbol?.[normalizedSymbol];
+  const resolvedPrice = resolveSafePrice(incomingPrice, previousMeta);
+  if (resolvedPrice === null) {
+    return { state, accepted: false, resolvedPrice: null };
+  }
+
+  const nextSource = normalizePriceSource(options.dataSource);
+  const nextTimestamp = parseTimestampMs(options.timestamp, Date.now());
+  const nextLatencyMs = toFiniteNumber(options.latencyMs, Math.max(0, Date.now() - nextTimestamp));
+
+  if (nextLatencyMs > LATENCY_OVERLOAD_MS) {
+    return {
+      state,
+      accepted: false,
+      resolvedPrice: toFiniteNumber(previousMeta?.currentPrice, resolvedPrice),
+      isStale: true,
+      isOverload: true,
+      latencyMs: nextLatencyMs,
+      health: LIVE_HEALTH.STALE,
+    };
+  }
+
+  if (nextLatencyMs > LATENCY_MAX_MS) {
+    return {
+      state,
+      accepted: false,
+      resolvedPrice: toFiniteNumber(previousMeta?.currentPrice, resolvedPrice),
+      isStale: true,
+      isOverload: false,
+      latencyMs: nextLatencyMs,
+      health: LIVE_HEALTH.STALE,
+    };
+  }
+
+  const shouldAccept = shouldAcceptIncomingPrice({
+    previousMeta,
+    nextTimestamp,
+    nextSource,
+  });
+
+  if (!shouldAccept) {
+    return {
+      state,
+      accepted: false,
+      resolvedPrice: toFiniteNumber(previousMeta?.currentPrice, resolvedPrice),
+      isStale: nextLatencyMs > LATENCY_MAX_MS,
+      isOverload: nextLatencyMs > LATENCY_OVERLOAD_MS,
+      latencyMs: nextLatencyMs,
+      health: toLatencyHealth(nextLatencyMs),
+    };
+  }
+
+  const nextMeta = {
+    currentPrice: resolvedPrice,
+    lastValidPrice: resolvedPrice,
+    lastUpdatedTimestamp: nextTimestamp,
+    dataSource: nextSource,
+    latencyMs: nextLatencyMs,
+  };
+
+  return {
+    accepted: true,
+    resolvedPrice,
+    meta: nextMeta,
+    isStale: false,
+    isOverload: false,
+    latencyMs: nextLatencyMs,
+    health: toLatencyHealth(nextLatencyMs),
+    state: {
+      ...state,
+      livePriceBySymbol: {
+        ...(state.livePriceBySymbol || {}),
+        [normalizedSymbol]: nextMeta,
+      },
+      priceBySymbol: {
+        ...(state.priceBySymbol || {}),
+        [normalizedSymbol]: resolvedPrice,
+      },
+    },
+  };
 };
 
 const unwrapApiData = (payload) => {
@@ -32,6 +259,18 @@ const normalizeSymbol = (value, fallback = '') => {
 const normalizeConfidence = (value) => {
   const raw = toNumber(value, 0);
   return raw <= 1 ? raw * 100 : raw;
+};
+
+const toUiErrorMessage = (error, fallback) => {
+  const status = Number(error?.status ?? error?.response?.status ?? 0);
+  if (status === 401) return 'Auth Error - Reconnect Required';
+  if (status === 404) return 'Data not found for symbol/route';
+  return error?.message || fallback;
+};
+
+const normalizeBundleWarnings = (bundle) => {
+  if (!Array.isArray(bundle?.warnings)) return [];
+  return bundle.warnings.filter((item) => typeof item === 'string' && item.trim());
 };
 
 const normalizeSignal = (bundle, symbol) => {
@@ -61,7 +300,7 @@ const normalizeSignal = (bundle, symbol) => {
 const normalizeCandles = (rows) => {
   if (!Array.isArray(rows)) return [];
 
-  return rows
+  const parsed = rows
     .map((row) => {
       const time = row?.time || row?.timestamp || row?.datetime;
       const open = toNumber(row?.open, NaN);
@@ -83,6 +322,17 @@ const normalizeCandles = (rows) => {
       };
     })
     .filter(Boolean);
+
+  const deduped = new Map();
+  parsed.forEach((candle) => {
+    deduped.set(String(candle.time), candle);
+  });
+
+  return Array.from(deduped.values()).sort((left, right) => {
+    const leftTs = Date.parse(String(left.time || ''));
+    const rightTs = Date.parse(String(right.time || ''));
+    return (Number.isFinite(leftTs) ? leftTs : 0) - (Number.isFinite(rightTs) ? rightTs : 0);
+  });
 };
 
 const toChartData = (candles) => {
@@ -179,6 +429,8 @@ export const useStore = create((set, get) => ({
   isLoading: false,
   bundleLoading: false,
   bundleError: null,
+  bundlePartial: false,
+  bundleWarnings: [],
   connectionStatus: 'DISCONNECTED',
   systemStatus: true,
   systemAlert: null,
@@ -188,17 +440,87 @@ export const useStore = create((set, get) => ({
   selectedTimeframe: DEFAULT_TIMEFRAME,
   symbolCatalog: [],
   priceBySymbol: {},
+  livePriceBySymbol: {},
+  liveLatencyMs: null,
+  liveHealth: LIVE_HEALTH.STALE,
+  tradingBlockedByLatency: true,
+  liveDataMessage: 'NO LIVE DATA',
   chartData: [],
   candles: [],
   snapshot: null,
   indicators: {},
   currentSignal: null,
+  tradeDecisionBySymbol: {},
+  tradeDecisionLoadingBySymbol: {},
+  tradeDecisionErrorBySymbol: {},
+  tradeDecisionRequestSeqBySymbol: {},
+  bundleRequestSeqBySymbol: {},
+  serverHealthMatrix: {
+    database: 'nominal',
+    redis: 'nominal',
+    ml_workers: 'active',
+    websocket_stream: 'nominal',
+  },
 
-  setConnectionStatus: (status) => set({ connectionStatus: status }),
+  setConnectionStatus: (status) => set((state) => {
+    const normalized = String(status || 'DISCONNECTED').toUpperCase();
+    if (normalized === 'CONNECTED') {
+      return {
+        connectionStatus: normalized,
+        systemAlert: state.systemAlert === 'NO LIVE DATA' ? null : state.systemAlert,
+      };
+    }
+
+    if (normalized === 'DISCONNECTED' || normalized === 'FAILED' || normalized === 'STALE') {
+      return {
+        connectionStatus: normalized,
+        liveHealth: LIVE_HEALTH.STALE,
+        tradingBlockedByLatency: true,
+        liveDataMessage: 'NO LIVE DATA',
+        systemAlert: 'NO LIVE DATA',
+      };
+    }
+
+    return { connectionStatus: normalized };
+  }),
   setSystemStatus: (status) => set({ systemStatus: status }),
   setSystemAlert: (msg) => set({ systemAlert: msg }),
   toggleSystemStatus: () => set((state) => ({ systemStatus: !state.systemStatus })),
   toggleTradingMode: () => set((state) => ({ isPaperTrading: !state.isPaperTrading })),
+  checkBackendReady: async () => {
+    try {
+      const response = await fetch(`${API_BASE}/health/ready`);
+      if (response && response.ok) {
+        const data = await response.json();
+        set({
+          serverHealthMatrix: data?.subsystems || {
+            database: 'nominal',
+            redis: 'nominal',
+            ml_workers: 'active',
+            websocket_stream: 'nominal'
+          }
+        });
+      } else {
+        set({
+          serverHealthMatrix: {
+            database: 'unreachable',
+            redis: 'unreachable',
+            ml_workers: 'idle',
+            websocket_stream: 'unreachable'
+          }
+        });
+      }
+    } catch {
+      set({
+        serverHealthMatrix: {
+          database: 'unreachable',
+          redis: 'unreachable',
+          ml_workers: 'idle',
+          websocket_stream: 'unreachable'
+        }
+      });
+    }
+  },
   setRiskPercentage: (riskPercentage) => set({ riskPercentage: Math.max(1, Math.min(10, toNumber(riskPercentage, 2))) }),
   resetPortfolio: () => set({
     activeTrades: [],
@@ -208,17 +530,48 @@ export const useStore = create((set, get) => ({
     todaysPnL: 0,
   }),
 
+  markRealtimeStale: (latencyMs = null, reason = 'NO LIVE DATA') => set((state) => ({
+    connectionStatus: 'STALE',
+    liveLatencyMs: toFiniteNumber(latencyMs, state.liveLatencyMs),
+    liveHealth: LIVE_HEALTH.STALE,
+    tradingBlockedByLatency: true,
+    liveDataMessage: reason,
+    systemAlert: reason,
+  })),
+
+  resetRealtimeState: (reason = 'Realtime overload reset') => {
+    abortControllerMap(bundleRequestControllers, 'realtime_overload_reset');
+    abortControllerMap(decisionRequestControllers, 'realtime_overload_reset');
+    cancelActiveRequest('realtime_overload_reset');
+
+    set(() => ({
+      connectionStatus: 'STALE',
+      liveLatencyMs: null,
+      liveHealth: LIVE_HEALTH.STALE,
+      tradingBlockedByLatency: true,
+      liveDataMessage: reason,
+      systemAlert: reason,
+      bundleLoading: false,
+      bundlePartial: true,
+      bundleWarnings: [reason],
+      tradeDecisionLoadingBySymbol: {},
+      bundleRequestSeqBySymbol: {},
+      tradeDecisionRequestSeqBySymbol: {},
+    }));
+  },
+
   loadSymbolCatalog: async (limit = 500) => {
     try {
-      const rows = await fetchMarketSymbols(limit);
+      const rows = await fetchMarketSymbols(limit, { timeoutMs: API_TIMEOUT_MS });
       set({ symbolCatalog: Array.isArray(rows) ? rows : [] });
     } catch {
       set({ symbolCatalog: [] });
     }
   },
 
-  loadSymbolBundle: async (symbol, timeframe = null) => {
+  loadSymbolBundle: async (symbol, timeframe = null, options = {}) => {
     const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    const skipIfLoading = Boolean(options?.skipIfLoading);
     const state = get();
     const requestedTimeframe = String(timeframe || state.selectedTimeframe || DEFAULT_TIMEFRAME).trim().toLowerCase();
     const normalizedTimeframe = ALLOWED_TIMEFRAMES.has(requestedTimeframe)
@@ -226,19 +579,50 @@ export const useStore = create((set, get) => ({
       : DEFAULT_TIMEFRAME;
     if (!normalizedSymbol) return;
 
-    set({
+    if (skipIfLoading && isBundleRequestActive(normalizedSymbol)) {
+      return null;
+    }
+
+    const currentSeq = (get().bundleRequestSeqBySymbol?.[normalizedSymbol] || 0) + 1;
+    const controller = replaceRequestController(bundleRequestControllers, normalizedSymbol);
+
+    set((prev) => ({
       bundleLoading: true,
       bundleError: null,
+      bundleWarnings: prev.bundleWarnings || [],
       selectedSymbol: normalizedSymbol,
       selectedTimeframe: normalizedTimeframe,
-    });
+      bundleRequestSeqBySymbol: {
+        ...prev.bundleRequestSeqBySymbol,
+        [normalizedSymbol]: currentSeq,
+      },
+    }));
 
     try {
       const bundle = await fetchStockBundle(normalizedSymbol, {
         interval: normalizedTimeframe,
         limit: BUNDLE_CANDLE_LIMIT,
         horizon: '15m',
+        signal: controller.signal,
+        timeoutMs: BUNDLE_REQUEST_TIMEOUT_MS,
       });
+
+      const activeSeq = get().bundleRequestSeqBySymbol?.[normalizedSymbol] || 0;
+      if (controller.signal.aborted || activeSeq !== currentSeq) {
+        return null;
+      }
+
+      const previousSnapshotTimestamp = parseTimestampMs(
+        get().snapshot?.timestamp ?? get().snapshot?.last_updated,
+        0,
+      );
+      const incomingSnapshotTimestamp = parseTimestampMs(
+        bundle?.snapshot?.timestamp ?? bundle?.snapshot?.last_updated ?? bundle?.timestamp,
+        Date.now(),
+      );
+      if (incomingSnapshotTimestamp < previousSnapshotTimestamp) {
+        return null;
+      }
 
       if (import.meta.env.DEV) {
         // eslint-disable-next-line no-console
@@ -248,31 +632,170 @@ export const useStore = create((set, get) => ({
       const candles = normalizeCandles(bundle?.history?.candles);
       const chartData = toChartData(candles);
       const signal = normalizeSignal(bundle, normalizedSymbol);
-      const ltp = toNumber(
-        bundle?.snapshot?.ltp ?? bundle?.snapshot?.price ?? bundle?.latest_price ?? bundle?.price,
-        signal.price,
-      );
+      const warnings = normalizeBundleWarnings(bundle);
+      const isPartial = Boolean(bundle?.partial) || warnings.length > 0;
 
-      set((prev) => ({
-        bundleLoading: false,
-        bundleError: null,
-        candles,
-        chartData,
-        snapshot: bundle?.snapshot || null,
-        indicators: bundle?.indicators || {},
-        currentSignal: signal,
-        signals: [signal, ...prev.signals.filter((item) => item.symbol !== normalizedSymbol)].slice(0, 50),
-        priceBySymbol: {
-          ...prev.priceBySymbol,
-          [normalizedSymbol]: ltp,
+      set((prev) => {
+        const resolvedCurrentPrice = toNumber(
+          prev.livePriceBySymbol?.[normalizedSymbol]?.currentPrice,
+          toNumber(
+            bundle?.snapshot?.ltp ?? bundle?.snapshot?.price,
+            toNumber(prev.priceBySymbol?.[normalizedSymbol], 0),
+          ),
+        );
+        const mergedSignal = {
+          ...signal,
+          price: resolvedCurrentPrice,
+          currentPrice: resolvedCurrentPrice,
+        };
+
+        return {
+          bundleLoading: false,
+          bundleError: null,
+          bundlePartial: isPartial,
+          bundleWarnings: warnings,
+          candles,
+          chartData,
+          snapshot: bundle?.snapshot || null,
+          indicators: bundle?.indicators || {},
+          systemAlert: isPartial && warnings.length > 0 ? warnings[0] : prev.systemAlert,
+          currentSignal: mergedSignal,
+          signals: [mergedSignal, ...prev.signals.filter((item) => item.symbol !== normalizedSymbol)].slice(0, 50),
+        };
+      });
+
+      void get().evaluateTradeDecision(normalizedSymbol, normalizedTimeframe, {
+        capital: get().balance,
+        skipIfLoading: true,
+      }).catch(() => null);
+      return bundle;
+    } catch (error) {
+      const activeSeq = get().bundleRequestSeqBySymbol?.[normalizedSymbol] || 0;
+      if (controller.signal.aborted || isAbortLikeError(error)) {
+        if (activeSeq === currentSeq) {
+          set({ bundleLoading: false });
+        }
+        return null;
+      }
+
+      if (activeSeq === currentSeq) {
+        const fallbackMessage = get().candles?.length
+          ? 'Showing last cached market data while bundle refresh retries.'
+          : toUiErrorMessage(error, 'Failed to load stock bundle');
+        set({
+          bundleLoading: false,
+          bundleError: fallbackMessage,
+          bundlePartial: true,
+          bundleWarnings: [fallbackMessage],
+        });
+      }
+      return null;
+    } finally {
+      releaseRequestController(bundleRequestControllers, normalizedSymbol, controller);
+    }
+  },
+
+  evaluateTradeDecision: async (symbol, timeframe = null, options = {}) => {
+    const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    if (!normalizedSymbol) {
+      throw new Error('Symbol is required to evaluate trade decision');
+    }
+
+    const skipIfLoading = Boolean(options?.skipIfLoading);
+    if (skipIfLoading && isDecisionRequestActive(normalizedSymbol)) {
+      return get().tradeDecisionBySymbol?.[normalizedSymbol] || null;
+    }
+
+    const requestedTimeframe = String(timeframe || get().selectedTimeframe || DEFAULT_TIMEFRAME).trim().toLowerCase();
+    const normalizedTimeframe = ALLOWED_TIMEFRAMES.has(requestedTimeframe)
+      ? requestedTimeframe
+      : DEFAULT_TIMEFRAME;
+
+    const currentSeq = (get().tradeDecisionRequestSeqBySymbol?.[normalizedSymbol] || 0) + 1;
+    const controller = replaceRequestController(decisionRequestControllers, normalizedSymbol);
+
+    set((state) => ({
+      tradeDecisionRequestSeqBySymbol: {
+        ...state.tradeDecisionRequestSeqBySymbol,
+        [normalizedSymbol]: currentSeq,
+      },
+      tradeDecisionLoadingBySymbol: {
+        ...state.tradeDecisionLoadingBySymbol,
+        [normalizedSymbol]: true,
+      },
+      tradeDecisionErrorBySymbol: {
+        ...state.tradeDecisionErrorBySymbol,
+        [normalizedSymbol]: null,
+      },
+    }));
+
+    try {
+      const payload = await fetchTradeDecision(normalizedSymbol, {
+        interval: normalizedTimeframe,
+        horizon: options.horizon || '15m',
+        capital: toNumber(options.capital, get().balance),
+        riskPerTrade: toNumber(options.riskPerTrade, 0.01),
+        signal: controller.signal,
+        timeoutMs: DECISION_REQUEST_TIMEOUT_MS,
+      });
+
+      const activeSeq = get().tradeDecisionRequestSeqBySymbol?.[normalizedSymbol] || 0;
+      if (activeSeq !== currentSeq || controller.signal.aborted) {
+        return payload;
+      }
+
+      const existingDecision = get().tradeDecisionBySymbol?.[normalizedSymbol] || null;
+      const existingTimestamp = parseTimestampMs(existingDecision?.evaluated_at, 0);
+      const incomingTimestamp = parseTimestampMs(payload?.evaluated_at, Date.now());
+      if (incomingTimestamp < existingTimestamp) {
+        return existingDecision;
+      }
+
+      set((state) => ({
+        tradeDecisionBySymbol: {
+          ...state.tradeDecisionBySymbol,
+          [normalizedSymbol]: payload,
+        },
+        tradeDecisionLoadingBySymbol: {
+          ...state.tradeDecisionLoadingBySymbol,
+          [normalizedSymbol]: false,
+        },
+        tradeDecisionErrorBySymbol: {
+          ...state.tradeDecisionErrorBySymbol,
+          [normalizedSymbol]: null,
         },
       }));
+
+      return payload;
     } catch (error) {
-      set({
-        bundleLoading: false,
-        bundleError: error?.message || 'Failed to load stock bundle',
-      });
+      const activeSeq = get().tradeDecisionRequestSeqBySymbol?.[normalizedSymbol] || 0;
+      if (controller.signal.aborted || isAbortLikeError(error)) {
+        if (activeSeq === currentSeq) {
+          set((state) => ({
+            tradeDecisionLoadingBySymbol: {
+              ...state.tradeDecisionLoadingBySymbol,
+              [normalizedSymbol]: false,
+            },
+          }));
+        }
+        return null;
+      }
+
+      if (activeSeq === currentSeq) {
+        set((state) => ({
+          tradeDecisionLoadingBySymbol: {
+            ...state.tradeDecisionLoadingBySymbol,
+            [normalizedSymbol]: false,
+          },
+          tradeDecisionErrorBySymbol: {
+            ...state.tradeDecisionErrorBySymbol,
+            [normalizedSymbol]: toUiErrorMessage(error, 'Failed to evaluate trade decision'),
+          },
+        }));
+      }
       throw error;
+    } finally {
+      releaseRequestController(decisionRequestControllers, normalizedSymbol, controller);
     }
   },
 
@@ -285,11 +808,9 @@ export const useStore = create((set, get) => ({
   fetchInitialData: async () => {
     set({ isLoading: true });
     try {
-      const [tradesResponse, portfolioResponse, signalsResponse] = await Promise.all([
-        TradeService.getActive().catch(() => null),
-        PortfolioService.getBalance().catch(() => null),
-        SignalService.getActive().catch(() => null),
-      ]);
+      const tradesResponse = await TradeService.getActive().catch(() => null);
+      const portfolioResponse = await PortfolioService.getBalance().catch(() => null);
+      const signalsResponse = await SignalService.getActive().catch(() => null);
 
       const tradesPayload = unwrapApiData(tradesResponse) || {};
       const portfolioPayload = unwrapApiData(portfolioResponse) || {};
@@ -320,20 +841,36 @@ export const useStore = create((set, get) => ({
         isLoading: false,
       });
 
-      await Promise.all([
-        get().loadSymbolCatalog().catch(() => null),
-        get().loadSymbolBundle(get().selectedSymbol, get().selectedTimeframe).catch(() => null),
-      ]);
+      await get().loadSymbolCatalog().catch(() => null);
+      await get().loadSymbolBundle(get().selectedSymbol, get().selectedTimeframe).catch(() => null);
     } catch { set({ isLoading: false }); }
   },
   
   executeTrade: async (signal) => {
     const state = get(); if (!state.systemStatus) throw new Error("API Offline");
+    if (state.tradingBlockedByLatency) {
+      throw new Error(state.liveDataMessage || 'Trading blocked: live data is stale');
+    }
     const tradeType = String(signal?.type || signal?.signal || 'BUY').toUpperCase();
     const signalSymbol = String(signal?.symbol || state.selectedSymbol || '').toUpperCase();
     const entryPrice = toNumber(signal?.price ?? signal?.currentPrice ?? state.priceBySymbol[signalSymbol], 0);
     const tp = toNumber(signal?.tp ?? signal?.target, entryPrice);
     const sl = toNumber(signal?.sl ?? signal?.stopLoss, entryPrice);
+
+    const decisionPayload = await state.evaluateTradeDecision(signalSymbol, state.selectedTimeframe, {
+      capital: state.balance,
+      riskPerTrade: 0.01,
+    });
+    const decisionStatus = String(decisionPayload?.decision?.status || 'BLOCKED').toUpperCase();
+    if (decisionStatus !== 'READY') {
+      const reasons = Array.isArray(decisionPayload?.decision?.reasons)
+        ? decisionPayload.decision.reasons.filter(Boolean)
+        : [];
+      const reasonText = reasons.length
+        ? reasons.slice(0, 3).join(' | ')
+        : 'Decision engine blocked trade';
+      throw new Error(`Trade blocked: ${reasonText}`);
+    }
 
     const tempId = `temp_${Date.now()}`;
     const tempTrade = { 
@@ -385,10 +922,14 @@ export const useStore = create((set, get) => ({
   addLiveSignal: (signal) => set((s) => {
     const normalized = normalizeSignalRow(signal, s.selectedSymbol);
     const previousBySymbol = s.signals.find((item) => item.symbol === normalized.symbol);
+    const canonicalPrice = toNumber(
+      s.livePriceBySymbol?.[normalized.symbol]?.currentPrice,
+      s.priceBySymbol[normalized.symbol],
+    );
     const merged = hydrateSignalWithPrevious(
       normalized,
       previousBySymbol,
-      s.priceBySymbol[normalized.symbol],
+      canonicalPrice,
     );
     const nextSignals = [merged, ...s.signals.filter((item) => item.symbol !== normalized.symbol)].slice(0, 50);
     return {
@@ -405,10 +946,14 @@ export const useStore = create((set, get) => ({
   upsertLiveSignal: (signal) => set((s) => {
     const normalized = normalizeSignalRow(signal, s.selectedSymbol);
     const previousBySymbol = s.signals.find((item) => item.symbol === normalized.symbol);
+    const canonicalPrice = toNumber(
+      s.livePriceBySymbol?.[normalized.symbol]?.currentPrice,
+      s.priceBySymbol[normalized.symbol],
+    );
     const merged = hydrateSignalWithPrevious(
       normalized,
       previousBySymbol,
-      s.priceBySymbol[normalized.symbol],
+      canonicalPrice,
     );
     const nextSignals = [merged, ...s.signals.filter((item) => item.symbol !== normalized.symbol)].slice(0, 50);
     return {
@@ -457,35 +1002,63 @@ export const useStore = create((set, get) => ({
       snapshot: shouldUpdateSelected
         ? {
             ...(s.snapshot || {}),
-            ltp: close,
-            price: close,
             close,
             high,
             low,
             open,
             volume,
+            last_candle_time: time,
           }
         : s.snapshot,
-      priceBySymbol: {
-        ...s.priceBySymbol,
-        [normalizedSymbol]: close,
-      },
-      currentSignal: shouldUpdateSelected && s.currentSignal
-        ? {
-            ...s.currentSignal,
-            price: close,
-            currentPrice: close,
-          }
-        : s.currentSignal,
     };
   }),
 
   syncTradeEvents: (p) => set(s => ({ activeTrades: s.activeTrades.filter(t => t.id !== p.tradeId) })),
 
-  updateAssetPrice: (sym, px) => set(s => {
+  updateAssetPrice: (sym, px, options = {}) => set((s) => {
     const symbol = String(sym || '').toUpperCase();
-    const price = toNumber(px, null);
-    if (!symbol || price === null) return s;
+    if (!symbol) return s;
+    const isSelectedSymbol = symbol === s.selectedSymbol;
+
+    const mergedPrice = mergeSymbolPriceState(s, symbol, px, {
+      dataSource: options.dataSource || PRICE_SOURCE.WS,
+      timestamp: options.timestamp,
+      latencyMs: options.latencyMs,
+    });
+
+    if (!mergedPrice.accepted || mergedPrice.resolvedPrice === null) {
+      if (!isSelectedSymbol) {
+        return s;
+      }
+
+      if (mergedPrice.isOverload) {
+        return {
+          ...s,
+          connectionStatus: 'STALE',
+          liveHealth: LIVE_HEALTH.STALE,
+          tradingBlockedByLatency: true,
+          liveDataMessage: 'OVERLOAD: realtime feed reset required',
+          systemAlert: 'OVERLOAD: realtime feed reset required',
+          liveLatencyMs: mergedPrice.latencyMs,
+        };
+      }
+
+      if (mergedPrice.isStale) {
+        return {
+          ...s,
+          connectionStatus: 'STALE',
+          liveHealth: LIVE_HEALTH.STALE,
+          tradingBlockedByLatency: true,
+          liveDataMessage: 'NO LIVE DATA',
+          systemAlert: 'NO LIVE DATA',
+          liveLatencyMs: mergedPrice.latencyMs,
+        };
+      }
+
+      return s;
+    }
+
+    const price = mergedPrice.resolvedPrice;
 
     const updatedTrades = s.activeTrades.map((t) => {
       if (String(t.symbol).toUpperCase() !== symbol) return t;
@@ -498,13 +1071,30 @@ export const useStore = create((set, get) => ({
     });
 
     const shouldUpdateSignal = String(s.currentSignal?.symbol || '').toUpperCase() === symbol;
+    const shouldUpdateSnapshot = isSelectedSymbol;
 
     return {
+      ...mergedPrice.state,
       activeTrades: updatedTrades,
-      priceBySymbol: {
-        ...s.priceBySymbol,
-        [symbol]: price,
-      },
+      connectionStatus: isSelectedSymbol ? 'CONNECTED' : s.connectionStatus,
+      liveLatencyMs: isSelectedSymbol ? mergedPrice.latencyMs : s.liveLatencyMs,
+      liveHealth: isSelectedSymbol ? mergedPrice.health : s.liveHealth,
+      tradingBlockedByLatency: isSelectedSymbol
+        ? mergedPrice.health === LIVE_HEALTH.STALE
+        : s.tradingBlockedByLatency,
+      liveDataMessage: isSelectedSymbol
+        ? (mergedPrice.health === LIVE_HEALTH.STALE ? 'NO LIVE DATA' : null)
+        : s.liveDataMessage,
+      systemAlert: isSelectedSymbol
+        ? (mergedPrice.health === LIVE_HEALTH.STALE ? 'NO LIVE DATA' : null)
+        : s.systemAlert,
+      snapshot: shouldUpdateSnapshot
+        ? {
+            ...(s.snapshot || {}),
+            ltp: price,
+            price,
+          }
+        : s.snapshot,
       currentSignal: shouldUpdateSignal
         ? {
             ...s.currentSignal,

@@ -244,11 +244,14 @@ async def test_bundle_api_handles_timeout_gracefully(client, monkeypatch):
 
     response = await client.get("/api/v1/bundle/RELIANCE?interval=1m&horizon=15m")
 
-    assert response.status_code == 504
+    assert response.status_code == 200
     body = response.json()
-    assert body["success"] is False
-    assert body["data"] is None
-    assert body["error"]["code"] == "BUNDLE_TIMEOUT"
+    assert body["success"] is True
+    assert body["error"] is None
+    assert body["data"]["symbol"] == "RELIANCE"
+    assert body["data"]["prediction"]["signal"] == "HOLD"
+    assert body["data"]["partial"] is True
+    assert any("BUNDLE_TIMEOUT" in warning for warning in body["data"]["warnings"])
 
 
 @pytest.mark.anyio

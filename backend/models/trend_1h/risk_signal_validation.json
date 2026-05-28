@@ -1,0 +1,8 @@
+{
+  "hold_logic_stable": true,
+  "low_conf_suppression_rate": 0.5057739167284669,
+  "stop_loss_generation_valid": true,
+  "target_generation_valid": true,
+  "risk_reward_consistent": true,
+  "sideways_overtrade_guard": true
+}

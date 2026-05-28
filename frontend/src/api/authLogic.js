@@ -1,5 +1,11 @@
 import axios from 'axios';
 import { apiClient } from './client.js';
+import { API_TIMEOUT_MS } from './requestGate.js';
+import {
+  clearStoredAuthTokens,
+  getStoredRefreshToken,
+  setStoredAuthTokens,
+} from '../utils/authStorage.js';
 
 let isRefreshing = false; let failedQueue = [];
 const processQueue = (error, token = null) => {
@@ -47,12 +53,14 @@ export const handleTokenRefresh = async (originalRequest) => {
   }
   isRefreshing = true;
   try {
-    const refreshToken = localStorage.getItem('refresh_token');
+    const refreshToken = getStoredRefreshToken();
     if (!refreshToken) throw new Error('No refresh token available');
 
     const baseUrl = resolveApiBaseV1();
     const response = await axios.post(`${baseUrl}/auth/refresh`, {
       refresh_token: refreshToken,
+    }, {
+      timeout: API_TIMEOUT_MS,
     });
 
     const payload = response?.data?.data || response?.data || {};
@@ -63,15 +71,14 @@ export const handleTokenRefresh = async (originalRequest) => {
       throw new Error('Token refresh failed');
     }
 
-    localStorage.setItem('access_token', accessToken);
-    localStorage.setItem('refresh_token', nextRefreshToken);
+    setStoredAuthTokens({ accessToken, refreshToken: nextRefreshToken });
 
     processQueue(null, accessToken);
     originalRequest.headers['Authorization'] = 'Bearer ' + accessToken;
     return apiClient(originalRequest);
   } catch (err) {
     processQueue(err, null);
-    localStorage.removeItem('access_token'); localStorage.removeItem('refresh_token');
+    clearStoredAuthTokens();
     window.location.href = '/login';
     return Promise.reject(err);
   } finally { isRefreshing = false; }

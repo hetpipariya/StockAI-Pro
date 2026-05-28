@@ -20,7 +20,7 @@ import pandas as pd
 
 from app import config
 from app.connectors.order_router import OrderRouter
-from app.inference.feature_engineering import apply_feature_compatibility, compute_features
+from app.inference.feature_engineering import FEATURE_COLUMNS, compute_features, validate_feature_contract
 from app.trading.candle_builder import candle_builder_5m
 from app.trading.risk_manager import RiskManager
 from app.trading.trade_logger import log_trade
@@ -67,7 +67,7 @@ class LiveExecutor5m:
         return default
 
     def _load_model(self) -> None:
-        """Load 5m artifact first; fall back to backend ensemble model if needed."""
+        """Load only the strict v3 C++ artifact."""
         model_path = Path(str(config.LIVE_5M_MODEL_PATH)).expanduser()
 
         if model_path.exists():
@@ -93,9 +93,18 @@ class LiveExecutor5m:
                     if not features and hasattr(model, "feature_names_in_"):
                         features = list(getattr(model, "feature_names_in_", []) or [])
 
+                    self._features_list = [str(f) for f in features]
+                    if self._features_list != FEATURE_COLUMNS:
+                        logger.error(
+                            "[EXECUTOR-5M] Rejecting non-canonical model from %s (features=%d)",
+                            model_path,
+                            len(self._features_list),
+                        )
+                        self._features_list = []
+                        self._model_source = "none"
+                        return
                     self._model = model
                     self._scaler = scaler
-                    self._features_list = [str(f) for f in features]
                     self._model_source = str(model_path)
                     logger.info(
                         "[EXECUTOR-5M] Loaded model from %s (features=%d)",
@@ -130,9 +139,16 @@ class LiveExecutor5m:
             from app.inference.models import _features_list as features
             from app.inference.models import _scaler as scaler
 
+            self._features_list = [str(f) for f in (features or [])]
+            if self._features_list != FEATURE_COLUMNS:
+                logger.error("[EXECUTOR-5M] Shared model is not canonical C++ v3; executor disabled")
+                self._model = None
+                self._scaler = None
+                self._features_list = []
+                self._model_source = "none"
+                return
             self._model = model
             self._scaler = scaler
-            self._features_list = [str(f) for f in (features or [])]
             self._model_source = "app.inference.models"
 
             if self._model is None:
@@ -192,16 +208,12 @@ class LiveExecutor5m:
         if candles_df.empty:
             return pd.DataFrame()
 
-        feature_df = compute_features(candles_df.tail(self.history_limit), include_legacy=True)
+        feature_df = compute_features(candles_df.tail(self.history_limit))
         if feature_df.empty:
             return feature_df
 
         required = self._features_list or list(feature_df.columns)
-        feature_df = apply_feature_compatibility(
-            feature_df=feature_df,
-            ohlcv_df=candles_df.tail(len(feature_df)),
-            required_features=required,
-        )
+        validate_feature_contract(feature_df, required, context="LiveExecutor5m")
 
         for col in required:
             if col not in feature_df.columns:
@@ -214,19 +226,19 @@ class LiveExecutor5m:
         return feature_df
 
     def _resolve_quality(self, latest_features: pd.Series, latest_close: float) -> tuple[float, float]:
-        trend = self._safe_float(latest_features.get("trend_strength"), default=np.nan)
+        trend = self._safe_float(latest_features.get("linreg_slope"), default=np.nan)
         if not np.isfinite(trend):
-            ema20 = self._safe_float(latest_features.get("ema_20"), 0.0)
-            if ema20 > 0 and latest_close > 0:
-                trend = (latest_close - ema20) / max(abs(ema20), 1e-12)
+            ema50 = self._safe_float(latest_features.get("ema50"), 0.0)
+            if ema50 > 0 and latest_close > 0:
+                trend = (latest_close - ema50) / max(abs(ema50), 1e-12)
             else:
                 trend = 0.0
 
-        volatility = self._safe_float(latest_features.get("volatility"), default=np.nan)
-        if not np.isfinite(volatility):
-            volatility = self._safe_float(latest_features.get("realized_vol_20"), default=np.nan)
-        if not np.isfinite(volatility):
-            volatility = self._safe_float(latest_features.get("atr_pct"), 0.0)
+        atr14 = self._safe_float(latest_features.get("atr14"), default=np.nan)
+        if np.isfinite(atr14) and latest_close > 0:
+            volatility = atr14 / max(abs(latest_close), 1e-12)
+        else:
+            volatility = self._safe_float(latest_features.get("bb_width"), 0.0)
 
         return float(trend), max(float(volatility), 0.0)
 
@@ -272,10 +284,15 @@ class LiveExecutor5m:
 
         latest_features = feature_df.iloc[-1]
         trend_strength, volatility = self._resolve_quality(latest_features, latest_price)
+        # Add trend-quality filters: ADX and Bollinger Band width
+        adx = float(latest_features.get("adx14") or 0.0)
+        bb_width = float(latest_features.get("bb_width") or 0.0)
 
         regime_is_trending = (
             abs(trend_strength) >= self.trend_threshold
             and volatility >= self.volatility_threshold
+            and adx >= float(config.LIVE_5M_ADX_THRESHOLD)
+            and bb_width >= float(config.LIVE_5M_BBWIDTH_THRESHOLD)
         )
         if not regime_is_trending:
             return None

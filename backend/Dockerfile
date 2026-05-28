@@ -13,10 +13,23 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements
 COPY requirements.txt .
+
+# Install build-time helpers for the native acceleration module
+RUN pip install --no-cache-dir pybind11
+
+# Copy native sources and build the extension module
+COPY cpp ./cpp
+WORKDIR /app/cpp
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Dpybind11_DIR="$(python -m pybind11 --cmakedir)" \
+    && cmake --build build --config Release \
+    && find build -name "stockai_cpp*.so" -exec cp {} /app/ \;
+
+WORKDIR /app
 
 # Build wheels (this caches the expensive compilation step)
 RUN pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.txt
@@ -42,6 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ========== Copy wheels and requirements ==========
 COPY --from=builder /app/wheels /wheels
 COPY --from=builder /app/requirements.txt .
+COPY --from=builder /app/stockai_cpp*.so /app/
 
 ENV PIP_DEFAULT_TIMEOUT=100 \
     PIP_RETRIES=10
@@ -57,6 +71,7 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app \
   PORT=8000 \
   RUN_MIGRATIONS_ON_START=true \
   ALLOW_START_WITH_FAILED_MIGRATIONS=false \

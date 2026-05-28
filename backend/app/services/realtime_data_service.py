@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from app.connectors.smartapi_connector import SmartAPIConnector
-from app.services.instrument_service import get_token_by_symbol, get_tradingsymbol
+from app.connectors import get_market_data_connector
+from app.services.instrument_service import (get_token_by_symbol,
+                                             get_tradingsymbol,
+                                             normalize_symbol_input,
+                                             resolve_symbol_input)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class InstrumentBinding:
     symbol: str
     token: str
+    exchange: str
     tradingsymbol: str
 
 
@@ -21,7 +28,7 @@ class LiveMarketDataService:
 
     def __init__(
         self,
-        connector_provider: Callable[[], SmartAPIConnector],
+        connector_provider: Callable[[], Any],
         exchange: str = "NSE",
     ) -> None:
         self._connector_provider = connector_provider
@@ -29,28 +36,35 @@ class LiveMarketDataService:
 
     @staticmethod
     def normalize_symbol(symbol: str) -> str:
-        return str(symbol or "").strip().upper()
+        return normalize_symbol_input(symbol)
 
     def resolve_instrument(self, symbol: str) -> InstrumentBinding:
-        normalized = self.normalize_symbol(symbol)
-        token = get_token_by_symbol(normalized, exchange=self._exchange)
-        tradingsymbol = get_tradingsymbol(normalized, exchange=self._exchange)
-        return InstrumentBinding(
+        resolved_exchange, normalized = resolve_symbol_input(symbol, exchange=self._exchange)
+        token = get_token_by_symbol(normalized, exchange=resolved_exchange)
+        tradingsymbol = get_tradingsymbol(normalized, exchange=resolved_exchange)
+        binding = InstrumentBinding(
             symbol=normalized,
             token=token,
+            exchange=resolved_exchange,
             tradingsymbol=tradingsymbol,
         )
+        logger.info(
+            "[PIPELINE] token_resolved symbol=%s exchange=%s token=%s",
+            binding.symbol,
+            binding.exchange,
+            binding.token,
+        )
+        return binding
 
     async def fetch_snapshot(self, symbol: str) -> dict[str, Any]:
         binding = self.resolve_instrument(symbol)
         connector = await asyncio.to_thread(self._connector_provider)
 
-        payload = await asyncio.to_thread(
-            connector.get_ltp,
-            binding.token,
-            self._exchange,
-            binding.tradingsymbol,
-        )
+        fetch_method = getattr(connector, "fetch_latest", None) or getattr(connector, "get_ltp", None)
+        if not callable(fetch_method):
+            raise RuntimeError("Connector does not expose a snapshot fetch method")
+
+        payload = await asyncio.to_thread(fetch_method, binding.token, binding.exchange, binding.tradingsymbol)
         if not payload:
             raise ValueError(f"LTP not available for {binding.symbol}")
 
@@ -78,10 +92,14 @@ class LiveMarketDataService:
         rows = await asyncio.to_thread(
             connector.fetch_history,
             binding.token,
-            self._exchange,
+            binding.exchange,
             interval,
             from_date,
             to_date,
             limit,
         )
         return rows or []
+
+
+def get_default_live_market_data_service() -> LiveMarketDataService:
+    return LiveMarketDataService(connector_provider=get_market_data_connector)

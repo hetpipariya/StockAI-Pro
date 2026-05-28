@@ -11,9 +11,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from sqlalchemy import (Boolean, DateTime, Float, ForeignKey, Index, Integer,
-                        String, Text, UniqueConstraint, create_engine, event,
-                        text)
+from sqlalchemy import (JSON, Boolean, DateTime, Float, ForeignKey, Index,
+                        Integer, String, Text, UniqueConstraint, create_engine,
+                        event, text)
 from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
@@ -47,9 +47,6 @@ class UserModel(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(
-        String(50), unique=True, nullable=False, index=True
-    )
     email: Mapped[str] = mapped_column(
         String(255), unique=True, nullable=True, index=True
     )
@@ -92,9 +89,45 @@ class UserModel(Base):
     predictions = relationship(
         "PredictionModel", back_populates="user", cascade="all, delete-orphan"
     )
+    trading_state = relationship(
+        "UserTradingStateModel",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self):
-        return f"<User id={self.id} username={self.username}>"
+        return f"<User id={self.id} email={self.email}>"
+
+
+class UserTradingStateModel(Base):
+    """Persisted per-user runtime trading state."""
+
+    __tablename__ = "user_trading_state"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_user_trading_state_user_id"),
+        Index("ix_user_trading_state_last_updated", "last_updated"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+        unique=True,
+    )
+    balance: Mapped[float] = mapped_column(Float, nullable=False, default=100_000.0)
+    positions: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    orders: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
+    last_updated: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+    user = relationship("UserModel", back_populates="trading_state")
 
 
 class CandleModel(Base):
@@ -515,6 +548,54 @@ def is_transient_db_error(exc: Exception) -> bool:
     return False
 
 
+async def run_db_transaction_with_retry(
+    action_func,
+    *args,
+    max_retries: int = 3,
+    base_delay: float = 0.1,
+    timeout_seconds: float = 5.0,
+    **kwargs
+):
+    """
+    Executes an async database operation with automatic retries on transient errors,
+    exponential backoff, and a strict timeout guard.
+    """
+    from app.services.metrics import DB_TRANSIENT_RETRIES, DB_QUERY_LATENCY
+    
+    start_time = time.perf_counter()
+    op_name = getattr(action_func, "__name__", "db_op")
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            result = await asyncio.wait_for(
+                action_func(*args, **kwargs),
+                timeout=timeout_seconds
+            )
+            elapsed = time.perf_counter() - start_time
+            DB_QUERY_LATENCY.labels(operation=op_name).observe(elapsed)
+            return result
+        except Exception as exc:
+            transient = is_transient_db_error(exc)
+            if transient and attempt < max_retries:
+                try:
+                    DB_TRANSIENT_RETRIES.labels().inc()
+                except Exception:
+                    pass
+                wait_time = base_delay * (2 ** (attempt - 1))
+                logger.warning(
+                    "[DB] Transient transaction error in '%s' (attempt %d/%d): %s. Retrying in %.2fs",
+                    op_name,
+                    attempt,
+                    max_retries,
+                    exc,
+                    wait_time,
+                )
+                await asyncio.sleep(wait_time)
+                continue
+            raise
+
+
+
 def _resolve_sqlite_file_path() -> Optional[Path]:
     if not _is_sqlite:
         return None
@@ -594,6 +675,58 @@ async def init_db():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("[DB] ✓ Tables initialized")
+
+        # Enable TimescaleDB hypertables conditionally if using PostgreSQL
+        if _is_postgres:
+            try:
+                async with engine.begin() as conn:
+                    # 1. Create extension conditionally
+                    try:
+                        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;"))
+                        logger.info("[DB] TimescaleDB extension verified/installed.")
+                    except Exception as ext_err:
+                        logger.warning("[DB] TimescaleDB extension not available: %s. Falling back to standard Postgres.", ext_err)
+                        return
+
+                    # 2. Check if candles is already a hypertable
+                    result = await conn.execute(text(
+                        "SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'candles';"
+                    ))
+                    is_hypertable = result.first() is not None
+
+                    if not is_hypertable:
+                        # Drop existing primary key on 'id' and 'uq_candle' constraint
+                        # Find the PK constraint name dynamically
+                        pk_res = await conn.execute(text(
+                            "SELECT conname FROM pg_constraint WHERE conrelid = 'candles'::regclass AND contype = 'p';"
+                        ))
+                        pk_row = pk_res.first()
+                        if pk_row:
+                            await conn.execute(text(f"ALTER TABLE candles DROP CONSTRAINT {pk_row[0]};"))
+
+                        await conn.execute(text("ALTER TABLE candles DROP CONSTRAINT IF EXISTS uq_candle;"))
+
+                        # Add composite primary key including timestamp
+                        await conn.execute(text(
+                            "ALTER TABLE candles ADD PRIMARY KEY (timestamp, symbol, timeframe);"
+                        ))
+
+                        # Convert candles table to a TimescaleDB hypertable (7-day partitions)
+                        await conn.execute(text(
+                            "SELECT create_hypertable('candles', 'timestamp', chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);"
+                        ))
+                        logger.info("[DB] ✓ Candles table converted to TimescaleDB hypertable (7-day chunks)")
+
+                        # Enable compression policy
+                        await conn.execute(text(
+                            "ALTER TABLE candles SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol, timeframe');"
+                        ))
+                        await conn.execute(text(
+                            "SELECT add_compression_policy('candles', INTERVAL '14 days', if_not_exists => TRUE);"
+                        ))
+                        logger.info("[DB] ✓ TimescaleDB compression policy added (14-day segment retention)")
+            except Exception as exc:
+                logger.error("[DB] Failed to convert candles to TimescaleDB hypertable: %s. Continuing with standard Postgres schema.", exc)
     except Exception as e:
         logger.error("[DB] Initialization failed: %s", e)
         raise

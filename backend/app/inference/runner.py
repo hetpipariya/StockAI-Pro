@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from app.inference.features import (extract_features, get_latest_sequence,
-                                    get_latest_tabular)
+from app.inference.feature_engineering import compute_features
+from app.inference.features import get_latest_sequence, get_latest_tabular
 from app.inference.models import (ModelEnsemble, ensure_models_loaded,
                                   load_models)
 
@@ -116,6 +116,11 @@ class PredictionResult:
     explanation: Optional[str] = None
 
 
+import time
+_last_predictions: dict[str, tuple[float, PredictionResult]] = {}
+PREDICTION_THROTTLE_SECONDS = 2.0
+
+
 def predict_symbol(
     symbol: str,
     timeframe: str = "15m",
@@ -127,6 +132,14 @@ def predict_symbol(
     Produce prediction for symbol using real ensemble models.
     ohlcv: raw candle list [{time, open, high, low, close, volume}, ...]
     """
+    now_time = time.time()
+    cache_key = f"{symbol}:{timeframe}"
+    if cache_key in _last_predictions:
+        ts, cached_res = _last_predictions[cache_key]
+        if now_time - ts < PREDICTION_THROTTLE_SECONDS:
+            logger.debug("[RUNNER] Serving throttled prediction cache for %s:%s", symbol, timeframe)
+            return cached_res
+
     base = latest_ltp or 1000.0
 
     # Build OHLCV DataFrame from raw candles
@@ -225,7 +238,11 @@ def predict_symbol(
 
     # Extract ML features from OHLCV if not provided
     if features_df is None and ohlcv and len(ohlcv) >= 50:
-        features_df = extract_features(ohlcv)
+        try:
+            features_df = compute_features(pd.DataFrame(ohlcv))
+        except Exception as exc:
+            logger.warning("[RUNNER] C++ feature computation failed for %s: %s", symbol, exc)
+            features_df = None
 
     # Prepare feature arrays for ML models
     if features_df is not None and len(features_df) > 0:
@@ -235,9 +252,9 @@ def predict_symbol(
         seq = np.zeros((20, 10))
         tab = np.zeros((1, 10))
 
-    res = ModelEnsemble.predict(symbol, base, seq, tab, ohlcv_df=ohlcv_df)
+    res = ModelEnsemble.predict(symbol, base, seq, tab, feature_df=features_df, ohlcv_df=ohlcv_df)
 
-    return PredictionResult(
+    final_res = PredictionResult(
         symbol=symbol,
         price=res["prediction"],
         signal=res["signal"],
@@ -324,3 +341,17 @@ def predict_symbol(
         factors=res["factors"],
         explanation=res["explanation"],
     )
+    # Memory stabilization: Keep prediction cache under 2,000 items and discard items older than 10 minutes
+    if len(_last_predictions) > 2000:
+        stale_keys = [k for k, (ts, _) in _last_predictions.items() if now_time - ts > 600.0]
+        for k in stale_keys:
+            _last_predictions.pop(k, None)
+        if len(_last_predictions) > 2000:
+            sorted_items = sorted(_last_predictions.items(), key=lambda x: x[1][0])
+            to_pop = len(_last_predictions) // 10
+            for k, _ in sorted_items[:to_pop]:
+                _last_predictions.pop(k, None)
+
+    _last_predictions[cache_key] = (now_time, final_res)
+    return final_res
+

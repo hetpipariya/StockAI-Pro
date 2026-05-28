@@ -118,7 +118,7 @@ class LiveExecutor:
         candles_df.ffill(inplace=True)
         candles_df.fillna(0, inplace=True)
 
-        feature_df = compute_features(candles_df.tail(200), include_legacy=True)
+        feature_df = compute_features(candles_df.tail(200))
         if feature_df.empty:
             return None
 
@@ -130,7 +130,7 @@ class LiveExecutor:
         ema_21 = float(latest_features.get("ema_21", 0.0))
         ema_50 = float(latest_features.get("ema_50", 0.0))
         rsi = float(latest_features.get("rsi_14", 0.0))
-        vol_spike = int(latest_features.get("volume_spike", 0))
+        vol_spike = int(float(latest_features.get("volume_ratio_20", 1.0)) >= 1.5)
         atr = float(latest_features.get("atr_14", 0.0))
 
         ml_pred, confidence = self._get_ml_prediction_and_proba(feature_df)

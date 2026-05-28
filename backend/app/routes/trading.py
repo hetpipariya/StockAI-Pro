@@ -21,6 +21,7 @@ from app import config
 from app.routes.auth import get_current_user
 from app.services.db import (OrderModel, PositionModel, TradeLogModel,
                              UserModel, get_async_session)
+from app.services.trade_decision_engine import evaluate_trade_decision
 from app.trading.candle_builder import candle_builder_15m, candle_builder_5m
 from app.trading.live_executor import get_executor
 from app.trading.live_executor_5m import get_executor_5m
@@ -143,6 +144,22 @@ async def execute_trade(
             "message": f"Position already open for {symbol.upper()}",
         }
 
+    decision_payload = await evaluate_trade_decision(
+        symbol=symbol.upper(),
+        interval="1m",
+        horizon="15m",
+        capital=float(current_user.starting_capital),
+        risk_per_trade=0.01,
+    )
+    if decision_payload.get("decision", {}).get("status") != "READY":
+        return {
+            "executed": False,
+            "symbol": symbol.upper(),
+            "message": "Trade blocked by decision engine",
+            "decision": decision_payload.get("decision"),
+            "reasons": decision_payload.get("decision", {}).get("reasons", []),
+        }
+
     executor = await asyncio.to_thread(
         get_executor,
         user_id=current_user.id,
@@ -209,6 +226,22 @@ async def execute_trade_5m(
             "executed": False,
             "symbol": symbol.upper(),
             "message": f"Position already open for {symbol.upper()}",
+        }
+
+    decision_payload = await evaluate_trade_decision(
+        symbol=symbol.upper(),
+        interval="5m",
+        horizon="15m",
+        capital=float(current_user.starting_capital),
+        risk_per_trade=0.01,
+    )
+    if decision_payload.get("decision", {}).get("status") != "READY":
+        return {
+            "executed": False,
+            "symbol": symbol.upper(),
+            "message": "Trade blocked by decision engine",
+            "decision": decision_payload.get("decision"),
+            "reasons": decision_payload.get("decision", {}).get("reasons", []),
         }
 
     executor = await asyncio.to_thread(
@@ -567,7 +600,7 @@ async def toggle_kill_switch(
 
     action = "ENABLED" if enable else "DISABLED"
     logger.warning(
-        f"[SAFETY] User {current_user.id} ({current_user.username}) "
+        f"[SAFETY] User {current_user.id} ({current_user.email}) "
         f"toggled kill-switch: trading {action}"
     )
     return {

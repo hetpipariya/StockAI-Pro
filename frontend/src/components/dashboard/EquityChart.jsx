@@ -15,7 +15,7 @@ const EquityChart = ({ data = [] }) => {
         <XAxis dataKey="time" stroke="#4b5563" />
         <YAxis stroke="#4b5563" />
         <Tooltip contentStyle={{ backgroundColor: '#0f1222', borderRadius: '8px' }} />
-        <Area type="monotone" dataKey="value" stroke="#3b82f6" fillUrl="url(#colorValue)" />
+        <Area type="monotone" dataKey="value" stroke="#3b82f6" fill="url(#colorValue)" />
       </AreaChart>
     </ResponsiveContainer>
   );

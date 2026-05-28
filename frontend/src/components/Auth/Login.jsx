@@ -16,7 +16,7 @@ import { useAuthStore } from '@/store/authStore';
  */
 export function Login() {
   const navigate = useNavigate();
-  const [username, setUsername] = useState('')
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [focusedField, setFocusedField] = useState(null)
@@ -39,11 +39,11 @@ export function Login() {
     e.preventDefault()
     clearError()
 
-    if (!username.trim() || !password) {
+    if (!email.trim() || !password) {
       return
     }
 
-    const result = await login(username, password)
+    const result = await login(email.trim().toLowerCase(), password)
     if (result.success) {
       // Navigation handled by useEffect watching isAuthenticated
       navigate('/dashboard', { replace: true })
@@ -55,7 +55,7 @@ export function Login() {
   // Clear error on input change
   useEffect(() => {
     if (error) clearError()
-  }, [username, password, clearError, error])
+  }, [email, password, clearError, error])
 
   return (
     <div className="min-h-screen bg-slate-950 flex items-center justify-center px-4 relative overflow-hidden">
@@ -102,20 +102,20 @@ export function Login() {
 
           {/* Form */}
           <form onSubmit={handleSubmit} className="space-y-5">
-            {/* Username Field */}
+            {/* Email Field */}
             <div>
               <label className="block text-xs uppercase tracking-wider text-slate-400 mb-2">
-                Username
+                Email
               </label>
               <motion.input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                onFocus={() => setFocusedField('username')}
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                onFocus={() => setFocusedField('email')}
                 onBlur={() => setFocusedField(null)}
-                placeholder="admin"
+                placeholder="admin@example.com"
                 className={`w-full px-4 py-3 rounded-lg bg-slate-800/50 border transition-all outline-none ${
-                  focusedField === 'username'
+                  focusedField === 'email'
                     ? 'border-blue-400 shadow-lg shadow-blue-500/20'
                     : 'border-slate-700 hover:border-slate-600'
                 } text-white placeholder-slate-500`}
@@ -158,7 +158,7 @@ export function Login() {
             {/* Submit Button */}
             <motion.button
               type="submit"
-              disabled={isLoading || !username || !password}
+              disabled={isLoading || !email || !password}
               className="w-full mt-8 px-4 py-3 rounded-lg font-semibold text-white uppercase tracking-wider transition-all disabled:opacity-50 disabled:cursor-not-allowed bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 shadow-lg hover:shadow-blue-500/50"
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.98 }}

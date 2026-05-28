@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { Link, Navigate, useNavigate } from 'react-router-dom';
+import { Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { useToast } from '../components/ui/Toast';
+import { useToast } from '../components/Toast';
 
 const getLoginErrorMessage = (error) => {
   if (!error) return 'Login failed. Please try again.';
@@ -16,7 +16,7 @@ export default function LoginPage() {
   const { isAuthenticated, login, isLoading } = useAuth();
   const { showToast } = useToast();
 
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -28,14 +28,14 @@ export default function LoginPage() {
     event.preventDefault();
     event.stopPropagation();
 
-    if (!username.trim() || !password) {
-      showToast('Username and password are required', 'warning');
+    if (!email.trim() || !password) {
+      showToast('Email and password are required', 'warning');
       return;
     }
 
     setSubmitting(true);
     try {
-      await login({ username: username.trim(), password });
+      await login({ email: email.trim().toLowerCase(), password });
       showToast('Login successful', 'success');
       navigate('/', { replace: true });
     } catch (error) {
@@ -67,12 +67,12 @@ export default function LoginPage() {
         </p>
 
         <label style={{ display: 'grid', gap: '6px' }}>
-          <span style={{ color: 'var(--text-secondary)', fontSize: '12px', textTransform: 'uppercase' }}>Username</span>
+          <span style={{ color: 'var(--text-secondary)', fontSize: '12px', textTransform: 'uppercase' }}>Email</span>
           <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="your_username"
-            autoComplete="username"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="you@example.com"
+            autoComplete="email"
             style={{
               background: 'var(--bg-interactive)',
               border: '1px solid var(--border-subtle)',
@@ -121,7 +121,7 @@ export default function LoginPage() {
         </button>
 
         <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '13px' }}>
-          No account? <Link to="/signup" style={{ color: 'var(--primary)' }}>Create one</Link>
+          Access is restricted to approved users. Contact the administrator if you need onboarding.
         </p>
       </form>
     </div>

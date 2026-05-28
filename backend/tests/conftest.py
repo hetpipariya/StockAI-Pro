@@ -102,7 +102,6 @@ def make_user_payload():
     def _make_user_payload(prefix: str = "user") -> dict:
         token = uuid4().hex[:10]
         return {
-            "username": f"{prefix}_{token}",
             "password": "SecurePass123",
             "email": f"{prefix}_{token}@example.com",
         }

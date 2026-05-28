@@ -1,5 +1,12 @@
 import { create } from 'zustand';
 import { AuthService } from '../api/services/auth.service.js';
+import {
+  clearStoredAuthTokens,
+  getStoredAccessToken,
+  getStoredAuthUser,
+  getStoredRefreshToken,
+  setStoredAuthTokens,
+} from '../utils/authStorage.js';
 
 const pickAuthData = (payload) => {
   if (!payload || typeof payload !== 'object') return null;
@@ -17,32 +24,45 @@ const pickUser = (payload) => {
   return payload;
 };
 
-export const useAuthStore = create((set) => ({
+export const useAuthStore = create((set, get) => ({
   user: null,
   error: null,
   isAuthenticated: false,
   isLoading: false,
+  loginCooldownUntil: 0,
 
   clearError: () => set({ error: null }),
 
   login: async (credentials, passwordArg) => {
-    const username = typeof credentials === 'object'
-      ? credentials?.username || credentials?.email || ''
+    const email = typeof credentials === 'object'
+      ? credentials?.email || credentials?.username || ''
       : credentials;
     const password = typeof credentials === 'object'
       ? credentials?.password || ''
       : passwordArg;
 
-    const normalizedUsername = String(username || '').trim().toLowerCase();
+    const normalizedEmail = String(email || '').trim().toLowerCase();
 
-    if (!normalizedUsername || !password) {
-      set({ error: 'Username and password are required', isAuthenticated: false });
+    const cooldownUntil = get().loginCooldownUntil || 0;
+    if (cooldownUntil && Date.now() < cooldownUntil) {
+      const remainingMs = Math.max(0, cooldownUntil - Date.now());
+      const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+      const minutes = Math.ceil(remainingSeconds / 60);
+      set({
+        error: `Too many login attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+        isAuthenticated: false,
+      });
+      return false;
+    }
+
+    if (!normalizedEmail || !password) {
+      set({ error: 'Email and password are required', isAuthenticated: false });
       return false;
     }
 
     set({ isLoading: true });
     try {
-      const payload = await AuthService.login(normalizedUsername, password);
+      const payload = await AuthService.login(normalizedEmail, password);
       const authData = pickAuthData(payload) || {};
 
       const accessToken = authData.access_token || authData.accessToken || authData.token;
@@ -53,16 +73,26 @@ export const useAuthStore = create((set) => ({
         throw new Error('Invalid login response from server');
       }
 
-      localStorage.setItem('access_token', accessToken);
-      if (refreshToken) {
-        localStorage.setItem('refresh_token', refreshToken);
-      } else {
-        localStorage.removeItem('refresh_token');
-      }
+      setStoredAuthTokens({ accessToken, refreshToken, user });
 
-      set({ user, isAuthenticated: true, isLoading: false, error: null });
+      set({ user, isAuthenticated: true, isLoading: false, error: null, loginCooldownUntil: 0 });
       return true;
     } catch (error) {
+      const status = error?.status ?? error?.response?.status;
+      if (status === 429) {
+        const retryAfter = Number(error?.response?.headers?.['retry-after']);
+        const cooldownSeconds = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 300;
+        const retryAt = Date.now() + cooldownSeconds * 1000;
+        const minutes = Math.max(1, Math.ceil(cooldownSeconds / 60));
+        set({
+          isLoading: false,
+          isAuthenticated: false,
+          loginCooldownUntil: retryAt,
+          error: `Too many login attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`,
+        });
+        return false;
+      }
+
       const rawMessage = String(error?.message || 'Login failed');
       let message = rawMessage;
 
@@ -79,27 +109,81 @@ export const useAuthStore = create((set) => ({
 
   logout: async () => {
     try { await AuthService.logout(); } finally {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('refresh_token');
+      clearStoredAuthTokens();
       set({ user: null, isAuthenticated: false, error: null });
     }
   },
 
+  signup: async ({ email, password }) => {
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    if (!normalizedEmail || !password || password.length < 8) {
+      const msg = 'Valid email and password (at least 8 characters) are required';
+      set({ error: msg, isAuthenticated: false });
+      throw new Error(msg);
+    }
+
+    set({ isLoading: true, error: null });
+    try {
+      const payload = await AuthService.register(normalizedEmail, password);
+      const authData = pickAuthData(payload) || {};
+
+      const accessToken = authData.access_token || authData.accessToken || authData.token;
+      const refreshToken = authData.refresh_token || authData.refreshToken || null;
+      let user = pickUser(authData);
+
+      if (!accessToken) {
+        const loginPayload = await AuthService.login(normalizedEmail, password);
+        const loginData = pickAuthData(loginPayload) || {};
+        const lt = loginData.access_token || loginData.accessToken;
+        if (!lt) {
+          throw new Error('Invalid signup response from server');
+        }
+        user = pickUser(loginData) || user;
+        setStoredAuthTokens({
+          accessToken: lt,
+          refreshToken: loginData.refresh_token || loginData.refreshToken || refreshToken,
+          user,
+        });
+        set({ user, isAuthenticated: true, isLoading: false, error: null });
+        return user;
+      }
+
+      setStoredAuthTokens({ accessToken, refreshToken, user });
+      set({ user, isAuthenticated: true, isLoading: false, error: null });
+      return user;
+    } catch (error) {
+      const rawMessage =
+        error?.response?.data?.detail ||
+        error?.response?.data?.message ||
+        error?.message ||
+        'Signup failed';
+      const message = typeof rawMessage === 'string' ? rawMessage : JSON.stringify(rawMessage);
+      set({ isLoading: false, isAuthenticated: false, error: message });
+      throw new Error(message);
+    }
+  },
+
   checkAuth: async () => {
-    const token = localStorage.getItem('access_token');
+    const token = getStoredAccessToken();
+    const storedUser = getStoredAuthUser();
+    const storedRefreshToken = getStoredRefreshToken();
     if (!token) {
       set({ isAuthenticated: false, user: null, error: null });
       return;
+    }
+
+    if (storedUser) {
+      set({ user: storedUser, isAuthenticated: true, error: null });
     }
 
     try {
       set({ isLoading: true });
       const payload = await AuthService.me();
       const user = pickUser(payload);
+      setStoredAuthTokens({ accessToken: token, refreshToken: storedRefreshToken, user });
       set({ user, isAuthenticated: true, isLoading: false, error: null });
     } catch {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('refresh_token');
+      clearStoredAuthTokens();
       set({ user: null, isAuthenticated: false, isLoading: false, error: null });
     }
   },
