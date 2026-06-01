@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: stockai-pgbouncer
+    ports:
+      - "6432:6432"
+    volumes:
+      - ./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    environment:
+      - DATABASE_URL=postgresql://postgres:Pipariya123@postgres:5432/trading_db
+    restart: always
+    networks:
+      - stockai-network
+
+networks:
+  stockai-network:
+    external: true
+    name: stockai-pro_default

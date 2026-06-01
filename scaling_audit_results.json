@@ -1,0 +1,956 @@
+{
+  "quant_engine": {
+    "tables": [
+      {
+        "table_name": "instruments",
+        "row_count": 150670,
+        "total_size": "52 MB",
+        "table_size": "31 MB",
+        "total_size_bytes": 54452224,
+        "table_size_bytes": 32268288
+      },
+      {
+        "table_name": "market_data",
+        "row_count": 4377,
+        "total_size": "840 kB",
+        "table_size": "440 kB",
+        "total_size_bytes": 860160,
+        "table_size_bytes": 450560
+      },
+      {
+        "table_name": "strategies",
+        "row_count": 1,
+        "total_size": "32 kB",
+        "table_size": "8192 bytes",
+        "total_size_bytes": 32768,
+        "table_size_bytes": 8192
+      },
+      {
+        "table_name": "download_jobs",
+        "row_count": 0,
+        "total_size": "32 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 32768,
+        "table_size_bytes": 0
+      },
+      {
+        "table_name": "bucket_symbols",
+        "row_count": 0,
+        "total_size": "32 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 32768,
+        "table_size_bytes": 0
+      },
+      {
+        "table_name": "system_config",
+        "row_count": 3,
+        "total_size": "32 kB",
+        "table_size": "8192 bytes",
+        "total_size_bytes": 32768,
+        "table_size_bytes": 8192
+      },
+      {
+        "table_name": "market_ticks",
+        "row_count": 0,
+        "total_size": "32 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 32768,
+        "table_size_bytes": 0
+      },
+      {
+        "table_name": "live_positions",
+        "row_count": 0,
+        "total_size": "32 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 32768,
+        "table_size_bytes": 0
+      },
+      {
+        "table_name": "live_trades",
+        "row_count": 0,
+        "total_size": "32 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 32768,
+        "table_size_bytes": 0
+      },
+      {
+        "table_name": "deployed_strategies",
+        "row_count": 0,
+        "total_size": "24 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 24576,
+        "table_size_bytes": 0
+      },
+      {
+        "table_name": "buckets",
+        "row_count": 0,
+        "total_size": "24 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 24576,
+        "table_size_bytes": 0
+      },
+      {
+        "table_name": "exchange_download_config",
+        "row_count": 0,
+        "total_size": "24 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 24576,
+        "table_size_bytes": 0
+      },
+      {
+        "table_name": "download_history",
+        "row_count": 0,
+        "total_size": "16 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 16384,
+        "table_size_bytes": 0
+      },
+      {
+        "table_name": "downloader_state",
+        "row_count": 0,
+        "total_size": "16 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 16384,
+        "table_size_bytes": 0
+      }
+    ],
+    "indexes": [
+      {
+        "table_name": "bucket_symbols",
+        "index_name": "bucket_symbols_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX bucket_symbols_pkey ON public.bucket_symbols USING btree (id)"
+      },
+      {
+        "table_name": "bucket_symbols",
+        "index_name": "ix_bucket_symbols_bucket_id",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_bucket_symbols_bucket_id ON public.bucket_symbols USING btree (bucket_id)"
+      },
+      {
+        "table_name": "bucket_symbols",
+        "index_name": "ix_bucket_symbols_instrument_key",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_bucket_symbols_instrument_key ON public.bucket_symbols USING btree (instrument_key)"
+      },
+      {
+        "table_name": "buckets",
+        "index_name": "buckets_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX buckets_pkey ON public.buckets USING btree (id)"
+      },
+      {
+        "table_name": "buckets",
+        "index_name": "ix_buckets_name",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX ix_buckets_name ON public.buckets USING btree (name)"
+      },
+      {
+        "table_name": "deployed_strategies",
+        "index_name": "deployed_strategies_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX deployed_strategies_pkey ON public.deployed_strategies USING btree (id)"
+      },
+      {
+        "table_name": "deployed_strategies",
+        "index_name": "ix_deployed_strategies_strategy_id",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_deployed_strategies_strategy_id ON public.deployed_strategies USING btree (strategy_id)"
+      },
+      {
+        "table_name": "download_history",
+        "index_name": "download_history_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX download_history_pkey ON public.download_history USING btree (id)"
+      },
+      {
+        "table_name": "download_jobs",
+        "index_name": "download_jobs_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX download_jobs_pkey ON public.download_jobs USING btree (id)"
+      },
+      {
+        "table_name": "download_jobs",
+        "index_name": "ix_download_jobs_exchange",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_download_jobs_exchange ON public.download_jobs USING btree (exchange)"
+      },
+      {
+        "table_name": "download_jobs",
+        "index_name": "ix_download_jobs_instrument_key",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_download_jobs_instrument_key ON public.download_jobs USING btree (instrument_key)"
+      },
+      {
+        "table_name": "downloader_state",
+        "index_name": "downloader_state_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX downloader_state_pkey ON public.downloader_state USING btree (id)"
+      },
+      {
+        "table_name": "exchange_download_config",
+        "index_name": "exchange_download_config_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX exchange_download_config_pkey ON public.exchange_download_config USING btree (id)"
+      },
+      {
+        "table_name": "exchange_download_config",
+        "index_name": "ix_exchange_download_config_exchange",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX ix_exchange_download_config_exchange ON public.exchange_download_config USING btree (exchange)"
+      },
+      {
+        "table_name": "instruments",
+        "index_name": "instruments_pkey",
+        "size": "8728 kB",
+        "definition": "CREATE UNIQUE INDEX instruments_pkey ON public.instruments USING btree (instrument_key)"
+      },
+      {
+        "table_name": "instruments",
+        "index_name": "ix_instruments_exchange",
+        "size": "2128 kB",
+        "definition": "CREATE INDEX ix_instruments_exchange ON public.instruments USING btree (exchange)"
+      },
+      {
+        "table_name": "instruments",
+        "index_name": "ix_instruments_tradingsymbol",
+        "size": "10 MB",
+        "definition": "CREATE INDEX ix_instruments_tradingsymbol ON public.instruments USING btree (tradingsymbol)"
+      },
+      {
+        "table_name": "live_positions",
+        "index_name": "ix_live_positions_deployment_id",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_live_positions_deployment_id ON public.live_positions USING btree (deployment_id)"
+      },
+      {
+        "table_name": "live_positions",
+        "index_name": "ix_live_positions_symbol",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_live_positions_symbol ON public.live_positions USING btree (symbol)"
+      },
+      {
+        "table_name": "live_positions",
+        "index_name": "live_positions_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX live_positions_pkey ON public.live_positions USING btree (id)"
+      },
+      {
+        "table_name": "live_trades",
+        "index_name": "ix_live_trades_deployment_id",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_live_trades_deployment_id ON public.live_trades USING btree (deployment_id)"
+      },
+      {
+        "table_name": "live_trades",
+        "index_name": "ix_live_trades_symbol",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_live_trades_symbol ON public.live_trades USING btree (symbol)"
+      },
+      {
+        "table_name": "live_trades",
+        "index_name": "live_trades_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX live_trades_pkey ON public.live_trades USING btree (id)"
+      },
+      {
+        "table_name": "market_data",
+        "index_name": "market_data_pkey",
+        "size": "360 kB",
+        "definition": "CREATE UNIQUE INDEX market_data_pkey ON public.market_data USING btree (\"time\", symbol, timeframe)"
+      },
+      {
+        "table_name": "market_ticks",
+        "index_name": "ix_market_ticks_symbol",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_market_ticks_symbol ON public.market_ticks USING btree (symbol)"
+      },
+      {
+        "table_name": "market_ticks",
+        "index_name": "ix_market_ticks_time",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_market_ticks_time ON public.market_ticks USING btree (\"time\")"
+      },
+      {
+        "table_name": "market_ticks",
+        "index_name": "market_ticks_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX market_ticks_pkey ON public.market_ticks USING btree (id)"
+      },
+      {
+        "table_name": "strategies",
+        "index_name": "strategies_pkey",
+        "size": "16 kB",
+        "definition": "CREATE UNIQUE INDEX strategies_pkey ON public.strategies USING btree (id)"
+      },
+      {
+        "table_name": "system_config",
+        "index_name": "system_config_pkey",
+        "size": "16 kB",
+        "definition": "CREATE UNIQUE INDEX system_config_pkey ON public.system_config USING btree (key)"
+      }
+    ],
+    "foreign_keys": [
+      {
+        "table_name": "live_positions",
+        "column_name": "deployment_id",
+        "foreign_table": "deployed_strategies",
+        "foreign_column": "id"
+      },
+      {
+        "table_name": "live_trades",
+        "column_name": "deployment_id",
+        "foreign_table": "deployed_strategies",
+        "foreign_column": "id"
+      },
+      {
+        "table_name": "bucket_symbols",
+        "column_name": "bucket_id",
+        "foreign_table": "buckets",
+        "foreign_column": "id"
+      }
+    ],
+    "duplicates": [],
+    "unused": [
+      {
+        "table_name": "public.instruments",
+        "index_name": "ix_instruments_tradingsymbol",
+        "scans": 0,
+        "size": "10 MB"
+      },
+      {
+        "table_name": "public.download_jobs",
+        "index_name": "ix_download_jobs_exchange",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.download_jobs",
+        "index_name": "ix_download_jobs_instrument_key",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.deployed_strategies",
+        "index_name": "ix_deployed_strategies_strategy_id",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.market_ticks",
+        "index_name": "ix_market_ticks_time",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.market_ticks",
+        "index_name": "ix_market_ticks_symbol",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.live_positions",
+        "index_name": "ix_live_positions_deployment_id",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.live_positions",
+        "index_name": "ix_live_positions_symbol",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.live_trades",
+        "index_name": "ix_live_trades_symbol",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.live_trades",
+        "index_name": "ix_live_trades_deployment_id",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.bucket_symbols",
+        "index_name": "ix_bucket_symbols_instrument_key",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.bucket_symbols",
+        "index_name": "ix_bucket_symbols_bucket_id",
+        "scans": 0,
+        "size": "8192 bytes"
+      }
+    ]
+  },
+  "trading_db": {
+    "tables": [
+      {
+        "table_name": "instruments",
+        "row_count": 168262,
+        "total_size": "69 MB",
+        "table_size": "25 MB",
+        "total_size_bytes": 72335360,
+        "table_size_bytes": 26517504
+      },
+      {
+        "table_name": "candles",
+        "row_count": 21732,
+        "total_size": "6616 kB",
+        "table_size": "2160 kB",
+        "total_size_bytes": 6774784,
+        "table_size_bytes": 2211840
+      },
+      {
+        "table_name": "predictions",
+        "row_count": 915,
+        "total_size": "760 kB",
+        "table_size": "560 kB",
+        "total_size_bytes": 778240,
+        "table_size_bytes": 573440
+      },
+      {
+        "table_name": "orders",
+        "row_count": 1,
+        "total_size": "144 kB",
+        "table_size": "8192 bytes",
+        "total_size_bytes": 147456,
+        "table_size_bytes": 8192
+      },
+      {
+        "table_name": "user_trading_state",
+        "row_count": 3,
+        "total_size": "80 kB",
+        "table_size": "8192 bytes",
+        "total_size_bytes": 81920,
+        "table_size_bytes": 8192
+      },
+      {
+        "table_name": "positions",
+        "row_count": 1,
+        "total_size": "72 kB",
+        "table_size": "8192 bytes",
+        "total_size_bytes": 73728,
+        "table_size_bytes": 8192
+      },
+      {
+        "table_name": "trade_logs",
+        "row_count": 0,
+        "total_size": "64 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 65536,
+        "table_size_bytes": 0
+      },
+      {
+        "table_name": "users",
+        "row_count": 3,
+        "total_size": "48 kB",
+        "table_size": "8192 bytes",
+        "total_size_bytes": 49152,
+        "table_size_bytes": 8192
+      },
+      {
+        "table_name": "daily_risk_state",
+        "row_count": 1,
+        "total_size": "24 kB",
+        "table_size": "8192 bytes",
+        "total_size_bytes": 24576,
+        "table_size_bytes": 8192
+      },
+      {
+        "table_name": "trades",
+        "row_count": 0,
+        "total_size": "24 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 24576,
+        "table_size_bytes": 0
+      },
+      {
+        "table_name": "order_states",
+        "row_count": 0,
+        "total_size": "16 kB",
+        "table_size": "0 bytes",
+        "total_size_bytes": 16384,
+        "table_size_bytes": 0
+      }
+    ],
+    "indexes": [
+      {
+        "table_name": "candles",
+        "index_name": "candles_pkey",
+        "size": "688 kB",
+        "definition": "CREATE UNIQUE INDEX candles_pkey ON public.candles USING btree (id)"
+      },
+      {
+        "table_name": "candles",
+        "index_name": "ix_candle_lookup",
+        "size": "1344 kB",
+        "definition": "CREATE INDEX ix_candle_lookup ON public.candles USING btree (symbol, timeframe, \"timestamp\")"
+      },
+      {
+        "table_name": "candles",
+        "index_name": "ix_candle_timeframe",
+        "size": "224 kB",
+        "definition": "CREATE INDEX ix_candle_timeframe ON public.candles USING btree (timeframe)"
+      },
+      {
+        "table_name": "candles",
+        "index_name": "ix_candles_symbol",
+        "size": "264 kB",
+        "definition": "CREATE INDEX ix_candles_symbol ON public.candles USING btree (symbol)"
+      },
+      {
+        "table_name": "candles",
+        "index_name": "ix_candles_timeframe",
+        "size": "224 kB",
+        "definition": "CREATE INDEX ix_candles_timeframe ON public.candles USING btree (timeframe)"
+      },
+      {
+        "table_name": "candles",
+        "index_name": "ix_candles_timestamp",
+        "size": "344 kB",
+        "definition": "CREATE INDEX ix_candles_timestamp ON public.candles USING btree (\"timestamp\")"
+      },
+      {
+        "table_name": "candles",
+        "index_name": "uq_candle",
+        "size": "1336 kB",
+        "definition": "CREATE UNIQUE INDEX uq_candle ON public.candles USING btree (symbol, timeframe, \"timestamp\")"
+      },
+      {
+        "table_name": "daily_risk_state",
+        "index_name": "daily_risk_state_pkey",
+        "size": "16 kB",
+        "definition": "CREATE UNIQUE INDEX daily_risk_state_pkey ON public.daily_risk_state USING btree (date)"
+      },
+      {
+        "table_name": "instruments",
+        "index_name": "instruments_pkey",
+        "size": "3712 kB",
+        "definition": "CREATE UNIQUE INDEX instruments_pkey ON public.instruments USING btree (id)"
+      },
+      {
+        "table_name": "instruments",
+        "index_name": "ix_instruments_exchange_symbol",
+        "size": "12 MB",
+        "definition": "CREATE INDEX ix_instruments_exchange_symbol ON public.instruments USING btree (exchange, symbol)"
+      },
+      {
+        "table_name": "instruments",
+        "index_name": "ix_instruments_exchange_token",
+        "size": "7720 kB",
+        "definition": "CREATE INDEX ix_instruments_exchange_token ON public.instruments USING btree (exchange, token)"
+      },
+      {
+        "table_name": "instruments",
+        "index_name": "uq_instruments_exchange_symbol",
+        "size": "12 MB",
+        "definition": "CREATE UNIQUE INDEX uq_instruments_exchange_symbol ON public.instruments USING btree (exchange, symbol)"
+      },
+      {
+        "table_name": "instruments",
+        "index_name": "uq_instruments_exchange_token",
+        "size": "7720 kB",
+        "definition": "CREATE UNIQUE INDEX uq_instruments_exchange_token ON public.instruments USING btree (exchange, token)"
+      },
+      {
+        "table_name": "order_states",
+        "index_name": "ix_order_states_order_id",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_order_states_order_id ON public.order_states USING btree (order_id)"
+      },
+      {
+        "table_name": "order_states",
+        "index_name": "order_states_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX order_states_pkey ON public.order_states USING btree (id)"
+      },
+      {
+        "table_name": "orders",
+        "index_name": "ix_orders_order_id",
+        "size": "16 kB",
+        "definition": "CREATE UNIQUE INDEX ix_orders_order_id ON public.orders USING btree (order_id)"
+      },
+      {
+        "table_name": "orders",
+        "index_name": "ix_orders_symbol",
+        "size": "16 kB",
+        "definition": "CREATE INDEX ix_orders_symbol ON public.orders USING btree (symbol)"
+      },
+      {
+        "table_name": "orders",
+        "index_name": "ix_orders_timestamp",
+        "size": "16 kB",
+        "definition": "CREATE INDEX ix_orders_timestamp ON public.orders USING btree (\"timestamp\")"
+      },
+      {
+        "table_name": "orders",
+        "index_name": "ix_orders_user_id",
+        "size": "16 kB",
+        "definition": "CREATE INDEX ix_orders_user_id ON public.orders USING btree (user_id)"
+      },
+      {
+        "table_name": "orders",
+        "index_name": "ix_orders_user_status",
+        "size": "16 kB",
+        "definition": "CREATE INDEX ix_orders_user_status ON public.orders USING btree (user_id, status)"
+      },
+      {
+        "table_name": "orders",
+        "index_name": "ix_orders_user_symbol",
+        "size": "16 kB",
+        "definition": "CREATE INDEX ix_orders_user_symbol ON public.orders USING btree (user_id, symbol)"
+      },
+      {
+        "table_name": "orders",
+        "index_name": "ix_orders_user_timestamp",
+        "size": "16 kB",
+        "definition": "CREATE INDEX ix_orders_user_timestamp ON public.orders USING btree (user_id, \"timestamp\")"
+      },
+      {
+        "table_name": "orders",
+        "index_name": "orders_pkey",
+        "size": "16 kB",
+        "definition": "CREATE UNIQUE INDEX orders_pkey ON public.orders USING btree (id)"
+      },
+      {
+        "table_name": "positions",
+        "index_name": "ix_positions_symbol",
+        "size": "16 kB",
+        "definition": "CREATE INDEX ix_positions_symbol ON public.positions USING btree (symbol)"
+      },
+      {
+        "table_name": "positions",
+        "index_name": "ix_positions_user_id",
+        "size": "16 kB",
+        "definition": "CREATE INDEX ix_positions_user_id ON public.positions USING btree (user_id)"
+      },
+      {
+        "table_name": "positions",
+        "index_name": "positions_pkey",
+        "size": "16 kB",
+        "definition": "CREATE UNIQUE INDEX positions_pkey ON public.positions USING btree (id)"
+      },
+      {
+        "table_name": "positions",
+        "index_name": "uq_position_user_symbol",
+        "size": "16 kB",
+        "definition": "CREATE UNIQUE INDEX uq_position_user_symbol ON public.positions USING btree (user_id, symbol)"
+      },
+      {
+        "table_name": "predictions",
+        "index_name": "ix_predictions_symbol",
+        "size": "16 kB",
+        "definition": "CREATE INDEX ix_predictions_symbol ON public.predictions USING btree (symbol)"
+      },
+      {
+        "table_name": "predictions",
+        "index_name": "ix_predictions_symbol_timestamp",
+        "size": "56 kB",
+        "definition": "CREATE INDEX ix_predictions_symbol_timestamp ON public.predictions USING btree (symbol, \"timestamp\")"
+      },
+      {
+        "table_name": "predictions",
+        "index_name": "ix_predictions_timestamp",
+        "size": "40 kB",
+        "definition": "CREATE INDEX ix_predictions_timestamp ON public.predictions USING btree (\"timestamp\")"
+      },
+      {
+        "table_name": "predictions",
+        "index_name": "ix_predictions_user_id",
+        "size": "16 kB",
+        "definition": "CREATE INDEX ix_predictions_user_id ON public.predictions USING btree (user_id)"
+      },
+      {
+        "table_name": "predictions",
+        "index_name": "predictions_pkey",
+        "size": "40 kB",
+        "definition": "CREATE UNIQUE INDEX predictions_pkey ON public.predictions USING btree (id)"
+      },
+      {
+        "table_name": "trade_logs",
+        "index_name": "ix_trade_logs_order_id",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_trade_logs_order_id ON public.trade_logs USING btree (order_id)"
+      },
+      {
+        "table_name": "trade_logs",
+        "index_name": "ix_trade_logs_symbol",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_trade_logs_symbol ON public.trade_logs USING btree (symbol)"
+      },
+      {
+        "table_name": "trade_logs",
+        "index_name": "ix_trade_logs_timestamp",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_trade_logs_timestamp ON public.trade_logs USING btree (\"timestamp\")"
+      },
+      {
+        "table_name": "trade_logs",
+        "index_name": "ix_trade_logs_user_id",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_trade_logs_user_id ON public.trade_logs USING btree (user_id)"
+      },
+      {
+        "table_name": "trade_logs",
+        "index_name": "ix_trade_logs_user_symbol",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_trade_logs_user_symbol ON public.trade_logs USING btree (user_id, symbol)"
+      },
+      {
+        "table_name": "trade_logs",
+        "index_name": "ix_trade_logs_user_timestamp",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_trade_logs_user_timestamp ON public.trade_logs USING btree (user_id, \"timestamp\")"
+      },
+      {
+        "table_name": "trade_logs",
+        "index_name": "trade_logs_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX trade_logs_pkey ON public.trade_logs USING btree (id)"
+      },
+      {
+        "table_name": "trades",
+        "index_name": "ix_trades_created_at",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_trades_created_at ON public.trades USING btree (created_at)"
+      },
+      {
+        "table_name": "trades",
+        "index_name": "ix_trades_symbol",
+        "size": "8192 bytes",
+        "definition": "CREATE INDEX ix_trades_symbol ON public.trades USING btree (symbol)"
+      },
+      {
+        "table_name": "trades",
+        "index_name": "trades_pkey",
+        "size": "8192 bytes",
+        "definition": "CREATE UNIQUE INDEX trades_pkey ON public.trades USING btree (id)"
+      },
+      {
+        "table_name": "user_trading_state",
+        "index_name": "ix_user_trading_state_last_updated",
+        "size": "16 kB",
+        "definition": "CREATE INDEX ix_user_trading_state_last_updated ON public.user_trading_state USING btree (last_updated)"
+      },
+      {
+        "table_name": "user_trading_state",
+        "index_name": "ix_user_trading_state_user_id",
+        "size": "16 kB",
+        "definition": "CREATE UNIQUE INDEX ix_user_trading_state_user_id ON public.user_trading_state USING btree (user_id)"
+      },
+      {
+        "table_name": "user_trading_state",
+        "index_name": "uq_user_trading_state_user_id",
+        "size": "16 kB",
+        "definition": "CREATE UNIQUE INDEX uq_user_trading_state_user_id ON public.user_trading_state USING btree (user_id)"
+      },
+      {
+        "table_name": "user_trading_state",
+        "index_name": "user_trading_state_pkey",
+        "size": "16 kB",
+        "definition": "CREATE UNIQUE INDEX user_trading_state_pkey ON public.user_trading_state USING btree (id)"
+      },
+      {
+        "table_name": "users",
+        "index_name": "ix_users_email",
+        "size": "16 kB",
+        "definition": "CREATE UNIQUE INDEX ix_users_email ON public.users USING btree (email)"
+      },
+      {
+        "table_name": "users",
+        "index_name": "users_pkey",
+        "size": "16 kB",
+        "definition": "CREATE UNIQUE INDEX users_pkey ON public.users USING btree (id)"
+      }
+    ],
+    "foreign_keys": [
+      {
+        "table_name": "user_trading_state",
+        "column_name": "user_id",
+        "foreign_table": "users",
+        "foreign_column": "id"
+      },
+      {
+        "table_name": "orders",
+        "column_name": "user_id",
+        "foreign_table": "users",
+        "foreign_column": "id"
+      },
+      {
+        "table_name": "positions",
+        "column_name": "user_id",
+        "foreign_table": "users",
+        "foreign_column": "id"
+      },
+      {
+        "table_name": "trade_logs",
+        "column_name": "user_id",
+        "foreign_table": "users",
+        "foreign_column": "id"
+      },
+      {
+        "table_name": "predictions",
+        "column_name": "user_id",
+        "foreign_table": "users",
+        "foreign_column": "id"
+      }
+    ],
+    "duplicates": [
+      {
+        "table_name": "candles",
+        "index1": "uq_candle",
+        "index2": "ix_candle_lookup",
+        "def1": "CREATE UNIQUE INDEX uq_candle ON public.candles USING btree (symbol, timeframe, \"timestamp\")",
+        "def2": "CREATE INDEX ix_candle_lookup ON public.candles USING btree (symbol, timeframe, \"timestamp\")"
+      },
+      {
+        "table_name": "candles",
+        "index1": "ix_candles_timeframe",
+        "index2": "ix_candle_timeframe",
+        "def1": "CREATE INDEX ix_candles_timeframe ON public.candles USING btree (timeframe)",
+        "def2": "CREATE INDEX ix_candle_timeframe ON public.candles USING btree (timeframe)"
+      },
+      {
+        "table_name": "instruments",
+        "index1": "uq_instruments_exchange_symbol",
+        "index2": "ix_instruments_exchange_symbol",
+        "def1": "CREATE UNIQUE INDEX uq_instruments_exchange_symbol ON public.instruments USING btree (exchange, symbol)",
+        "def2": "CREATE INDEX ix_instruments_exchange_symbol ON public.instruments USING btree (exchange, symbol)"
+      },
+      {
+        "table_name": "instruments",
+        "index1": "uq_instruments_exchange_token",
+        "index2": "ix_instruments_exchange_token",
+        "def1": "CREATE UNIQUE INDEX uq_instruments_exchange_token ON public.instruments USING btree (exchange, token)",
+        "def2": "CREATE INDEX ix_instruments_exchange_token ON public.instruments USING btree (exchange, token)"
+      },
+      {
+        "table_name": "user_trading_state",
+        "index1": "uq_user_trading_state_user_id",
+        "index2": "ix_user_trading_state_user_id",
+        "def1": "CREATE UNIQUE INDEX uq_user_trading_state_user_id ON public.user_trading_state USING btree (user_id)",
+        "def2": "CREATE UNIQUE INDEX ix_user_trading_state_user_id ON public.user_trading_state USING btree (user_id)"
+      }
+    ],
+    "unused": [
+      {
+        "table_name": "public.instruments",
+        "index_name": "ix_instruments_exchange_symbol",
+        "scans": 0,
+        "size": "12 MB"
+      },
+      {
+        "table_name": "public.instruments",
+        "index_name": "ix_instruments_exchange_token",
+        "scans": 0,
+        "size": "7720 kB"
+      },
+      {
+        "table_name": "public.candles",
+        "index_name": "ix_candles_timeframe",
+        "scans": 0,
+        "size": "224 kB"
+      },
+      {
+        "table_name": "public.predictions",
+        "index_name": "ix_predictions_symbol_timestamp",
+        "scans": 0,
+        "size": "56 kB"
+      },
+      {
+        "table_name": "public.predictions",
+        "index_name": "ix_predictions_symbol",
+        "scans": 0,
+        "size": "16 kB"
+      },
+      {
+        "table_name": "public.positions",
+        "index_name": "ix_positions_symbol",
+        "scans": 0,
+        "size": "16 kB"
+      },
+      {
+        "table_name": "public.user_trading_state",
+        "index_name": "ix_user_trading_state_last_updated",
+        "scans": 0,
+        "size": "16 kB"
+      },
+      {
+        "table_name": "public.orders",
+        "index_name": "ix_orders_user_status",
+        "scans": 0,
+        "size": "16 kB"
+      },
+      {
+        "table_name": "public.orders",
+        "index_name": "ix_orders_symbol",
+        "scans": 0,
+        "size": "16 kB"
+      },
+      {
+        "table_name": "public.orders",
+        "index_name": "ix_orders_timestamp",
+        "scans": 0,
+        "size": "16 kB"
+      },
+      {
+        "table_name": "public.orders",
+        "index_name": "ix_orders_user_id",
+        "scans": 0,
+        "size": "16 kB"
+      },
+      {
+        "table_name": "public.trade_logs",
+        "index_name": "ix_trade_logs_symbol",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.trades",
+        "index_name": "ix_trades_created_at",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.order_states",
+        "index_name": "ix_order_states_order_id",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.trade_logs",
+        "index_name": "ix_trade_logs_user_symbol",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.trade_logs",
+        "index_name": "ix_trade_logs_user_id",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.trades",
+        "index_name": "ix_trades_symbol",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.trade_logs",
+        "index_name": "ix_trade_logs_order_id",
+        "scans": 0,
+        "size": "8192 bytes"
+      },
+      {
+        "table_name": "public.trade_logs",
+        "index_name": "ix_trade_logs_timestamp",
+        "scans": 0,
+        "size": "8192 bytes"
+      }
+    ]
+  }
+}

@@ -1,0 +1,173 @@
+version: '3.9'
+
+# ====================================================================
+# STOCKAI PRO - High Availability (HA) & Failure Recovery Compose Stack
+# Production-ready clustering for Postgres (Patroni), PgBouncer, Nginx,
+# and Redis Sentinel.
+# ====================================================================
+
+services:
+  # ========== DCS (Consensus for Patroni) ==========
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.9
+    container_name: stockai_etcd
+    restart: unless-stopped
+    command: >
+      etcd --name etcd0
+      --initial-advertise-peer-urls http://etcd:2380
+      --listen-peer-urls http://0.0.0.0:2380
+      --listen-client-urls http://0.0.0.0:2379
+      --advertise-client-urls http://etcd:2379
+      --initial-cluster etcd0=http://etcd:2380
+      --initial-cluster-state new
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    networks:
+      - stockai
+
+  # ========== PATRONI TIMESCALEDB HA CLUSTER ==========
+  pg-node-1:
+    image: timescale/timescaledb:latest-pg15
+    container_name: stockai_pg_node_1
+    restart: unless-stopped
+    environment:
+      PATRONI_NAME: pg-node-1
+      PATRONI_ETCD3_HOSTS: etcd:2379
+      PATRONI_SCOPE: stockai_postgres_cluster
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data/patroni
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: Pipariya123
+      POSTGRES_DB: stockai
+    volumes:
+      - pgdata_ha_1:/var/lib/postgresql/data
+    depends_on:
+      etcd:
+        condition: service_healthy
+    networks:
+      - stockai
+
+  pg-node-2:
+    image: timescale/timescaledb:latest-pg15
+    container_name: stockai_pg_node_2
+    restart: unless-stopped
+    environment:
+      PATRONI_NAME: pg-node-2
+      PATRONI_ETCD3_HOSTS: etcd:2379
+      PATRONI_SCOPE: stockai_postgres_cluster
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data/patroni
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: Pipariya123
+      POSTGRES_DB: stockai
+    volumes:
+      - pgdata_ha_2:/var/lib/postgresql/data
+    depends_on:
+      etcd:
+        condition: service_healthy
+    networks:
+      - stockai
+
+  pg-node-3:
+    image: timescale/timescaledb:latest-pg15
+    container_name: stockai_pg_node_3
+    restart: unless-stopped
+    environment:
+      PATRONI_NAME: pg-node-3
+      PATRONI_ETCD3_HOSTS: etcd:2379
+      PATRONI_SCOPE: stockai_postgres_cluster
+      PATRONI_POSTGRESQL_LISTEN: 0.0.0.0:5432
+      PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data/patroni
+      PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: Pipariya123
+      POSTGRES_DB: stockai
+    volumes:
+      - pgdata_ha_3:/var/lib/postgresql/data
+    depends_on:
+      etcd:
+        condition: service_healthy
+    networks:
+      - stockai
+
+  # ========== HIGH AVAILABILITY PGBOUNCERS ==========
+  pgbouncer-1:
+    image: edoburu/pgbouncer:latest
+    container_name: stockai_pgbouncer_1
+    restart: unless-stopped
+    ports:
+      - "6431:6432"
+    volumes:
+      - ./infra/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./infra/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    networks:
+      - stockai
+
+  pgbouncer-2:
+    image: edoburu/pgbouncer:latest
+    container_name: stockai_pgbouncer_2
+    restart: unless-stopped
+    ports:
+      - "6432:6432"
+    volumes:
+      - ./infra/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./infra/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    networks:
+      - stockai
+
+  # ========== REDIS SENTINEL HA ==========
+  redis-master:
+    image: redis:7-alpine
+    container_name: stockai_redis_master_ha
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    networks:
+      - stockai
+
+  redis-replica:
+    image: redis:7-alpine
+    container_name: stockai_redis_replica_ha
+    restart: unless-stopped
+    command: redis-server --replicaof redis-master 6379 --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    depends_on:
+      - redis-master
+    networks:
+      - stockai
+
+  redis-sentinel:
+    image: redis:7-alpine
+    container_name: stockai_redis_sentinel_ha
+    restart: unless-stopped
+    command: >
+      sh -c "echo 'port 26379' > /data/sentinel.conf &&
+             echo 'sentinel monitor mymaster redis-master 6379 2' >> /data/sentinel.conf &&
+             echo 'sentinel down-after-milliseconds mymaster 2000' >> /data/sentinel.conf &&
+             echo 'sentinel failover-timeout mymaster 3000' >> /data/sentinel.conf &&
+             echo 'sentinel parallel-syncs mymaster 1' >> /data/sentinel.conf &&
+             redis-server /data/sentinel.conf --sentinel"
+    depends_on:
+      - redis-master
+      - redis-replica
+    ports:
+      - "26379:26379"
+    networks:
+      - stockai
+
+# ========== NETWORKS ==========
+networks:
+  stockai:
+    driver: bridge
+
+# ========== VOLUMES ==========
+volumes:
+  pgdata_ha_1:
+    driver: local
+  pgdata_ha_2:
+    driver: local
+  pgdata_ha_3:
+    driver: local
