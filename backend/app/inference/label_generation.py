@@ -237,58 +237,109 @@ def temporal_train_val_test_split(
     test_ratio: float = TEST_RATIO,
 ) -> TrainValTestSplit:
     """
-    Create temporal train/validation/test split.
+    Create temporal train/validation/test split using strict calendar dates.
     
-    NO RANDOM SHUFFLE — Time-series split only.
-    
-    Args:
-        features: Feature DataFrame
-        labels: Label Series
-        train_ratio: Fraction for training (0.70)
-        val_ratio: Fraction for validation (0.15)
-        test_ratio: Fraction for testing (0.15)
-    
-    Returns:
-        TrainValTestSplit with train/val/test data
+    Splits PER SYMBOL and chronologically to avoid any chronological or cross-asset leakage,
+    only concatenating AFTER partitioning.
     """
-    n = len(features)
+    df = features.copy()
+    df["_label_"] = labels.values
 
-    # Calculate split indices
-    train_end = int(n * train_ratio)
-    val_end = train_end + int(n * val_ratio)
-    test_end = n
+    # Determine date column or index
+    if "timestamp" not in df.columns:
+        if isinstance(df.index, pd.DatetimeIndex):
+            df["timestamp"] = df.index
+        else:
+            logger.warning("[SPLIT] No 'timestamp' column or DatetimeIndex found. Slicing by ratio indices (Caution: Leakage risk).")
+            n = len(features)
+            train_end = int(n * train_ratio)
+            val_end = train_end + int(n * val_ratio)
+            train_idx = np.arange(0, train_end)
+            val_idx = np.arange(train_end, val_end)
+            test_idx = np.arange(val_end, n)
+            
+            return TrainValTestSplit(
+                train_features=features.iloc[train_idx].copy(),
+                train_labels=labels.iloc[train_idx].copy(),
+                val_features=features.iloc[val_idx].copy(),
+                val_labels=labels.iloc[val_idx].copy(),
+                test_features=features.iloc[test_idx].copy(),
+                test_labels=labels.iloc[test_idx].copy(),
+                train_indices=train_idx,
+                val_indices=val_idx,
+                test_indices=test_idx,
+                split_dates={},
+            )
 
-    # Ensure minimum samples
-    if train_end - 0 < MIN_TRAIN_SAMPLES:
-        logger.warning(f"[TRAIN-VAL-TEST] Train set < {MIN_TRAIN_SAMPLES} samples")
-    if val_end - train_end < MIN_VAL_SAMPLES:
-        logger.warning(f"[TRAIN-VAL-TEST] Val set < {MIN_VAL_SAMPLES} samples")
-    if test_end - val_end < MIN_TEST_SAMPLES:
-        logger.warning(f"[TRAIN-VAL-TEST] Test set < {MIN_TEST_SAMPLES} samples")
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    
+    if "symbol" not in df.columns:
+        df["symbol"] = "SINGLE_ASSET"
 
-    # Split indices
-    train_idx = np.arange(0, train_end)
-    val_idx = np.arange(train_end, val_end)
-    test_idx = np.arange(val_end, test_end)
+    # Define calendar boundaries dynamically based on data timelines
+    min_date = df["timestamp"].min()
+    max_date = df["timestamp"].max()
+    tz = max_date.tz
+    
+    if max_date.year >= 2026:
+        # For Oct 2025 - Apr 2026 data timeline
+        train_end_dt = pd.to_datetime("2026-02-07").tz_localize(tz) if tz else pd.to_datetime("2026-02-07")
+        val_end_dt = pd.to_datetime("2026-03-07").tz_localize(tz) if tz else pd.to_datetime("2026-03-07")
+    else:
+        # Standard calendar split for 2020-2025 timelines
+        train_end_dt = pd.to_datetime("2024-12-31").tz_localize(tz) if tz else pd.to_datetime("2024-12-31")
+        val_end_dt = pd.to_datetime("2025-06-30").tz_localize(tz) if tz else pd.to_datetime("2025-06-30")
 
-    # Extract data
-    train_features = features.iloc[train_idx].copy()
-    train_labels = labels.iloc[train_idx].copy()
+    # Fallback to proportional calendar splitting if dates are too narrow or start after milestones
+    total_days = (max_date - min_date).days
+    if total_days < 10 or min_date > train_end_dt or train_end_dt >= max_date or val_end_dt >= max_date:
+        train_end_dt = min_date + pd.Timedelta(days=int(total_days * train_ratio))
+        val_end_dt = train_end_dt + pd.Timedelta(days=int(total_days * val_ratio))
 
-    val_features = features.iloc[val_idx].copy()
-    val_labels = labels.iloc[val_idx].copy()
+    train_dfs = []
+    val_dfs = []
+    test_dfs = []
 
-    test_features = features.iloc[test_idx].copy()
-    test_labels = labels.iloc[test_idx].copy()
+    # Keep track of absolute original integer indices in the original features DataFrame
+    df["_orig_idx_"] = np.arange(len(df))
 
-    # Extract dates if available
+    # Split strictly per symbol to prevent any cross-asset or temporal leakage
+    for sym, group in df.groupby("symbol", sort=False):
+        group_sorted = group.sort_values("timestamp")
+        
+        train_mask = group_sorted["timestamp"] <= train_end_dt
+        val_mask = (group_sorted["timestamp"] > train_end_dt) & (group_sorted["timestamp"] <= val_end_dt)
+        test_mask = group_sorted["timestamp"] > val_end_dt
+        
+        train_dfs.append(group_sorted[train_mask])
+        val_dfs.append(group_sorted[val_mask])
+        test_dfs.append(group_sorted[test_mask])
+
+    train_combined = pd.concat(train_dfs, ignore_index=True) if train_dfs else pd.DataFrame()
+    val_combined = pd.concat(val_dfs, ignore_index=True) if val_dfs else pd.DataFrame()
+    test_combined = pd.concat(test_dfs, ignore_index=True) if test_dfs else pd.DataFrame()
+
+    train_idx = train_combined["_orig_idx_"].to_numpy()
+    val_idx = val_combined["_orig_idx_"].to_numpy()
+    test_idx = test_combined["_orig_idx_"].to_numpy()
+
+    # Extract clean sets
+    train_labels = train_combined["_label_"].copy()
+    train_features = train_combined.drop(columns=["_label_", "_orig_idx_"])
+
+    val_labels = val_combined["_label_"].copy()
+    val_features = val_combined.drop(columns=["_label_", "_orig_idx_"])
+
+    test_labels = test_combined["_label_"].copy()
+    test_features = test_combined.drop(columns=["_label_", "_orig_idx_"])
+
     split_dates = {
-        "train_start": features.index[0] if len(features) > 0 else None,
-        "train_end": features.index[train_end - 1] if train_end > 0 else None,
-        "val_start": features.index[train_end] if train_end < len(features) else None,
-        "val_end": features.index[val_end - 1] if val_end > 0 else None,
-        "test_start": features.index[val_end] if val_end < len(features) else None,
-        "test_end": features.index[-1] if len(features) > 0 else None,
+        "train_start": train_combined["timestamp"].min().strftime("%Y-%m-%d") if not train_combined.empty else None,
+        "train_end": train_combined["timestamp"].max().strftime("%Y-%m-%d") if not train_combined.empty else None,
+        "val_start": val_combined["timestamp"].min().strftime("%Y-%m-%d") if not val_combined.empty else None,
+        "val_end": val_combined["timestamp"].max().strftime("%Y-%m-%d") if not val_combined.empty else None,
+        "test_start": test_combined["timestamp"].min().strftime("%Y-%m-%d") if not test_combined.empty else None,
+        "test_end": test_combined["timestamp"].max().strftime("%Y-%m-%d") if not test_combined.empty else None,
     }
 
     return TrainValTestSplit(
@@ -313,37 +364,83 @@ def walk_forward_split(
     step_size: int = 200,
 ) -> list[Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]]:
     """
-    Create walk-forward validation splits.
+    Create date-driven expanding window walk-forward validation splits.
     
-    Returns multiple train/val pairs, each with expanding window.
-    
-    Args:
-        features: Feature DataFrame
-        labels: Label Series
-        train_window_size: Size of training window
-        val_window_size: Size of validation window
-        step_size: Step size for walking forward
-    
-    Yields:
-        Tuples of (train_features, train_labels, val_features, val_labels)
+    Strictly chronological, zero lookahead or future exposure, WFV safe.
     """
+    if "timestamp" not in features.columns:
+        logger.warning("[WFV] No 'timestamp' column found. Falling back to row-index walk-forward (Caution: Leakage risk).")
+        # Row-index WFV fallback
+        splits = []
+        n = len(features)
+        t_size = train_window_size
+        v_size = val_window_size
+        for start in range(0, n - t_size - v_size, step_size):
+            train_end = start + t_size
+            val_end = train_end + v_size
+            if val_end > n:
+                break
+            splits.append((
+                features.iloc[start:train_end].copy(),
+                labels.iloc[start:train_end].copy(),
+                features.iloc[train_end:val_end].copy(),
+                labels.iloc[train_end:val_end].copy()
+            ))
+        return splits
+
+    df = features.copy()
+    df["_label_"] = labels.values
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+    # Ensure chronological order
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    df["year_month"] = df["timestamp"].dt.to_period("M")
+    unique_months = sorted(df["year_month"].unique())
+
+    min_train_months = 3
+    val_months = 1
+
+    if len(unique_months) < min_train_months + val_months:
+        logger.warning(f"[WFV] Insufficient unique months ({len(unique_months)}) for monthly date-driven WFV. Slicing into 3 sequential folds.")
+        splits = []
+        n = len(df)
+        chunk = n // 4
+        for i in range(1, 4):
+            train_end_idx = chunk * i
+            val_end_idx = train_end_idx + chunk
+            train_df = df.iloc[:train_end_idx]
+            val_df = df.iloc[train_end_idx:val_end_idx]
+            splits.append((
+                train_df.drop(columns=["_label_", "year_month"]),
+                train_df["_label_"],
+                val_df.drop(columns=["_label_", "year_month"]),
+                val_df["_label_"]
+            ))
+        return splits
+
     splits = []
-    n = len(features)
+    for i in range(min_train_months, len(unique_months) - val_months + 1):
+        train_months = unique_months[:i]
+        val_months_list = unique_months[i : i + val_months]
 
-    for start in range(0, n - train_window_size - val_window_size, step_size):
-        train_end = start + train_window_size
-        val_end = train_end + val_window_size
+        train_df = df[df["year_month"].isin(train_months)].copy()
+        val_df = df[df["year_month"].isin(val_months_list)].copy()
 
-        if val_end > n:
-            break
+        if train_df.empty or val_df.empty:
+            continue
 
-        train_features = features.iloc[start:train_end].copy()
-        train_labels = labels.iloc[start:train_end].copy()
+        train_features = train_df.drop(columns=["_label_", "year_month"])
+        train_labels = train_df["_label_"]
 
-        val_features = features.iloc[train_end:val_end].copy()
-        val_labels = labels.iloc[train_end:val_end].copy()
+        val_features = val_df.drop(columns=["_label_", "year_month"])
+        val_labels = val_df["_label_"]
 
         splits.append((train_features, train_labels, val_features, val_labels))
+        logger.info(
+            f"[WFV] Step {len(splits)}: "
+            f"Train {train_months[0]} -> {train_months[-1]} ({len(train_df)} samples) | "
+            f"Val {val_months_list[0]} -> {val_months_list[-1]} ({len(val_df)} samples)"
+        )
 
     return splits
 

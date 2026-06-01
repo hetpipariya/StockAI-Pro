@@ -592,12 +592,18 @@ export const useStore = create((set, get) => ({
       bundleWarnings: prev.bundleWarnings || [],
       selectedSymbol: normalizedSymbol,
       selectedTimeframe: normalizedTimeframe,
+      candles: [],
+      chartData: [],
+      snapshot: null,
+      indicators: {},
+      currentSignal: null,
       bundleRequestSeqBySymbol: {
         ...prev.bundleRequestSeqBySymbol,
         [normalizedSymbol]: currentSeq,
       },
     }));
 
+    const startMs = Date.now();
     try {
       const bundle = await fetchStockBundle(normalizedSymbol, {
         interval: normalizedTimeframe,
@@ -606,6 +612,7 @@ export const useStore = create((set, get) => ({
         signal: controller.signal,
         timeoutMs: BUNDLE_REQUEST_TIMEOUT_MS,
       });
+      const requestDurationMs = Date.now() - startMs;
 
       const activeSeq = get().bundleRequestSeqBySymbol?.[normalizedSymbol] || 0;
       if (controller.signal.aborted || activeSeq !== currentSeq) {
@@ -636,18 +643,33 @@ export const useStore = create((set, get) => ({
       const isPartial = Boolean(bundle?.partial) || warnings.length > 0;
 
       set((prev) => {
-        const resolvedCurrentPrice = toNumber(
-          prev.livePriceBySymbol?.[normalizedSymbol]?.currentPrice,
-          toNumber(
-            bundle?.snapshot?.ltp ?? bundle?.snapshot?.price,
-            toNumber(prev.priceBySymbol?.[normalizedSymbol], 0),
-          ),
-        );
+        const ltpPrice = toNumber(bundle?.snapshot?.ltp ?? bundle?.snapshot?.price ?? bundle?.latest_price ?? bundle?.price, 0);
+        const resolvedCurrentPrice = prev.connectionStatus === 'CONNECTED'
+          ? toNumber(prev.livePriceBySymbol?.[normalizedSymbol]?.currentPrice, ltpPrice)
+          : ltpPrice;
+
         const mergedSignal = {
           ...signal,
           price: resolvedCurrentPrice,
           currentPrice: resolvedCurrentPrice,
         };
+
+        const updatedLivePriceBySymbol = { ...(prev.livePriceBySymbol || {}) };
+        const updatedPriceBySymbol = { ...(prev.priceBySymbol || {}) };
+
+        if (prev.connectionStatus !== 'CONNECTED' && resolvedCurrentPrice > 0) {
+          updatedLivePriceBySymbol[normalizedSymbol] = {
+            currentPrice: resolvedCurrentPrice,
+            lastValidPrice: resolvedCurrentPrice,
+            lastUpdatedTimestamp: Date.now(),
+            dataSource: 'API',
+            latencyMs: requestDurationMs,
+          };
+          updatedPriceBySymbol[normalizedSymbol] = resolvedCurrentPrice;
+        }
+
+        const isPollingDegraded = prev.connectionStatus !== 'CONNECTED';
+        const pollingHealth = requestDurationMs <= LATENCY_MAX_MS ? LIVE_HEALTH.DELAYED : LIVE_HEALTH.STALE;
 
         return {
           bundleLoading: false,
@@ -661,6 +683,14 @@ export const useStore = create((set, get) => ({
           systemAlert: isPartial && warnings.length > 0 ? warnings[0] : prev.systemAlert,
           currentSignal: mergedSignal,
           signals: [mergedSignal, ...prev.signals.filter((item) => item.symbol !== normalizedSymbol)].slice(0, 50),
+          livePriceBySymbol: updatedLivePriceBySymbol,
+          priceBySymbol: updatedPriceBySymbol,
+          ...(isPollingDegraded ? {
+            liveLatencyMs: requestDurationMs,
+            liveHealth: pollingHealth,
+            tradingBlockedByLatency: pollingHealth === LIVE_HEALTH.STALE,
+            liveDataMessage: pollingHealth === LIVE_HEALTH.STALE ? 'NO LIVE DATA' : null,
+          } : {})
         };
       });
 

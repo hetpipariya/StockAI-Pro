@@ -596,7 +596,7 @@ async def toggle_kill_switch(
 ):
     """Toggle the kill-switch for the authenticated user's trading state."""
     state = await trading_manager.get_state(user_id=current_user.id)
-    state.toggle_kill_switch(halt=not enable)
+    await state.toggle_kill_switch(halt=not enable)
 
     action = "ENABLED" if enable else "DISABLED"
     logger.warning(

@@ -11,3 +11,23 @@ scrape_configs:
     metrics_path: "/metrics"
     static_configs:
       - targets: ["backend:8000"]
+
+  - job_name: "stockai_websocket"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["websocket-gateway:8001"]
+
+  - job_name: "stockai_market_feed"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["market-feed:8002"]
+
+  - job_name: "stockai_ai_engine"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["ai-engine:8003"]
+
+  - job_name: "stockai_trading_engine"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["trading-engine:8004"]

@@ -8,7 +8,7 @@ version: '3.9'
 services:
   # ========== DATABASE ==========
   db:
-    image: postgres:15-alpine
+    image: timescale/timescaledb:latest-pg15
     container_name: stockai_db
     restart: unless-stopped
     environment:
@@ -28,7 +28,23 @@ services:
       start_period: 10s
     networks:
       - stockai
-    command: postgres -c max_connections=100 -c shared_buffers=256MB
+    command: postgres -c max_connections=250 -c shared_buffers=256MB
+
+  # ========== DATABASE POOLER (PgBouncer) ==========
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: stockai_pgbouncer
+    restart: unless-stopped
+    ports:
+      - "6432:6432"
+    volumes:
+      - ./infra/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./infra/pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - stockai
 
   # ========== CACHE (Redis) ==========
   redis:
@@ -47,7 +63,7 @@ services:
       start_period: 5s
     networks:
       - stockai
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
 
   # ========== BACKEND (FastAPI) ==========
   backend:
@@ -70,7 +86,7 @@ services:
       SMARTAPI_CLIENT_PWD: ${SMARTAPI_CLIENT_PWD:-}
       SMARTAPI_TOTP_SECRET: ${SMARTAPI_TOTP_SECRET:-}
       # JWT
-      JWT_SECRET: ${JWT_SECRET:-super-secret-jwt-key-change-in-production}
+      JWT_SECRET: ${JWT_SECRET}
       # API Keys
       NEWS_API_KEY: ${NEWS_API_KEY:-}
       # Application

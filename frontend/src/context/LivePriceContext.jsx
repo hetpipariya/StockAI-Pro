@@ -14,11 +14,13 @@ const LivePriceContext = createContext(null);
 
 const SOURCE = {
   WS: 'WS',
+  API: 'API',
   UNKNOWN: 'UNKNOWN',
 };
 
 const SOURCE_PRIORITY = {
   [SOURCE.WS]: 3,
+  [SOURCE.API]: 2,
   [SOURCE.UNKNOWN]: 1,
 };
 
@@ -36,6 +38,7 @@ const toFiniteNumber = (value, fallback = null) => {
 const normalizeSource = (value) => {
   const raw = String(value || '').trim().toUpperCase();
   if (raw === 'WS' || raw === 'WEBSOCKET') return SOURCE.WS;
+  if (raw === 'API') return SOURCE.API;
   return SOURCE.UNKNOWN;
 };
 
@@ -104,11 +107,11 @@ export function LivePriceProvider({ children }) {
     const nextSource = normalizeSource(candidate.dataSource);
     const latencyMs = Math.max(0, Date.now() - nextTimestamp);
 
-    if (nextSource !== SOURCE.WS) {
+    if (nextSource !== SOURCE.WS && nextSource !== SOURCE.API) {
       return;
     }
 
-    if (latencyMs > LATENCY_MAX_MS) {
+    if (nextSource === SOURCE.WS && latencyMs > LATENCY_MAX_MS) {
       markRealtimeStale(latencyMs, 'NO LIVE DATA');
       return;
     }
@@ -183,22 +186,31 @@ export function LivePriceProvider({ children }) {
 
   const health = useMemo(() => {
     const status = String(connectionStatus || '').toUpperCase();
-    if (!isWsConnected(status)) {
+    if (isWsConnected(status)) {
+      const effectiveLatency = toFiniteNumber(liveLatencyMs, latency);
+      if (effectiveLatency === null) {
+        return HEALTH.STALE;
+      }
+      if (effectiveLatency <= LATENCY_LIVE_MS) {
+        return HEALTH.LIVE;
+      }
+      if (effectiveLatency <= LATENCY_MAX_MS) {
+        return HEALTH.DELAYED;
+      }
       return HEALTH.STALE;
     }
 
-    const effectiveLatency = toFiniteNumber(liveLatencyMs, latency);
-    if (effectiveLatency === null) {
-      return HEALTH.STALE;
+    // Degraded mode fallback check
+    if (livePriceState.currentPrice !== null && latency !== null && latency <= 15000) {
+      return HEALTH.DELAYED; // Nominal polling fallback active for DISCONNECTED / RECONNECTING / FAILED
     }
-    if (effectiveLatency <= LATENCY_LIVE_MS) {
-      return HEALTH.LIVE;
-    }
-    if (effectiveLatency <= LATENCY_MAX_MS) {
+
+    if (status === 'FAILED' && livePriceState.currentPrice !== null) {
       return HEALTH.DELAYED;
     }
+
     return HEALTH.STALE;
-  }, [connectionStatus, latency, liveLatencyMs]);
+  }, [connectionStatus, latency, liveLatencyMs, livePriceState.currentPrice]);
 
   const value = useMemo(() => ({
     symbol: selectedSymbol,

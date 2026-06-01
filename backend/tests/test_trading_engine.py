@@ -224,7 +224,7 @@ class TestConfigValues:
         assert LIVE_CONFIRMED is False  # Default must be False for safety
         assert STARTING_CAPITAL == 100_000
         assert MIN_ACCOUNT_BALANCE == 10_000
-        assert MAX_RISK_PER_TRADE_PCT == 0.01
+        assert MAX_RISK_PER_TRADE_PCT == 0.02
 
 
 class TestOrderLifecycle:

@@ -9,18 +9,128 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
+import contextlib
+import json
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Optional
 
 from sqlalchemy import select
 
-from app import config
-from app.services.db import AsyncSessionLocal, UserModel, UserTradingStateModel
+from stockai_shared.config import config
+from stockai_shared.db.db import AsyncSessionLocal, UserModel, UserTradingStateModel
+from stockai_shared.cache.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
 
 _MAX_PERSISTED_ORDERS = 500
+
+
+def position_to_dict(pos: UserPosition) -> dict:
+    return {
+        "user_id": pos.user_id,
+        "symbol": pos.symbol,
+        "direction": pos.direction,
+        "quantity": pos.quantity,
+        "entry_price": pos.entry_price,
+        "stop_loss": pos.stop_loss,
+        "target": pos.target,
+        "confidence": pos.confidence,
+        "mode": pos.mode,
+        "reason": pos.reason,
+        "opened_at": pos.opened_at.isoformat(),
+        "order_id": pos.order_id,
+    }
+
+
+def dict_to_position(d: dict) -> UserPosition:
+    return UserPosition(
+        user_id=int(d["user_id"]),
+        symbol=d["symbol"],
+        direction=d["direction"],
+        quantity=int(d["quantity"]),
+        entry_price=float(d["entry_price"]),
+        stop_loss=float(d["stop_loss"]),
+        target=float(d["target"]),
+        confidence=int(d["confidence"]),
+        mode=d["mode"],
+        reason=d.get("reason", ""),
+        opened_at=datetime.fromisoformat(d["opened_at"]),
+        order_id=d.get("order_id", ""),
+    )
+
+
+def risk_to_dict(risk: UserRiskState) -> dict:
+    return {
+        "user_id": risk.user_id,
+        "starting_capital": risk.starting_capital,
+        "current_capital": risk.current_capital,
+        "daily_pnl": risk.daily_pnl,
+        "trades_today": risk.trades_today,
+        "open_position_count": risk.open_position_count,
+        "halted": risk.halted,
+        "last_reset_date": risk.last_reset_date.isoformat(),
+        "max_risk_per_trade": risk.max_risk_per_trade,
+        "max_trades_per_day": risk.max_trades_per_day,
+        "max_concurrent_positions": risk.max_concurrent_positions,
+        "daily_loss_limit_pct": risk.daily_loss_limit_pct,
+        "min_account_balance": risk.min_account_balance,
+    }
+
+
+def apply_risk_dict(risk: UserRiskState, d: dict) -> None:
+    risk.user_id = int(d["user_id"])
+    risk.starting_capital = float(d["starting_capital"])
+    risk.current_capital = float(d["current_capital"])
+    risk.daily_pnl = float(d["daily_pnl"])
+    risk.trades_today = int(d["trades_today"])
+    risk.open_position_count = int(d["open_position_count"])
+    risk.halted = bool(d["halted"])
+    risk.last_reset_date = date.fromisoformat(d["last_reset_date"])
+    if "max_risk_per_trade" in d:
+        risk.max_risk_per_trade = float(d["max_risk_per_trade"])
+    if "max_trades_per_day" in d:
+        risk.max_trades_per_day = int(d["max_trades_per_day"])
+    if "max_concurrent_positions" in d:
+        risk.max_concurrent_positions = int(d["max_concurrent_positions"])
+    if "daily_loss_limit_pct" in d:
+        risk.daily_loss_limit_pct = float(d["daily_loss_limit_pct"])
+    if "min_account_balance" in d:
+        risk.min_account_balance = float(d["min_account_balance"])
+
+
+@contextlib.asynccontextmanager
+async def redis_lock(user_id: int, timeout_ms: int = 10000):
+    lock_key = f"stockai:lock:user_state:{user_id}"
+    lock_value = str(uuid.uuid4())
+    redis_client = await get_redis()
+    acquired = False
+    
+    if redis_client:
+        for _ in range(50):
+            try:
+                res = await redis_client.set(lock_key, lock_value, nx=True, px=timeout_ms)
+                if res:
+                    acquired = True
+                    break
+            except Exception as e:
+                logger.debug(f"[Lock] Redis lock acquisition error: {e}")
+            await asyncio.sleep(0.1)
+            
+    if not acquired:
+        logger.warning("[Lock] Failed to acquire Redis lock for user %s, falling back to local lock", user_id)
+        
+    try:
+        yield acquired
+    finally:
+        if acquired and redis_client:
+            try:
+                val = await redis_client.get(lock_key)
+                if val == lock_value:
+                    await redis_client.delete(lock_key)
+            except Exception as e:
+                logger.warning("[Lock] Failed to release Redis lock for user %s: %s", user_id, e)
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -198,62 +308,106 @@ class UserTradingState:
 
         return True, "OK"
 
+    def to_dict(self) -> dict:
+        return {
+            "user_id": self.user_id,
+            "mode": self.mode,
+            "positions": {sym: position_to_dict(pos) for sym, pos in self.positions.items()},
+            "trade_journal": self.trade_journal,
+            "risk": risk_to_dict(self.risk),
+        }
+
+    def apply_dict(self, d: dict) -> None:
+        self.user_id = int(d["user_id"])
+        self.mode = d["mode"]
+        self.positions = {sym: dict_to_position(pos_d) for sym, pos_d in d.get("positions", {}).items()}
+        self.trade_journal = d.get("trade_journal", [])
+        if "risk" in d:
+            apply_risk_dict(self.risk, d["risk"])
+
+    async def sync_from_redis(self) -> None:
+        redis_client = await get_redis()
+        if redis_client:
+            try:
+                data = await redis_client.get(f"stockai:user_state:{self.user_id}")
+                if data:
+                    if isinstance(data, bytes):
+                        data = data.decode("utf-8")
+                    import json
+                    parsed = json.loads(data)
+                    self.apply_dict(parsed)
+            except Exception as e:
+                logger.warning(f"[TradingState] Failed to sync from Redis for user {self.user_id}: {e}")
+
+    async def sync_to_redis(self) -> None:
+        redis_client = await get_redis()
+        if redis_client:
+            try:
+                import json
+                serialized = json.dumps(self.to_dict())
+                await redis_client.setex(f"stockai:user_state:{self.user_id}", 86400, serialized)
+            except Exception as e:
+                logger.warning(f"[TradingState] Failed to sync to Redis for user {self.user_id}: {e}")
+
     async def open_position(self, pos: UserPosition) -> tuple[bool, str]:
         """
         Open a new position for this user.
         Returns (success, message).
         """
-        async with self._lock:
-            can, reason = self.can_trade()
-            if not can:
-                logger.warning("[User %s] Trade blocked: %s", self.user_id, reason)
-                return False, reason
+        async with redis_lock(self.user_id):
+            await self.sync_from_redis()
+            async with self._lock:
+                can, reason = self.can_trade()
+                if not can:
+                    logger.warning("[User %s] Trade blocked: %s", self.user_id, reason)
+                    return False, reason
 
-            symbol = str(pos.symbol or "").upper().strip()
-            if symbol in self.positions:
-                msg = f"Position already open for {symbol}"
-                logger.warning("[User %s] %s", self.user_id, msg)
-                return False, msg
+                symbol = str(pos.symbol or "").upper().strip()
+                if symbol in self.positions:
+                    msg = f"Position already open for {symbol}"
+                    logger.warning("[User %s] %s", self.user_id, msg)
+                    return False, msg
 
-            pos.symbol = symbol
-            pos.mode = str(pos.mode or self.mode).lower()
-            self.positions[symbol] = pos
-            self.risk.open_position_count = len(self.positions)
+                pos.symbol = symbol
+                pos.mode = str(pos.mode or self.mode).lower()
+                self.positions[symbol] = pos
+                self.risk.open_position_count = len(self.positions)
 
-            # Log to journal (chronological)
-            self.trade_journal.append(
-                {
-                    "event": "OPEN",
-                    "user_id": self.user_id,
-                    "symbol": pos.symbol,
-                    "direction": pos.direction,
-                    "quantity": pos.quantity,
-                    "entry_price": pos.entry_price,
-                    "stop_loss": pos.stop_loss,
-                    "target": pos.target,
-                    "confidence": pos.confidence,
-                    "mode": pos.mode,
-                    "reason": pos.reason,
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-            )
+                # Log to journal (chronological)
+                self.trade_journal.append(
+                    {
+                        "event": "OPEN",
+                        "user_id": self.user_id,
+                        "symbol": pos.symbol,
+                        "direction": pos.direction,
+                        "quantity": pos.quantity,
+                        "entry_price": pos.entry_price,
+                        "stop_loss": pos.stop_loss,
+                        "target": pos.target,
+                        "confidence": pos.confidence,
+                        "mode": pos.mode,
+                        "reason": pos.reason,
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    }
+                )
 
-            if len(self.trade_journal) > _MAX_PERSISTED_ORDERS:
-                self.trade_journal = self.trade_journal[-_MAX_PERSISTED_ORDERS:]
+                if len(self.trade_journal) > _MAX_PERSISTED_ORDERS:
+                    self.trade_journal = self.trade_journal[-_MAX_PERSISTED_ORDERS:]
 
-            await self.persist()
+                await self.persist()
+                await self.sync_to_redis()
 
-            logger.info(
-                "[User %s] Opened %s %s @ Rs%.2f qty=%s SL=Rs%.2f TP=Rs%.2f",
-                self.user_id,
-                pos.direction,
-                pos.symbol,
-                pos.entry_price,
-                pos.quantity,
-                pos.stop_loss,
-                pos.target,
-            )
-            return True, "Position opened"
+                logger.info(
+                    "[User %s] Opened %s %s @ Rs%.2f qty=%s SL=Rs%.2f TP=Rs%.2f",
+                    self.user_id,
+                    pos.direction,
+                    pos.symbol,
+                    pos.entry_price,
+                    pos.quantity,
+                    pos.stop_loss,
+                    pos.target,
+                )
+                return True, "Position opened"
 
     async def close_position(
         self,
@@ -265,54 +419,57 @@ class UserTradingState:
         Close a position and calculate PnL.
         Returns realized PnL or None if no position existed.
         """
-        async with self._lock:
-            normalized_symbol = str(symbol or "").upper().strip()
-            pos = self.positions.pop(normalized_symbol, None)
-            if not pos:
-                return None
+        async with redis_lock(self.user_id):
+            await self.sync_from_redis()
+            async with self._lock:
+                normalized_symbol = str(symbol or "").upper().strip()
+                pos = self.positions.pop(normalized_symbol, None)
+                if not pos:
+                    return None
 
-            if pos.direction == "BUY":
-                pnl = (exit_price - pos.entry_price) * pos.quantity
-            else:
-                pnl = (pos.entry_price - exit_price) * pos.quantity
+                if pos.direction == "BUY":
+                    pnl = (exit_price - pos.entry_price) * pos.quantity
+                else:
+                    pnl = (pos.entry_price - exit_price) * pos.quantity
 
-            self.risk.daily_pnl += pnl
-            self.risk.trades_today += 1
-            self.risk.current_capital += pnl
-            self.risk.open_position_count = len(self.positions)
+                self.risk.daily_pnl += pnl
+                self.risk.trades_today += 1
+                self.risk.current_capital += pnl
+                self.risk.open_position_count = len(self.positions)
 
-            # Log to journal (chronological)
-            self.trade_journal.append(
-                {
-                    "event": "CLOSE",
-                    "user_id": self.user_id,
-                    "symbol": normalized_symbol,
-                    "direction": pos.direction,
-                    "quantity": pos.quantity,
-                    "entry_price": pos.entry_price,
-                    "exit_price": exit_price,
-                    "pnl": round(pnl, 2),
-                    "reason": reason,
-                    "mode": pos.mode,
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-            )
+                # Log to journal (chronological)
+                self.trade_journal.append(
+                    {
+                        "event": "CLOSE",
+                        "user_id": self.user_id,
+                        "symbol": normalized_symbol,
+                        "direction": pos.direction,
+                        "quantity": pos.quantity,
+                        "entry_price": pos.entry_price,
+                        "exit_price": exit_price,
+                        "pnl": round(pnl, 2),
+                        "reason": reason,
+                        "mode": pos.mode,
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    }
+                )
 
-            if len(self.trade_journal) > _MAX_PERSISTED_ORDERS:
-                self.trade_journal = self.trade_journal[-_MAX_PERSISTED_ORDERS:]
+                if len(self.trade_journal) > _MAX_PERSISTED_ORDERS:
+                    self.trade_journal = self.trade_journal[-_MAX_PERSISTED_ORDERS:]
 
-            await self.persist()
+                await self.persist()
+                await self.sync_to_redis()
 
-            logger.info(
-                "[User %s] Closed %s %s @ Rs%.2f pnl=Rs%+.2f reason=%s",
-                self.user_id,
-                pos.direction,
-                normalized_symbol,
-                exit_price,
-                pnl,
-                reason,
-            )
-            return pnl
+                logger.info(
+                    "[User %s] Closed %s %s @ Rs%.2f pnl=Rs%+.2f reason=%s",
+                    self.user_id,
+                    pos.direction,
+                    normalized_symbol,
+                    exit_price,
+                    pnl,
+                    reason,
+                )
+                return pnl
 
     def get_position(self, symbol: str) -> Optional[UserPosition]:
         return self.positions.get(str(symbol or "").upper().strip())
@@ -338,13 +495,17 @@ class UserTradingState:
             for p in self.positions.values()
         ]
 
-    def toggle_kill_switch(self, halt: bool):
-        self.risk.halted = bool(halt)
-        logger.warning(
-            "[User %s] Kill-switch %s",
-            self.user_id,
-            "ACTIVATED" if halt else "DEACTIVATED",
-        )
+    async def toggle_kill_switch(self, halt: bool):
+        async with redis_lock(self.user_id):
+            await self.sync_from_redis()
+            self.risk.halted = bool(halt)
+            await self.persist()
+            await self.sync_to_redis()
+            logger.warning(
+                "[User %s] Kill-switch %s",
+                self.user_id,
+                "ACTIVATED" if halt else "DEACTIVATED",
+            )
 
     def get_journal(self, limit: int = 50) -> list[dict[str, Any]]:
         """Return most recent trade journal entries."""
@@ -559,21 +720,39 @@ class TradingManager:
         The state is cached in-memory and persisted in DB.
         """
         key = int(user_id)
+        redis_client = await get_redis()
+        if redis_client:
+            try:
+                await redis_client.sadd("stockai:active_users", str(key))
+            except Exception as e:
+                logger.warning("[TradingManager] Failed to add active user to Redis: %s", e)
+
         async with self._lock:
             if key not in self._states:
-                self._states[key] = await self._load_or_create_state(
+                state = await self._load_or_create_state(
                     user_id=key,
                     starting_capital=starting_capital,
                     mode=mode,
                 )
-            elif mode is not None:
-                self._states[key].mode = _normalize_mode(mode, self._states[key].mode)
+                self._states[key] = state
+                await state.sync_from_redis()
+            else:
+                await self._states[key].sync_from_redis()
+                if mode is not None:
+                    self._states[key].mode = _normalize_mode(mode, self._states[key].mode)
             return self._states[key]
 
     async def remove_state(self, user_id: int):
         """Drop in-memory state cache for a user (persistent DB state remains)."""
         async with self._lock:
             state = self._states.pop(int(user_id), None)
+            redis_client = await get_redis()
+            if redis_client:
+                try:
+                    await redis_client.srem("stockai:active_users", str(user_id))
+                    await redis_client.delete(f"stockai:user_state:{user_id}")
+                except Exception as e:
+                    logger.warning("[TradingManager] Failed to remove active user from Redis: %s", e)
             if state:
                 logger.info(
                     "[TradingManager] Removed in-memory state for user_id=%s (had %s open positions)",
@@ -581,10 +760,31 @@ class TradingManager:
                     len(state.positions),
                 )
 
-    def get_active_user_count(self) -> int:
+    async def get_active_user_count(self) -> int:
+        redis_client = await get_redis()
+        if redis_client:
+            try:
+                return await redis_client.scard("stockai:active_users")
+            except Exception as e:
+                logger.warning("[TradingManager] Failed to get active user count from Redis: %s", e)
         return len(self._states)
 
-    def get_all_summaries(self) -> list[dict[str, Any]]:
+    async def get_all_summaries(self) -> list[dict[str, Any]]:
+        redis_client = await get_redis()
+        if redis_client:
+            try:
+                user_ids = await redis_client.smembers("stockai:active_users")
+                summaries = []
+                for uid_str in user_ids:
+                    try:
+                        uid = int(uid_str)
+                        state = await self.get_state(uid)
+                        summaries.append(state.get_summary())
+                    except Exception:
+                        pass
+                return summaries
+            except Exception as e:
+                logger.warning("[TradingManager] Failed to get all summaries from Redis: %s", e)
         return [state.get_summary() for state in self._states.values()]
 
 

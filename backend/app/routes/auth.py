@@ -69,6 +69,8 @@ class RegisterRequest(BaseModel):
     def email_format(cls, v: str) -> str:
         if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", v):
             raise ValueError("Invalid email format")
+        if "<" in v or ">" in v or "script" in v.lower():
+            raise ValueError("Email contains potential XSS or script tags")
         return v.lower().strip()
 
 

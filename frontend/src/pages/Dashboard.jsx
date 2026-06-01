@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useStore } from '../store/useStore.js';
 import { useToast } from '../components/Toast';
 import { wsManager } from '../api/websocket.js';
@@ -35,7 +35,7 @@ export default function Dashboard() {
   const selectedSignalSymbol = String(currentSignal?.symbol || '').toUpperCase();
   const hasSignalForSelectedSymbol = selectedSignalSymbol === String(selectedSymbol || '').toUpperCase();
 
-  const livePrice = Number(currentPrice) || Number(snapshot?.ltp) || 2400.00;
+  const livePrice = Number(currentPrice) || Number(snapshot?.ltp) || (candles.length > 0 ? candles[candles.length - 1].close : 0);
   const dataSourceLabel = String(dataSource || 'NSE_API').toUpperCase();
 
   // Load symbols catalog on mount
@@ -81,11 +81,16 @@ export default function Dashboard() {
     }
   }, [selectTimeframe, showToast]);
 
-  const tradeLevels = {
-    entry: currentSignal?.entry || currentSignal?.price || livePrice,
-    stopLoss: currentSignal?.stopLoss || currentSignal?.stop_loss || livePrice * 0.98,
-    target: currentSignal?.target || currentSignal?.target_price || livePrice * 1.03
-  };
+  const tradeLevels = useMemo(() => {
+    if (!hasSignalForSelectedSymbol || !currentSignal) {
+      return { entry: null, stopLoss: null, target: null };
+    }
+    return {
+      entry: currentSignal.entry || currentSignal.price || null,
+      stopLoss: currentSignal.stopLoss || currentSignal.stop_loss || null,
+      target: currentSignal.target || currentSignal.target_price || null,
+    };
+  }, [hasSignalForSelectedSymbol, currentSignal]);
 
   return (
     <div className="w-full h-full flex flex-col bg-[#050816] text-slate-200 overflow-hidden font-sans relative">
@@ -104,6 +109,11 @@ export default function Dashboard() {
             <div className="flex items-center gap-3">
               <span className="text-xs font-bold text-white tracking-widest font-mono">{selectedSymbol}</span>
               <span className="text-[9px] text-slate-500 font-mono">({dataSourceLabel})</span>
+              {connectionStatus === 'FAILED' && (
+                <span className="text-[9px] text-rose-400 font-mono font-bold animate-pulse px-1.5 py-0.5 rounded border border-rose-500/20 bg-rose-500/5">
+                  DEGRADED (POLLING)
+                </span>
+              )}
               
               {/* Timeframe Controls */}
               <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/5 ml-4">
@@ -156,20 +166,30 @@ export default function Dashboard() {
                 tradeLevels={tradeLevels}
               />
 
-              {connectionStatus === 'RECONNECTING' && (
+              {connectionStatus === 'RECONNECTING' && candles.length === 0 && (
                 <div className="absolute inset-0 bg-[#050816]/75 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-20">
                   <div className="h-9 w-9 rounded-full border-2 border-cyan-500/30 border-t-cyan-400 animate-spin" />
                   <span className="text-xs font-bold text-cyan-300 font-mono tracking-widest uppercase animate-pulse">RECONNECTING LIVE FEED...</span>
                 </div>
               )}
 
-              {connectionStatus === 'FAILED' && (
-                <div className="absolute inset-0 bg-[#050816]/85 backdrop-blur-sm flex flex-col items-center justify-center gap-3 z-20 px-4 text-center">
-                  <div className="h-10 w-10 rounded-lg border border-red-500/30 bg-red-500/10 flex items-center justify-center text-red-400">
-                    <AlertTriangle className="h-5 w-5" />
+              {connectionStatus === 'RECONNECTING' && candles.length > 0 && (
+                <div className="absolute top-4 right-4 bg-[#0a0f1d]/90 border border-cyan-500/25 text-cyan-300 rounded-xl px-4 py-3 shadow-[0_4px_20px_rgba(6,182,212,0.15)] backdrop-blur-md max-w-xs flex gap-3 items-start z-20 animate-in fade-in slide-in-from-top-4 duration-300">
+                  <div className="h-4 w-4 rounded-full border-2 border-cyan-500/30 border-t-cyan-400 animate-spin shrink-0 mt-0.5" />
+                  <div className="flex flex-col gap-0.5 font-mono">
+                    <span className="text-xs font-extrabold tracking-wider uppercase text-cyan-400">RECONNECTING STREAM</span>
+                    <span className="text-[9px] text-slate-400 leading-normal">Using degraded API polling backup.</span>
                   </div>
-                  <span className="text-xs font-extrabold text-red-400 font-mono tracking-widest uppercase">LIVE STREAM DISCONNECTED</span>
-                  <p className="text-[10px] text-slate-500 max-w-sm mt-1 leading-normal font-mono">Maximum reconnection attempts exhausted. Terminal has automatically switched to degraded API polling backup mode.</p>
+                </div>
+              )}
+
+              {connectionStatus === 'FAILED' && (
+                <div className="absolute top-4 right-4 bg-[#0a0f1d]/90 border border-rose-500/25 text-rose-300 rounded-xl px-4 py-3 shadow-[0_4px_20px_rgba(244,63,94,0.15)] backdrop-blur-md max-w-xs flex gap-3 items-start z-20 animate-in fade-in slide-in-from-top-4 duration-300">
+                  <AlertTriangle className="h-5 w-5 text-rose-400 shrink-0 mt-0.5" />
+                  <div className="flex flex-col gap-0.5 font-mono">
+                    <span className="text-xs font-extrabold tracking-wider uppercase text-rose-400">LIVE STREAM DISCONNECTED</span>
+                    <span className="text-[9px] text-slate-400 leading-normal">degraded API polling backup mode.</span>
+                  </div>
                 </div>
               )}
             </div>

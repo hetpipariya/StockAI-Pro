@@ -466,10 +466,9 @@ def train_production_model(
     labels = prepare_labels(ohlcv, horizon=LABEL_HORIZON)
     
     # Step 4: Fit scaler (on ALL data for now, but ideally on train only)
-    scaler = fit_scaler(features)
-    
     # Step 5: Split data
     split = split_data(features, labels)
+    scaler = fit_scaler(split.train_features)
     
     # Scale each set
     X_train = apply_scaler(split.train_features, scaler)
