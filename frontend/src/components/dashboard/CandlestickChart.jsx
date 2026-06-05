@@ -1,7 +1,5 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { createChart } from 'lightweight-charts';
-import { motion } from 'framer-motion';
-import { BarChart3 } from 'lucide-react';
 
 const normalizeTimestampString = (value) => {
   const raw = String(value || '').trim();
@@ -129,6 +127,8 @@ const CandlestickChart = memo(function CandlestickChart({
   const stopLineRef = useRef(null);
   const targetLineRef = useRef(null);
   const hasManualZoomRef = useRef(false);
+  const lastSymbolRef = useRef(String(symbol || 'SYMBOL').toUpperCase());
+  const fitContentRetriesRef = useRef([]);
 
   const normalizedCandles = useMemo(() => normalizeCandles(candles), [candles]);
   const ema20Series = useMemo(() => computeEmaSeries(normalizedCandles, 20), [normalizedCandles]);
@@ -269,6 +269,34 @@ const CandlestickChart = memo(function CandlestickChart({
     candlesDirtyRef.current = true;
   }, [normalizedCandles, ema20Series, ema50Series]);
 
+  // Schedule multiple deferred fitContent() calls to guarantee at least one
+  // executes after the container has been laid out with valid dimensions.
+  // This is the core fix for blank charts: lightweight-charts needs a real
+  // bounding rect to compute the visible time range.
+  const scheduleFitContentRetries = (chart) => {
+    // Cancel any previously pending retries
+    fitContentRetriesRef.current.forEach(clearTimeout);
+    fitContentRetriesRef.current = [];
+
+    const delays = [0, 50, 150, 300];
+    delays.forEach((delay) => {
+      const timerId = setTimeout(() => {
+        try {
+          if (chart && containerRef.current) {
+            const rect = containerRef.current.getBoundingClientRect();
+            // Only call fitContent when the container has real dimensions
+            if (rect.width > 0 && rect.height > 0) {
+              chart.timeScale().fitContent();
+            }
+          }
+        } catch {
+          // Silently ignore if chart was disposed during the timeout
+        }
+      }, delay);
+      fitContentRetriesRef.current.push(timerId);
+    });
+  };
+
   useEffect(() => {
     let animationFrameId;
     let lastUpdateMs = 0;
@@ -288,8 +316,13 @@ const CandlestickChart = memo(function CandlestickChart({
             candlesDirtyRef.current = false;
             setChartError(null);
 
-            if (latestCandlesRef.current.length > 0 && !hasManualZoomRef.current) {
+            const symbolChanged = lastSymbolRef.current !== safeSymbol;
+            if (latestCandlesRef.current.length > 0 && (!hasManualZoomRef.current || symbolChanged)) {
+              // Immediate fitContent — may work if container is already visible
               chartRef.current?.timeScale().fitContent();
+              // Deferred retries — guarantees fitContent fires after layout settles
+              scheduleFitContentRetries(chartRef.current);
+              lastSymbolRef.current = safeSymbol;
             }
           } catch (error) {
             setChartError('Chart rendering failed for current candle set. Waiting for next update.');
@@ -316,7 +349,7 @@ const CandlestickChart = memo(function CandlestickChart({
                   lineWidth: 1.5,
                   lineStyle: 2,
                   axisLabelVisible: true,
-                  title: 'LIVE',
+                  title: '',
                 });
               } else {
                 livePriceLineRef.current.applyOptions({ price });
@@ -332,8 +365,13 @@ const CandlestickChart = memo(function CandlestickChart({
     };
 
     animationFrameId = requestAnimationFrame(flushUpdates);
-    return () => cancelAnimationFrame(animationFrameId);
-  }, [showEma]);
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+      // Clean up any pending fitContent retries
+      fitContentRetriesRef.current.forEach(clearTimeout);
+      fitContentRetriesRef.current = [];
+    };
+  }, [showEma, safeSymbol, safeTimeframe]);
 
   useEffect(() => {
     if (!candleSeriesRef.current) return;
@@ -343,21 +381,67 @@ const CandlestickChart = memo(function CandlestickChart({
       const stop = toFiniteNumber(tradeLevels?.stopLoss);
       const target = toFiniteNumber(tradeLevels?.target);
 
-      if (entryLineRef.current) candleSeriesRef.current.removePriceLine(entryLineRef.current);
-      if (stopLineRef.current) candleSeriesRef.current.removePriceLine(stopLineRef.current);
-      if (targetLineRef.current) candleSeriesRef.current.removePriceLine(targetLineRef.current);
-      entryLineRef.current = null;
-      stopLineRef.current = null;
-      targetLineRef.current = null;
-
+      // Handle Entry Line
       if (entry !== null && entry > 0) {
-        entryLineRef.current = candleSeriesRef.current.createPriceLine({ price: entry, color: '#00ff9f', lineWidth: 1, lineStyle: 0, axisLabelVisible: true, title: 'ENTRY' });
+        if (!entryLineRef.current) {
+          entryLineRef.current = candleSeriesRef.current.createPriceLine({
+            price: entry,
+            color: '#06b6d4',
+            lineWidth: 1.5,
+            lineStyle: 0,
+            axisLabelVisible: true,
+            title: '',
+          });
+        } else {
+          entryLineRef.current.applyOptions({ price: entry });
+        }
+      } else {
+        if (entryLineRef.current) {
+          candleSeriesRef.current.removePriceLine(entryLineRef.current);
+          entryLineRef.current = null;
+        }
       }
+
+      // Handle Stop Loss Line
       if (stop !== null && stop > 0) {
-        stopLineRef.current = candleSeriesRef.current.createPriceLine({ price: stop, color: '#ff4d4f', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL' });
+        if (!stopLineRef.current) {
+          stopLineRef.current = candleSeriesRef.current.createPriceLine({
+            price: stop,
+            color: '#f43f5e',
+            lineWidth: 1.5,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: '',
+          });
+        } else {
+          stopLineRef.current.applyOptions({ price: stop });
+        }
+      } else {
+        if (stopLineRef.current) {
+          candleSeriesRef.current.removePriceLine(stopLineRef.current);
+          stopLineRef.current = null;
+        }
       }
+
+      // Handle Target Line
       if (target !== null && target > 0) {
-        targetLineRef.current = candleSeriesRef.current.createPriceLine({ price: target, color: '#22c55e', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'TGT' });
+        if (!targetLineRef.current) {
+          targetLineRef.current = candleSeriesRef.current.createPriceLine({
+            price: target,
+            color: '#10b981',
+            lineWidth: 1.5,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: '',
+          });
+        } else {
+          targetLineRef.current.applyOptions({ price: target });
+        }
+      } else {
+        if (targetLineRef.current) {
+          candleSeriesRef.current.removePriceLine(targetLineRef.current);
+          targetLineRef.current = null;
+        }
       }
     } catch (error) {
       if (import.meta.env.DEV) {
@@ -384,14 +468,21 @@ const CandlestickChart = memo(function CandlestickChart({
 
       {/* Main Chart container */}
       <div className="flex-1 relative w-full min-h-[300px]">
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: 0.28 }}
+        {/* CRITICAL: Never use opacity-0 on the chart container.
+            lightweight-charts requires the container to have real
+            bounding dimensions to compute fitContent(). Using opacity-0
+            causes some browsers to skip layout, resulting in blank charts.
+            We use visibility + pointer-events to hide while keeping layout. */}
+        <div
           ref={containerRef}
-          className={`absolute inset-0 transition-opacity duration-300 ${
-            !isLoading && !chartError && normalizedCandles.length > 0 ? 'opacity-100' : 'opacity-0'
-          }`}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            visibility: (!isLoading && !chartError && normalizedCandles.length > 0) ? 'visible' : 'hidden',
+            pointerEvents: (!isLoading && !chartError && normalizedCandles.length > 0) ? 'auto' : 'none',
+            transition: 'opacity 0.3s ease',
+            opacity: (!isLoading && !chartError && normalizedCandles.length > 0) ? 1 : 0,
+          }}
         />
 
         {isLoading && (

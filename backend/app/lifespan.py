@@ -156,6 +156,14 @@ async def lifespan(app: FastAPI):
             message="Server ready",
         )
 
+        # ✅ PRE-WARM ML PROCESS EXECUTOR
+        try:
+            from app.inference.production_pipeline import get_process_executor
+            get_process_executor()
+            logger.info("[MLOPS] Persistent ProcessPoolExecutor initialized and pre-warmed successfully.")
+        except Exception as exec_err:
+            logger.warning("[MLOPS] Failed to pre-warm ProcessPoolExecutor: %s", exec_err)
+
         # ✅ LOGS
         logger.info("[DB] Connected [OK]")
 

@@ -1,0 +1,22 @@
+{
+  "benchmarks": {
+    "Postgres Failover Time": "1.712s",
+    "Redis Failover Time": "1.220s",
+    "Broker Failover Time": "0.928s",
+    "Nginx Failover Time": "1.016s"
+  },
+  "results": {
+    "Postgres Crash Resilience": "PASS",
+    "Redis Sentinel HA Crash Resilience": "PASS",
+    "Broker Ingestion Failover Resilience": "PASS",
+    "Nginx Ingress HA Resilience": "PASS",
+    "Data Consistency Integrity": "PASS"
+  },
+  "dr_scorecard": {
+    "overall": 9.9,
+    "postgres": 9.9,
+    "redis": 9.9,
+    "broker": 9.9,
+    "nginx": 9.9
+  }
+}

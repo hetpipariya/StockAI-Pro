@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 SESSION_KEY = "smartapi_session"
 SESSION_TTL_SECONDS = 24 * 60 * 60
-_REDIS_RETRY_INTERVAL_SECONDS = 30
+_REDIS_RETRY_INTERVAL_SECONDS = 2
 
 # Async redis client state
 _async_redis: Optional[Any] = None
@@ -180,6 +180,32 @@ def _trigger_circuit_breaker(exc: Exception, is_sync: bool = False) -> None:
             "[REDIS][CIRCUIT-BREAKER] Async Redis connection dropped: %s. Switched to Degraded Fallback mode.",
             type(exc).__name__,
         )
+
+
+import contextlib
+
+@contextlib.asynccontextmanager
+async def distributed_job_lock(job_name: str, lock_ttl_seconds: int = 50):
+    """Enforces that a cron job runs on only one microservice instance using a Redis distributed lock."""
+    redis_client = await get_redis()
+    acquired = False
+    lock_key = f"stockai:scheduler:lock:{job_name}"
+    
+    if redis_client:
+        try:
+            res = await redis_client.set(lock_key, "1", nx=True, ex=lock_ttl_seconds)
+            if res:
+                acquired = True
+        except Exception as e:
+            logger.warning("[SCHEDULER-LOCK] Failed to acquire Redis lock for %s: %s", job_name, e)
+            acquired = True
+    else:
+        acquired = True
+        
+    try:
+        yield acquired
+    finally:
+        pass
 
 
 async def get_redis() -> Optional[Any]:

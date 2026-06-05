@@ -48,7 +48,7 @@ jobs:
       SMARTAPI_CLIENT_PWD: ci
       SMARTAPI_TOTP_SECRET: ci
       NEWS_API_KEY: ci
-      MIN_BACKEND_COVERAGE: "0"
+      MIN_BACKEND_COVERAGE: "70"
 
     steps:
       - name: Checkout source
@@ -133,14 +133,9 @@ jobs:
         working-directory: frontend
         run: npm run lint
 
-      - name: Run frontend tests when available
+      - name: Run frontend tests with coverage
         working-directory: frontend
-        run: |
-          if npm run | grep -Eq '^\s*test\b'; then
-            npm test
-          else
-            echo "No frontend test script configured; skipping test step."
-          fi
+        run: npm run test:coverage
 
       - name: Frontend dependency audit (production deps)
         working-directory: frontend

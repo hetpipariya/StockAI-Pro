@@ -50,6 +50,102 @@ def _configure_smartapi_library_logging() -> None:
 
 _configure_smartapi_library_logging()
 
+
+def _patch_smart_websocket() -> None:
+    try:
+        from SmartApi.smartWebSocketV2 import SmartWebSocketV2
+        import json
+        import logging
+
+        lib_logger = logging.getLogger("SmartApi.smartWebSocketV2")
+
+        # 1. Patch __init__ to ensure input_request_dict is instance-level and RESUBSCRIBE_FLAG is instance-level
+        original_init = SmartWebSocketV2.__init__
+
+        def patched_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            self.input_request_dict = {}
+            self.RESUBSCRIBE_FLAG = False
+
+        SmartWebSocketV2.__init__ = patched_init
+
+        # 2. Patch subscribe to safely update instance-level input_request_dict
+        original_subscribe = SmartWebSocketV2.subscribe
+
+        def patched_subscribe(self, correlation_id, mode, token_list):
+            if not hasattr(self, "input_request_dict") or self.input_request_dict is SmartWebSocketV2.input_request_dict:
+                self.input_request_dict = {}
+            return original_subscribe(self, correlation_id, mode, token_list)
+
+        SmartWebSocketV2.subscribe = patched_subscribe
+
+        # 3. Patch unsubscribe to avoid class-level dict corruption and non-mode key injection
+        def patched_unsubscribe(self, correlation_id, mode, token_list):
+            try:
+                if hasattr(self, "input_request_dict") and isinstance(self.input_request_dict, dict):
+                    mode_dict = self.input_request_dict.get(mode)
+                    if isinstance(mode_dict, dict):
+                        for token_entry in token_list:
+                            ex_type = token_entry.get("exchangeType")
+                            tokens_to_remove = token_entry.get("tokens", [])
+                            if ex_type in mode_dict:
+                                mode_dict[ex_type] = [t for t in mode_dict[ex_type] if t not in tokens_to_remove]
+                                if not mode_dict[ex_type]:
+                                    del mode_dict[ex_type]
+                        if not mode_dict:
+                            self.input_request_dict.pop(mode, None)
+
+                request_data = {
+                    "action": self.UNSUBSCRIBE_ACTION,
+                    "params": {
+                        "mode": mode,
+                        "tokenList": token_list
+                    }
+                }
+                self.wsapp.send(json.dumps(request_data))
+                self.RESUBSCRIBE_FLAG = True
+            except Exception as e:
+                lib_logger.error(f"Error occurred during unsubscribe: {e}")
+                raise e
+
+        SmartWebSocketV2.unsubscribe = patched_unsubscribe
+
+        # 4. Patch resubscribe to be extremely defensive and skip corrupted/non-integer keys
+        def patched_resubscribe(self):
+            try:
+                if not hasattr(self, "input_request_dict") or not isinstance(self.input_request_dict, dict):
+                    return
+                for key, val in list(self.input_request_dict.items()):
+                    if not isinstance(key, int) or not isinstance(val, dict):
+                        continue
+                    token_list = []
+                    for key1, val1 in val.items():
+                        temp_data = {
+                            "exchangeType": key1,
+                            "tokens": val1
+                        }
+                        token_list.append(temp_data)
+                    if token_list:
+                        request_data = {
+                            "action": self.SUBSCRIBE_ACTION,
+                            "params": {
+                                "mode": key,
+                                "tokenList": token_list
+                            }
+                        }
+                        self.wsapp.send(json.dumps(request_data))
+            except Exception as e:
+                lib_logger.error(f"Error occurred during resubscribe: {e}")
+                raise e
+
+        SmartWebSocketV2.resubscribe = patched_resubscribe
+        logger.info("[SMARTAPI] Successfully applied production monkey-patch to SmartWebSocketV2")
+    except Exception as exc:
+        logger.warning("[SMARTAPI] Failed to apply SmartWebSocketV2 monkey-patch: %s", exc)
+
+
+_patch_smart_websocket()
+
 # ─── Interval mapping for SmartAPI getCandleData ───
 INTERVAL_MAP = {
     "1m": "ONE_MINUTE",

@@ -8,12 +8,13 @@ import logging
 from typing import Any
 
 try:
-    from prometheus_client import Counter, Gauge, Histogram
+    from prometheus_client import Counter, Gauge, Histogram, REGISTRY
 except ImportError:
     # Safe fallback if prometheus_client is not installed/configured
     Counter = lambda name, desc, *args, **kwargs: DummyMetric()
     Gauge = lambda name, desc, *args, **kwargs: DummyMetric()
     Histogram = lambda name, desc, *args, **kwargs: DummyMetric()
+    REGISTRY = None
 
 
 class DummyMetric:
@@ -37,62 +38,83 @@ class DummyMetric:
         pass
 
 
+def safe_gauge(name: str, desc: str, *args, **kwargs) -> Any:
+    if REGISTRY is not None and hasattr(REGISTRY, "_names_to_collectors"):
+        if name in REGISTRY._names_to_collectors:
+            return REGISTRY._names_to_collectors[name]
+    return Gauge(name, desc, *args, **kwargs)
+
+
+def safe_counter(name: str, desc: str, *args, **kwargs) -> Any:
+    if REGISTRY is not None and hasattr(REGISTRY, "_names_to_collectors"):
+        if name in REGISTRY._names_to_collectors:
+            return REGISTRY._names_to_collectors[name]
+    return Counter(name, desc, *args, **kwargs)
+
+
+def safe_histogram(name: str, desc: str, *args, **kwargs) -> Any:
+    if REGISTRY is not None and hasattr(REGISTRY, "_names_to_collectors"):
+        if name in REGISTRY._names_to_collectors:
+            return REGISTRY._names_to_collectors[name]
+    return Histogram(name, desc, *args, **kwargs)
+
+
 # WebSocket Subsystem Metrics
-WS_CONNECTIONS = Gauge(
+WS_CONNECTIONS = safe_gauge(
     "stockai_ws_connections_active",
     "Number of currently active WebSocket clients"
 )
-WS_ROOM_SUBSCRIBERS = Gauge(
+WS_ROOM_SUBSCRIBERS = safe_gauge(
     "stockai_ws_room_subscribers_active",
     "Number of active client subscriptions in a symbol room",
     ["symbol"]
 )
-WS_RECONNECT_ATTEMPTS = Counter(
+WS_RECONNECT_ATTEMPTS = safe_counter(
     "stockai_ws_reconnect_attempts_total",
     "Total WebSocket reconnect attempts to SmartAPI broker"
 )
-WS_THROTTLED_CONNECTIONS = Counter(
+WS_THROTTLED_CONNECTIONS = safe_counter(
     "stockai_ws_throttled_connections_total",
     "Total number of WebSocket connections rejected by IP rate-limiting"
 )
 
 # Redis / Caching Subsystem Metrics
-REDIS_OPERATION_LATENCY = Histogram(
+REDIS_OPERATION_LATENCY = safe_histogram(
     "stockai_redis_operation_latency_seconds",
     "Latency of Redis operations (get, set, delete) in seconds",
     ["operation"]
 )
-REDIS_DEGRADED_MODE = Gauge(
+REDIS_DEGRADED_MODE = safe_gauge(
     "stockai_redis_degraded_mode_status",
     "Redis connection status (0 = healthy, 1 = degraded memory fallback)"
 )
 
 # Database Subsystem Metrics
-DB_QUERY_LATENCY = Histogram(
+DB_QUERY_LATENCY = safe_histogram(
     "stockai_db_query_latency_seconds",
     "Database query execution latency in seconds",
     ["operation"]
 )
-DB_TRANSIENT_RETRIES = Counter(
+DB_TRANSIENT_RETRIES = safe_counter(
     "stockai_db_transient_retries_total",
     "Total number of database transaction retries triggered by transient errors"
 )
 
 # ML Inference Pipeline Metrics
-ML_INFERENCE_LATENCY = Histogram(
+ML_INFERENCE_LATENCY = safe_histogram(
     "stockai_ml_inference_latency_seconds",
     "ML model inference end-to-end latency in seconds",
     ["symbol"]
 )
-ML_ACTIVE_WORKERS = Gauge(
+ML_ACTIVE_WORKERS = safe_gauge(
     "stockai_ml_active_workers_count",
     "Number of running ML CPU offloading worker processes"
 )
-ML_WORKER_HEARTBEAT = Gauge(
+ML_WORKER_HEARTBEAT = safe_gauge(
     "stockai_ml_worker_heartbeat_status",
     "ML worker execution pool health state (1 = healthy, 0 = crashed/broken)"
 )
-ML_FALLBACK_SIGNALS = Counter(
+ML_FALLBACK_SIGNALS = safe_counter(
     "stockai_ml_fallback_signals_total",
     "Total number of fallback HOLD signals generated due to inference errors"
 )

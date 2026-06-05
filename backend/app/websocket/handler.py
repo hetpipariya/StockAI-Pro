@@ -334,15 +334,13 @@ async def _run_live_executor(symbol: str):
     )
 
 
-def _get_auto_execution_contexts() -> list[dict]:
+def _get_auto_execution_contexts(summaries: list[dict]) -> list[dict]:
     """Resolve user contexts for feed-triggered 5m execution."""
     contexts: list[dict] = []
     seen: set[int] = set()
 
     try:
-        from app.trading.user_state import trading_manager
-
-        for summary in trading_manager.get_all_summaries():
+        for summary in summaries:
             raw_user_id = summary.get("user_id")
             if raw_user_id is None:
                 continue
@@ -408,7 +406,9 @@ async def _run_live_executor_5m(symbol: str, completed_candle: dict):
     if not config.LIVE_5M_AUTO_EXECUTION_ENABLED:
         return
 
-    contexts = await asyncio.to_thread(_get_auto_execution_contexts)
+    from app.trading.user_state import trading_manager
+    summaries = await trading_manager.get_all_summaries()
+    contexts = await asyncio.to_thread(_get_auto_execution_contexts, summaries)
     if not contexts:
         logger.debug("[EXECUTOR-5M] No eligible users for feed-triggered execution")
         return
@@ -704,6 +704,28 @@ def _schedule_reconnect(symbols_list: list[str]) -> None:
     )
 
 
+async def pre_populate_last_known_prices(symbols: list[str]) -> None:
+    """Pre-populate _last_known_prices to ensure correct tick normalization (paise-rupee)."""
+    try:
+        from app.services.bundle_service import get_snapshot
+    except ImportError:
+        return
+
+    for s in symbols:
+        normalized = str(s or "").strip().upper()
+        if not normalized:
+            continue
+        try:
+            snap = await get_snapshot(normalized, allow_live=False)
+            price = float(snap.get("ltp") or snap.get("price") or 0.0)
+            if price > 0:
+                with _last_known_prices_lock:
+                    _last_known_prices[normalized] = price
+                logger.info("[WS] Pre-populated last known price for %s to %.2f", normalized, price)
+        except Exception as e:
+            logger.warning("[WS] Failed to pre-populate last known price for %s: %s", normalized, e)
+
+
 async def auto_start_ws():
     """Scheduler callback to ensure WS stream is running."""
     if not _smartapi_ws_started or _ws_state in {
@@ -713,6 +735,7 @@ async def auto_start_ws():
     }:
         logger.info("[SCHEDULER] Auto-starting WebSocket")
         symbols = sorted(_ws_subscribed_symbols) or DEFAULT_WATCHLIST
+        await pre_populate_last_known_prices(symbols)
         start_smartapi_ws(symbols)
 
 
@@ -947,6 +970,7 @@ async def _process_ws_message(
 
         await socket_manager.subscribe(client_id, valid)
         if valid:
+            await pre_populate_last_known_prices(valid)
             # start_smartapi_ws handles both initial start and incremental adds.
             start_smartapi_ws(valid)
 

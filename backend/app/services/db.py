@@ -114,8 +114,6 @@ class UserTradingStateModel(Base):
         Integer,
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
-        unique=True,
     )
     balance: Mapped[float] = mapped_column(Float, nullable=False, default=100_000.0)
     positions: Mapped[list[dict]] = mapped_column(JSON, nullable=False, default=list)
@@ -136,7 +134,6 @@ class CandleModel(Base):
     __tablename__ = "candles"
     __table_args__ = (
         UniqueConstraint("symbol", "timeframe", "timestamp", name="uq_candle"),
-        Index("ix_candle_lookup", "symbol", "timeframe", "timestamp"),
         Index("ix_candle_timeframe", "timeframe"),
     )
 
@@ -158,8 +155,6 @@ class InstrumentModel(Base):
     __table_args__ = (
         UniqueConstraint("exchange", "symbol", name="uq_instruments_exchange_symbol"),
         UniqueConstraint("exchange", "token", name="uq_instruments_exchange_token"),
-        Index("ix_instruments_exchange_symbol", "exchange", "symbol"),
-        Index("ix_instruments_exchange_token", "exchange", "token"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -676,6 +671,13 @@ async def init_db():
             await conn.run_sync(Base.metadata.create_all)
         logger.info("[DB] ✓ Tables initialized")
 
+        # Clean up any corrupted paise-rupee scale candles for IDEA
+        async with engine.begin() as conn:
+            await conn.execute(text(
+                "DELETE FROM candles WHERE symbol = 'IDEA' AND (close >= 100 OR open >= 100);"
+            ))
+        logger.info("[DB] ✓ Corrupted IDEA candles cleaned up")
+
         # Enable TimescaleDB hypertables conditionally if using PostgreSQL
         if _is_postgres:
             try:
@@ -725,8 +727,58 @@ async def init_db():
                             "SELECT add_compression_policy('candles', INTERVAL '14 days', if_not_exists => TRUE);"
                         ))
                         logger.info("[DB] ✓ TimescaleDB compression policy added (14-day segment retention)")
+
+                    # 3. Check if market_data table exists and convert it
+                    md_exists_res = await conn.execute(text(
+                        "SELECT 1 FROM information_schema.tables WHERE table_name = 'market_data';"
+                    ))
+                    if md_exists_res.first() is not None:
+                        result = await conn.execute(text(
+                            "SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'market_data';"
+                        ))
+                        is_md_hyper = result.first() is not None
+                        if not is_md_hyper:
+                            await conn.execute(text(
+                                "SELECT create_hypertable('market_data', 'time', chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);"
+                            ))
+                            await conn.execute(text(
+                                "ALTER TABLE market_data SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol, timeframe');"
+                            ))
+                            await conn.execute(text(
+                                "SELECT add_compression_policy('market_data', INTERVAL '7 days', if_not_exists => TRUE);"
+                            ))
+                            await conn.execute(text(
+                                "SELECT add_retention_policy('market_data', INTERVAL '180 days', if_not_exists => TRUE);"
+                            ))
+                            logger.info("[DB] ✓ market_data table converted to TimescaleDB hypertable")
+
+                    # 4. Check if market_ticks table exists and convert it
+                    mt_exists_res = await conn.execute(text(
+                        "SELECT 1 FROM information_schema.tables WHERE table_name = 'market_ticks';"
+                    ))
+                    if mt_exists_res.first() is not None:
+                        result = await conn.execute(text(
+                            "SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name = 'market_ticks';"
+                        ))
+                        is_mt_hyper = result.first() is not None
+                        if not is_mt_hyper:
+                            await conn.execute(text("ALTER TABLE market_ticks DROP CONSTRAINT IF EXISTS market_ticks_pkey;"))
+                            await conn.execute(text("ALTER TABLE market_ticks ADD PRIMARY KEY (time, id);"))
+                            await conn.execute(text(
+                                "SELECT create_hypertable('market_ticks', 'time', chunk_time_interval => INTERVAL '7 days', if_not_exists => TRUE);"
+                            ))
+                            await conn.execute(text(
+                                "ALTER TABLE market_ticks SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol');"
+                            ))
+                            await conn.execute(text(
+                                "SELECT add_compression_policy('market_ticks', INTERVAL '7 days', if_not_exists => TRUE);"
+                            ))
+                            await conn.execute(text(
+                                "SELECT add_retention_policy('market_ticks', INTERVAL '30 days', if_not_exists => TRUE);"
+                            ))
+                            logger.info("[DB] ✓ market_ticks table converted to TimescaleDB hypertable")
             except Exception as exc:
-                logger.error("[DB] Failed to convert candles to TimescaleDB hypertable: %s. Continuing with standard Postgres schema.", exc)
+                logger.error("[DB] Failed to convert candles/market tables to TimescaleDB hypertable: %s. Continuing with standard Postgres schema.", exc)
     except Exception as e:
         logger.error("[DB] Initialization failed: %s", e)
         raise

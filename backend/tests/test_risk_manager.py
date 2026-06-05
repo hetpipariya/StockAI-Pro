@@ -129,7 +129,7 @@ class TestRiskManagerEdgeCases:
 
     def test_very_high_atr_small_position(self):
         """High ATR means large stop_dist → fewer shares."""
-        rm = RiskManager(starting_capital=100_000)
+        rm = RiskManager(starting_capital=100_000, risk_per_trade_pct=0.01)
         trade = rm.calculate_trade("TEST", "BUY", 100.0, atr=50.0)
         assert trade is not None
         # stop_dist = 1.5 * 50 = 75, risk = 1000, shares = 1000/75 = 13

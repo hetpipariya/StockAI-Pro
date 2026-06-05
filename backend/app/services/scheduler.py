@@ -9,6 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app import config
 from app.services.instrument_service import refresh_instruments_daily
 from app.websocket.handler import auto_start_ws, get_or_create_ws_connector
+from app.services.redis_client import distributed_job_lock
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ def start_scheduler() -> None:
     )
     if config.ENABLE_WS:
         scheduler.add_job(
-            auto_start_ws,
+            auto_start_ws_job,
             "cron",
             id="auto_start_ws",
             minute="*/1",
@@ -129,114 +130,139 @@ def stop_scheduler() -> None:
         logger.info("[SCHEDULER] Stopped")
 
 
+async def auto_start_ws_job():
+    """Wrapper to run auto_start_ws with a distributed lock."""
+    async with distributed_job_lock("auto_start_ws", lock_ttl_seconds=50) as acquired:
+        if not acquired:
+            logger.info("[SCHEDULER] auto_start_ws skipped: lock already acquired by another instance")
+            return
+        await auto_start_ws()
+
+
 async def regen_token():
     """Re-login SmartAPI every morning at 08:30 IST."""
-    logger.info("[SCHEDULER] Regenerating SmartAPI token")
-    connector = get_or_create_ws_connector()
-    await _run_job_with_retry(
-        "regen_token",
-        lambda: asyncio.to_thread(connector.login, force=True),
-        retries=3,
-    )
+    async with distributed_job_lock("regen_token", lock_ttl_seconds=50) as acquired:
+        if not acquired:
+            logger.info("[SCHEDULER] regen_token skipped: lock already acquired by another instance")
+            return
+        logger.info("[SCHEDULER] Regenerating SmartAPI token")
+        connector = get_or_create_ws_connector()
+        await _run_job_with_retry(
+            "regen_token",
+            lambda: asyncio.to_thread(connector.login, force=True),
+            retries=3,
+        )
 
 
 async def refresh_instruments():
     """Refresh instrument cache daily from OpenAPI with persistence fallback."""
-    logger.info("[SCHEDULER] Refreshing instrument master")
+    async with distributed_job_lock("refresh_instruments", lock_ttl_seconds=50) as acquired:
+        if not acquired:
+            logger.info("[SCHEDULER] refresh_instruments skipped: lock already acquired by another instance")
+            return
+        logger.info("[SCHEDULER] Refreshing instrument master")
 
-    async def _refresh_runner() -> None:
-        count = await refresh_instruments_daily(force=True)
-        logger.info("[SCHEDULER] Instrument refresh complete: %d symbols", count)
+        async def _refresh_runner() -> None:
+            count = await refresh_instruments_daily(force=True)
+            logger.info("[SCHEDULER] Instrument refresh complete: %d symbols", count)
 
-    await _run_job_with_retry(
-        "refresh_instruments",
-        _refresh_runner,
-        retries=3,
-    )
+        await _run_job_with_retry(
+            "refresh_instruments",
+            _refresh_runner,
+            retries=3,
+        )
 
 
 async def prewarm_predictions():
     """Pre-compute predictions every 15 minutes."""
-    from app.services.bundle_service import (DEFAULT_PREWARM_SYMBOLS,
-                                             get_prediction,
-                                             prewarm_bundle_cache)
+    async with distributed_job_lock("prewarm_predictions", lock_ttl_seconds=50) as acquired:
+        if not acquired:
+            logger.info("[SCHEDULER] prewarm_predictions skipped: lock already acquired by another instance")
+            return
+        from app.services.bundle_service import (DEFAULT_PREWARM_SYMBOLS,
+                                                 get_prediction,
+                                                 prewarm_bundle_cache)
 
-    logger.info("[SCHEDULER] Pre-warming predictions")
-    concurrency = max(1, min(config.BUNDLE_PREWARM_CONCURRENCY, 6))
-    sem = asyncio.Semaphore(concurrency)
+        logger.info("[SCHEDULER] Pre-warming predictions")
+        concurrency = max(1, min(config.BUNDLE_PREWARM_CONCURRENCY, 6))
+        sem = asyncio.Semaphore(concurrency)
 
-    async def _prewarm_prediction_symbol(symbol: str) -> None:
-        async with sem:
-            await _run_job_with_retry(
-                f"prediction_prewarm:{symbol}",
-                lambda: get_prediction(symbol=symbol, horizon="15m"),
-                retries=2,
-            )
+        async def _prewarm_prediction_symbol(symbol: str) -> None:
+            async with sem:
+                await _run_job_with_retry(
+                    f"prediction_prewarm:{symbol}",
+                    lambda: get_prediction(symbol=symbol, horizon="15m"),
+                    retries=2,
+                )
 
-    symbol_tasks = [
-        asyncio.create_task(_prewarm_prediction_symbol(symbol))
-        for symbol in ["RELIANCE", "TCS", "INFY", "HDFCBANK"]
-    ]
-    await asyncio.gather(*symbol_tasks, return_exceptions=True)
+        symbol_tasks = [
+            asyncio.create_task(_prewarm_prediction_symbol(symbol))
+            for symbol in ["RELIANCE", "TCS", "INFY", "HDFCBANK"]
+        ]
+        await asyncio.gather(*symbol_tasks, return_exceptions=True)
 
-    await _run_job_with_retry(
-        "bundle_prewarm",
-        lambda: prewarm_bundle_cache(list(DEFAULT_PREWARM_SYMBOLS)),
-        retries=2,
-    )
+        await _run_job_with_retry(
+            "bundle_prewarm",
+            lambda: prewarm_bundle_cache(list(DEFAULT_PREWARM_SYMBOLS)),
+            retries=2,
+        )
 
 
 async def sync_broker_positions():
     """Periodically sync DB positions with broker (LIVE mode only)."""
-    from app import config as _cfg
+    async with distributed_job_lock("sync_broker_positions", lock_ttl_seconds=50) as acquired:
+        if not acquired:
+            logger.info("[SCHEDULER] sync_broker_positions skipped: lock already acquired by another instance")
+            return
+        from app import config as _cfg
 
-    if _cfg.TRADING_MODE != "LIVE":
-        return
+        if _cfg.TRADING_MODE != "LIVE":
+            return
 
-    try:
-        from app.trading.live_executor import get_executor
-        from app.trading.user_state import trading_manager
+        try:
+            from app.trading.live_executor import get_executor
+            from app.trading.user_state import trading_manager
 
-        summaries = trading_manager.get_all_summaries()
-        concurrency = max(1, min(config.BUNDLE_PREWARM_CONCURRENCY, 4))
-        sem = asyncio.Semaphore(concurrency)
+            summaries = await trading_manager.get_all_summaries()
+            concurrency = max(1, min(config.BUNDLE_PREWARM_CONCURRENCY, 4))
+            sem = asyncio.Semaphore(concurrency)
 
-        async def _sync_user(summary: dict) -> None:
-            async with sem:
-                try:
-                    raw_user_id = summary.get("user_id")
-                    if raw_user_id is None:
-                        logger.warning("[SYNC] Skipping summary without user_id: %s", summary)
-                        return
+            async def _sync_user(summary: dict) -> None:
+                async with sem:
+                    try:
+                        raw_user_id = summary.get("user_id")
+                        if raw_user_id is None:
+                            logger.warning("[SYNC] Skipping summary without user_id: %s", summary)
+                            return
 
-                    user_id = int(raw_user_id)
-                    executor = await asyncio.to_thread(
-                        get_executor,
-                        user_id=user_id,
-                        mode=summary.get("mode", _cfg.TRADING_MODE),
-                        capital=float(summary.get("starting_capital", _cfg.STARTING_CAPITAL)),
-                    )
-                    report = await asyncio.to_thread(
-                        executor.router.sync_positions_with_broker,
-                        user_id=user_id,
-                    )
-
-                    if report.get("mismatches"):
-                        logger.warning(
-                            "[SYNC] user_id=%d mismatches: %s",
-                            user_id,
-                            report["mismatches"],
+                        user_id = int(raw_user_id)
+                        executor = await asyncio.to_thread(
+                            get_executor,
+                            user_id=user_id,
+                            mode=summary.get("mode", _cfg.TRADING_MODE),
+                            capital=float(summary.get("starting_capital", _cfg.STARTING_CAPITAL)),
                         )
-                except Exception as user_exc:
-                    logger.warning("[SYNC] Per-user sync skipped due to error: %s", user_exc)
+                        report = await asyncio.to_thread(
+                            executor.router.sync_positions_with_broker,
+                            user_id=user_id,
+                        )
 
-        await _run_job_with_retry(
-            "sync_broker_positions",
-            lambda: asyncio.gather(
-                *[asyncio.create_task(_sync_user(summary)) for summary in summaries],
-                return_exceptions=True,
-            ),
-            retries=2,
-        )
-    except Exception as e:
-        logger.error("[SYNC] Broker sync job failed: %s", e)
+                        if report.get("mismatches"):
+                            logger.warning(
+                                "[SYNC] user_id=%d mismatches: %s",
+                                user_id,
+                                report["mismatches"],
+                            )
+                    except Exception as user_exc:
+                        logger.warning("[SYNC] Per-user sync skipped due to error: %s", user_exc)
+
+            await _run_job_with_retry(
+                "sync_broker_positions",
+                lambda: asyncio.gather(
+                    *[asyncio.create_task(_sync_user(summary)) for summary in summaries],
+                    return_exceptions=True,
+                ),
+                retries=2,
+            )
+        except Exception as e:
+            logger.error("[SYNC] Broker sync job failed: %s", e)

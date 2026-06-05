@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pandas as pd
 import pytest
 from fastapi import WebSocket, WebSocketDisconnect
 from sqlalchemy.exc import OperationalError
@@ -182,11 +183,12 @@ async def test_ml_pipeline_broken_worker_process_recovery():
     })
     
     # Simulate a crashed process executor raising a BrokenProcessPool exception
-    mock_run_in_executor = AsyncMock(side_effect=BrokenProcessPool("Process pool has crashed!"))
+    mock_executor = MagicMock()
+    mock_executor.submit.side_effect = BrokenProcessPool("Process pool has crashed!")
     
     pipeline = ProductionInferencePipeline(model=None, redis_cache=None, use_feature_cache=True)
     
-    with patch("asyncio.AbstractEventLoop.run_in_executor", mock_run_in_executor):
+    with patch("app.inference.production_pipeline.get_process_executor", return_value=mock_executor):
         # Trigger inference - should handle process crash gracefully, return fallback HOLD signal, and trigger reset
         signal = await pipeline.infer(symbol="CRASH_SYM", ohlcv_5m=df_5m, interval="5m")
         

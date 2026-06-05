@@ -8,10 +8,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.cpp_engine import compute_features as cpp_compute_features
+from app.cpp_engine import is_available
 
 
 def make_ohlcv_frame(num_bars: int, start_price: float = 100.0, drift: float = 0.001) -> pd.DataFrame:
@@ -34,6 +36,7 @@ def make_ohlcv_frame(num_bars: int, start_price: float = 100.0, drift: float = 0
     )
 
 
+@pytest.mark.skipif(not is_available(), reason="C++ engine DLL not loadable in this env")
 def test_cpp_engine_large_historical_window_returns_safe_features():
     df = make_ohlcv_frame(100_000)
     result = cpp_compute_features(df)
@@ -44,6 +47,7 @@ def test_cpp_engine_large_historical_window_returns_safe_features():
     assert np.all(np.isfinite(result.to_numpy(dtype=float)))
 
 
+@pytest.mark.skipif(not is_available(), reason="C++ engine DLL not loadable in this env")
 def test_cpp_engine_concurrent_inference_is_deterministic():
     frames = [make_ohlcv_frame(2500, start_price=100.0 + i * 5.0) for i in range(8)]
 
@@ -58,6 +62,7 @@ def test_cpp_engine_concurrent_inference_is_deterministic():
         assert not np.isinf(result.to_numpy(dtype=float)).any()
 
 
+@pytest.mark.skipif(not is_available(), reason="C++ engine DLL not loadable in this env")
 def test_cpp_engine_realtime_rolling_window_outputs_are_stable():
     frame = make_ohlcv_frame(300)
     rows = []

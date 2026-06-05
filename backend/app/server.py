@@ -17,7 +17,7 @@ from app.logging_setup import configure_logging
 from app.middleware import (add_exception_handlers, add_production_middleware,
                             configure_cors)
 from app.routes import (auth, auth_signup, backtest, bundle, indicators, instruments, market, news,
-                        portfolio, predict, sentiment, signals, symbols,
+                        order_proxy, portfolio, predict, sentiment, signals, symbols,
                         trade_api, trade_decision,
                         trades, trading)
 from app.services.redis_client import get_cache, set_cache
@@ -92,6 +92,7 @@ app.include_router(trading.router)
 app.include_router(trade_api.router)
 app.include_router(trades.router)
 app.include_router(portfolio.router)
+app.include_router(order_proxy.router)
 app.include_router(signals.router)
 app.include_router(trade_decision.router)
 setup_websocket_routes(app)

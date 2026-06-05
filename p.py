@@ -1,6 +1,6 @@
 import requests
 
-CODE = "8pWlSm"
+CODE = "yz41Jd"
 
 API_KEY = "537c438b-d56b-4295-b65e-6b47159b3ca3"
 API_SECRET = "0yvaiafj1j"
