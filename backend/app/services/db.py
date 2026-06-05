@@ -9,7 +9,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 from sqlalchemy import (JSON, Boolean, DateTime, Float, ForeignKey, Index,
                         Integer, String, Text, UniqueConstraint, create_engine,
@@ -93,6 +93,11 @@ class UserModel(Base):
         "UserTradingStateModel",
         back_populates="user",
         uselist=False,
+        cascade="all, delete-orphan",
+    )
+    broker_sessions = relationship(
+        "BrokerSessionModel",
+        back_populates="user",
         cascade="all, delete-orphan",
     )
 
@@ -359,6 +364,34 @@ class DailyRiskState(Base):
     current_capital: Mapped[float] = mapped_column(Float)
     trades_today: Mapped[int] = mapped_column(Integer, default=0)
     halted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class BrokerSessionModel(Base):
+    """Stores the OAuth credentials and connection state for a broker."""
+    __tablename__ = "broker_sessions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "broker_name", name="uq_user_broker"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    broker_name: Mapped[str] = mapped_column(String(50), nullable=False, index=True) # "upstox", "angelone", etc.
+    access_token: Mapped[str] = mapped_column(Text, nullable=True)
+    refresh_token: Mapped[str] = mapped_column(Text, nullable=True)
+    token_expiry: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="DISCONNECTED", nullable=False)
+    last_auth_success: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    last_auth_failure: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    reconnect_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    user = relationship("UserModel", back_populates="broker_sessions")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -857,3 +890,43 @@ def get_sync_db_session():
             session.close()
     else:
         yield None
+
+
+# Pool protection event listener and monitoring function
+from sqlalchemy import event
+
+def get_pool_status() -> dict[str, Any]:
+    if not hasattr(engine, "sync_engine") or not hasattr(engine.sync_engine, "pool"):
+        return {"pool_checked_out": 0, "pool_available": 0, "pool_max": 0, "pool_wait_time": 0.0}
+    
+    pool = engine.sync_engine.pool
+    checked_out = getattr(pool, "checkedout", lambda: 0)()
+    size = getattr(pool, "size", lambda: 0)()
+    max_overflow = getattr(pool, "_max_overflow", 0)
+    checked_in = getattr(pool, "checkedin", lambda: 0)()
+    
+    pool_max = size + max_overflow
+    utilization = checked_out / pool_max if pool_max > 0 else 0.0
+    
+    if utilization > 0.95:
+        logger.critical("[POOL_EXHAUSTION] Database pool utilization CRITICAL: %.1f%% (checked out: %d/%d)", utilization * 100, checked_out, pool_max)
+    elif utilization > 0.80:
+        logger.warning("[POOL_EXHAUSTION] Database pool utilization WARNING: %.1f%% (checked out: %d/%d)", utilization * 100, checked_out, pool_max)
+        
+    return {
+        "pool_checked_out": checked_out,
+        "pool_available": checked_in,
+        "pool_max": pool_max,
+        "pool_wait_time": 0.0,
+    }
+
+try:
+    if hasattr(engine, "sync_engine") and engine.sync_engine:
+        @event.listens_for(engine.sync_engine, "checkout")
+        def receive_checkout(dbapi_connection, connection_record, connection_proxy):
+            try:
+                get_pool_status()
+            except Exception as e:
+                logger.debug("Failed to record pool status on checkout: %s", e)
+except Exception as e:
+    logger.warning("Failed to configure database pool monitoring event listeners: %s", e)

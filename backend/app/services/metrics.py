@@ -118,3 +118,21 @@ ML_FALLBACK_SIGNALS = safe_counter(
     "stockai_ml_fallback_signals_total",
     "Total number of fallback HOLD signals generated due to inference errors"
 )
+
+# New Preloading and ProcessPool Queue Metrics
+WS_PRELOAD_DURATION = safe_gauge(
+    "stockai_ws_preload_duration_seconds",
+    "Time taken to pre-populate last known prices in seconds"
+)
+WS_PRELOAD_SUCCESS = safe_counter(
+    "stockai_ws_preload_success_total",
+    "Total successfully pre-populated last known prices"
+)
+WS_PRELOAD_FAILURES = safe_counter(
+    "stockai_ws_preload_failures_total",
+    "Total failed pre-populations of last known prices"
+)
+ML_PROCESSPOOL_QUEUE_DEPTH = safe_gauge(
+    "stockai_ml_processpool_queue_depth",
+    "Current number of pending tasks in the ML ProcessPoolExecutor queue"
+)

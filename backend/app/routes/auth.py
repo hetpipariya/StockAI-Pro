@@ -446,3 +446,49 @@ async def get_broker_status(current_user: UserModel = Depends(get_current_user))
                 "message": f"Could not check broker status: {str(e)[:100]}"
             },
         }
+
+
+@router.get("/broker/status")
+async def get_all_broker_status(current_user: UserModel = Depends(get_current_user)):
+    """Expose the consolidated status and health parameters for the active broker."""
+    from app.services.broker_session_manager import broker_session_manager
+    from app.websocket.handler import get_ws_state
+
+    upstox_state = broker_session_manager.get_state("upstox")
+    ws_state = get_ws_state()
+    upstox_state["websocket_connected"] = (ws_state == "CONNECTED")
+
+    return {
+        "broker": "upstox",
+        "status": upstox_state.get("status", "DISCONNECTED"),
+        "token_valid": upstox_state.get("token_valid", False),
+        "websocket_connected": upstox_state.get("websocket_connected", False),
+        "last_auth_success": upstox_state.get("last_auth_success"),
+        "last_auth_failure": upstox_state.get("last_auth_failure"),
+        "reconnect_attempts": upstox_state.get("reconnect_attempts", 0)
+    }
+
+
+@router.get("/login/upstox")
+async def get_login_upstox_redirect():
+    """Build and redirect the browser directly to the Upstox authorize dialog page."""
+    from fastapi.responses import RedirectResponse
+    from app import config
+    import urllib.parse
+    
+    redirect_encoded = urllib.parse.quote_plus(config.UPSTOX_REDIRECT_URI)
+    upstox_url = f"https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id={config.UPSTOX_API_KEY}&redirect_uri={redirect_encoded}"
+    logger.info(f"[BROKER_CONNECTED] Initiating OAuth flow. Redirecting to Upstox authorize URL.")
+    return RedirectResponse(upstox_url)
+
+
+@router.post("/disconnect/upstox")
+async def post_disconnect_upstox(current_user: UserModel = Depends(get_current_user)):
+    """Terminate the active streaming feeds and remove token records from the database."""
+    from app.services.broker_session_manager import broker_session_manager
+    await broker_session_manager.disconnect_broker(user_id=current_user.id, broker_name="upstox")
+    return {
+        "status": "ok",
+        "message": "Upstox disconnected successfully",
+        "data": None
+    }

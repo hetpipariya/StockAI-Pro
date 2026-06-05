@@ -1,5 +1,5 @@
 import React from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import { LayoutDashboard, Activity, BarChart2, Briefcase, History, Settings } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -24,8 +24,8 @@ const SidebarItem = ({ item }) => (
       cn(
         'group flex flex-col items-center justify-center p-3 my-2 text-sm font-medium rounded-xl transition-all duration-200',
         isActive
-          ? 'bg-blue-600/10 text-blue-500 shadow-[inset_4px_0_0_0_rgba(59,130,246,1)]'
-          : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200'
+          ? 'bg-cyan-500/10 text-cyan-300 shadow-[inset_4px_0_0_0_rgba(6,182,212,1)] shadow-[0_0_12px_rgba(6,182,212,0.15)]'
+          : 'text-slate-400 hover:bg-white/[0.04] hover:text-slate-250'
       )
     }
     title={item.name}
@@ -35,24 +35,27 @@ const SidebarItem = ({ item }) => (
 );
 
 export default function TabletLayout({ children }) {
+  const location = useLocation();
+  const isDashboard = location.pathname === '/dashboard';
+
   return (
-    <div className="flex h-screen bg-gray-950 text-white overflow-hidden font-sans">
+    <div className="flex h-screen bg-[#030914] text-white overflow-hidden font-sans">
       {/* Narrow Sidebar */}
-      <div className="w-24 flex flex-col bg-[#0F111A] border-r border-gray-800/50 backdrop-blur-xl z-20 items-center">
-        <div className="flex h-20 shrink-0 items-center justify-center border-b border-gray-800/50 w-full mb-4">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+      <div className="w-20 flex flex-col bg-[#060E1D] border-r border-white/10 backdrop-blur-xl z-20 items-center shrink-0">
+        <div className="flex h-16 shrink-0 items-center justify-center border-b border-white/10 w-full mb-4">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
              <Activity className="h-6 w-6 text-white" />
           </div>
         </div>
-        <div className="flex flex-1 flex-col overflow-y-auto w-full px-3 pb-4 scrollbar-hide items-center">
+        <div className="flex flex-1 flex-col overflow-y-auto w-full px-2 pb-4 scrollbar-hide items-center">
           <nav className="flex-1 w-full">
             {navigation.map((item) => (
               <SidebarItem key={item.name} item={item} />
             ))}
           </nav>
         </div>
-        <div className="p-4 border-t border-gray-800/50 w-full flex justify-center">
-           <div className="w-10 h-10 rounded-full bg-blue-900/40 flex items-center justify-center text-blue-400 font-bold border border-blue-500/20 cursor-pointer">
+        <div className="p-4 border-t border-white/10 w-full flex justify-center shrink-0">
+           <div className="w-10 h-10 rounded-full bg-cyan-900/40 flex items-center justify-center text-cyan-300 font-bold border border-cyan-500/20 cursor-pointer">
               AD
            </div>
         </div>
@@ -60,20 +63,12 @@ export default function TabletLayout({ children }) {
 
       {/* Main Content Area */}
       <div className="flex flex-1 flex-col overflow-hidden relative">
-        {/* Top Header */}
-        <header className="flex h-20 items-center px-6 border-b border-gray-800/50 bg-[#0F111A]/80 backdrop-blur-xl z-10 sticky top-0 justify-between">
-          <h1 className="text-xl font-semibold text-gray-100 tracking-tight">StockAI Pro</h1>
-          <div className="flex items-center space-x-4">
-             <div className="px-3 py-1.5 rounded-full bg-green-500/10 text-green-400 text-xs font-medium border border-green-500/20 flex items-center">
-               <span className="w-2 h-2 rounded-full bg-green-500 mr-2 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.8)]"></span>
-               Live
-             </div>
-          </div>
-        </header>
-        
-        {/* Page Content */}
-        <main className="flex-1 overflow-y-auto bg-[#0a0a0f] p-6 text-sm">
-          <div className="mx-auto max-w-7xl">
+        {/* Page Content - Full screen width with custom paddings */}
+        <main className={cn(
+          "flex-1 overflow-y-auto bg-[#020617]",
+          isDashboard ? "p-0 h-full w-full overflow-hidden" : "p-6"
+        )}>
+          <div className="w-full h-full">
             {children}
           </div>
         </main>

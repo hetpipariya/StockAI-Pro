@@ -68,8 +68,8 @@ services:
   # ========== BACKEND (FastAPI) ==========
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
       # Best practices for Docker build caching
       args:
         BUILDKIT_INLINE_CACHE: 1

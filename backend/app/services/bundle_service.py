@@ -276,6 +276,9 @@ async def _with_timeout(
         is_expected_data_timeout = context.startswith(("db_", "yf_"))
         timeout_logger = logger.info if is_expected_data_timeout else logger.warning
 
+        if context.startswith("db_"):
+            logger.warning("[DB_TIMEOUT] Database query timed out in context %s after %.2fs", context, timeout_seconds)
+
         if _should_emit_bundle_log(f"timeout:{context}"):
             timeout_logger("[BUNDLE] Timeout in %s after %.2fs", context, timeout_seconds)
         else:
@@ -284,6 +287,8 @@ async def _with_timeout(
         if cancel_on_timeout:
             if not task.done():
                 task.cancel()
+                if context.startswith("db_"):
+                    logger.warning("[DB_TIMEOUT_CANCELLED] Underlying database query cancelled for context %s", context)
         elif not task.done():
             def _consume_late_result(done_task: asyncio.Future[Any]) -> None:
                 try:
@@ -1024,7 +1029,7 @@ async def _db_snapshot(symbol: str) -> dict[str, Any] | None:
         DB_READ_TIMEOUT_SECONDS,
         None,
         f"db_snapshot_1m:{symbol}",
-        cancel_on_timeout=False,
+        cancel_on_timeout=True,
     )
     if not candle:
         candle = await _with_timeout(
@@ -1032,7 +1037,7 @@ async def _db_snapshot(symbol: str) -> dict[str, Any] | None:
             DB_READ_TIMEOUT_SECONDS,
             None,
             f"db_snapshot_1d:{symbol}",
-            cancel_on_timeout=False,
+            cancel_on_timeout=True,
         )
     if not candle:
         return None

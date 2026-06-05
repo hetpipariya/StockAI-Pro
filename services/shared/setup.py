@@ -4,5 +4,5 @@ setup(
     name="stockai_shared",
     version="2.0.0",
     packages=find_packages(),
-    install_packages=["pydantic", "redis", "sqlalchemy", "passlib", "bcrypt"],
+    install_requires=["pydantic", "redis", "sqlalchemy", "passlib", "bcrypt==4.0.1"],
 )

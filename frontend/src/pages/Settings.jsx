@@ -2,6 +2,7 @@ import React from 'react';
 import { AlertTriangle, Gauge, Power, RefreshCw, ShieldAlert, Zap } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { Card } from '../components/ui';
+import BrokerToggleCard from '../components/BrokerToggleCard';
 
 export default function Settings() {
   const {
@@ -99,6 +100,8 @@ export default function Settings() {
           </div>
         </Card>
       </section>
+
+      <BrokerToggleCard />
 
       <Card className="!p-5 border-rose-500/30 bg-gradient-to-r from-rose-500/10 to-[#081628]">
         <h3 className="text-lg font-black text-rose-300">Danger Zone</h3>

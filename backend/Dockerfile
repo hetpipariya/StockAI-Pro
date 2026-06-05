@@ -7,7 +7,7 @@
 # Compile dependencies to wheels for faster installation
 FROM python:3.11-slim as builder
 
-WORKDIR /app
+WORKDIR /build
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -16,30 +16,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements
-COPY requirements.txt .
+# Copy requirements and the shared package source from the repo root build context
+COPY backend/requirements.txt ./backend/requirements.txt
+COPY services/shared ./services/shared
 
 # Install build-time helpers for the native acceleration module
-RUN pip install --no-cache-dir pybind11
+# RUN pip install --no-cache-dir pybind11
+    
+# # Copy native sources and build the extension module
+# COPY cpp ./cpp
+# WORKDIR /app/cpp
 
-# Copy native sources and build the extension module
-COPY cpp ./cpp
-WORKDIR /app/cpp
-RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Dpybind11_DIR="$(python -m pybind11 --cmakedir)" \
-    && cmake --build build --config Release \
-    && find build -name "stockai_cpp*.so" -exec cp {} /app/ \;
 
-WORKDIR /app
+
+# RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Dpybind11_DIR="$(python -m pybind11 --cmakedir)" \
+#     && cmake --build build --config Release \
+#     && find build -name "stockai_cpp*.so" -exec cp {} /app/ \;
+
+# WORKDIR /app
 
 # Build wheels (this caches the expensive compilation step)
-RUN pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip wheel --no-cache-dir --wheel-dir /wheels -r backend/requirements.txt && \
+    pip wheel --no-cache-dir --wheel-dir /wheels ./services/shared
 
 
 # ========== STAGE 2: RUNTIME ==========
 # Minimal runtime image with only necessary dependencies
 FROM python:3.11-slim
 
-WORKDIR /app
+WORKDIR /app/backend
 
 # ========== Set metadata ==========
 LABEL maintainer="StockAI Pro Team"
@@ -53,9 +59,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ========== Copy wheels and requirements ==========
-COPY --from=builder /app/wheels /wheels
-COPY --from=builder /app/requirements.txt .
-COPY --from=builder /app/stockai_cpp*.so /app/
+COPY --from=builder /wheels /wheels
+COPY backend/requirements.txt ./requirements.txt
+#  COPY --from=builder /app/stockai_cpp*.so /app/
 
 ENV PIP_DEFAULT_TIMEOUT=100 \
     PIP_RETRIES=10
@@ -64,14 +70,16 @@ ENV PIP_DEFAULT_TIMEOUT=100 \
 RUN pip install --no-cache-dir /wheels/*
 
 # ========== Copy application ==========
-COPY . .
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY backend/app ./app
+COPY backend/alembic ./alembic
+COPY backend/alembic.ini ./alembic.ini
+COPY backend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # ========== Set environment variables ==========
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PYTHONPATH=/app \
+    PYTHONPATH=/app/backend \
   PORT=8000 \
   RUN_MIGRATIONS_ON_START=true \
   ALLOW_START_WITH_FAILED_MIGRATIONS=false \

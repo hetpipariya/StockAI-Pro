@@ -573,6 +573,18 @@ def start_smartapi_ws(symbols_list: list[str]):
         return
 
     connector = get_or_create_ws_connector()
+    active_broker = connector.active_broker
+
+    # Safety guard: prevent WS startup if broker token is expired or failed
+    from app.services.broker_session_manager import broker_session_manager
+    manager_state = broker_session_manager.get_state(active_broker)
+    manager_status = manager_state.get("status")
+
+    if manager_status in ("AUTH_FAILED", "TOKEN_EXPIRED", "REAUTH_REQUIRED"):
+        broker_session_manager.log_event("[WS_BLOCKED]", active_broker, details=f"Blocked start_smartapi_ws because broker state is {manager_status}")
+        _set_ws_state("AUTH_FAILED")
+        return
+
     use_symbol_tokens = connector.active_broker == "upstox"
 
     tokens: list[str] = []
@@ -614,6 +626,7 @@ def start_smartapi_ws(symbols_list: list[str]):
 
     token_list = [{"exchangeType": 1, "tokens": tokens}]
     try:
+        broker_session_manager.log_event("[WS_START]", active_broker, details="Initiating WebSocket feed connection")
         if connector.active_broker == "upstox":
             upstox_tokens = [{"exchangeType": 1, "tokens": normalized_symbols}]
             connector.start_ws(upstox_tokens, _on_smartapi_tick)
@@ -631,29 +644,47 @@ def start_smartapi_ws(symbols_list: list[str]):
 
 
 async def _retry_ws_connect(symbols_list: list[str]):
-    """Retry WebSocket connection with exponential backoff and circuit breaker.
+    """Retry WebSocket connection with exponential backoff.
 
-    Uses exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s (max)
-    Circuit breaker: After max retries, wait 5 minutes before trying again.
+    Limits to 20 reconnect attempts. If exceeded, stops loop and requires manual login.
     """
-    global _ws_reconnect_attempt
+    global _ws_reconnect_attempt, _smartapi_ws_started
+    MAX_RECONNECT_ATTEMPTS = 20
+
+    connector = get_or_create_ws_connector()
+    active_broker = connector.active_broker
+    from app.services.broker_session_manager import broker_session_manager
 
     while not _smartapi_ws_started:
         _ws_reconnect_attempt += 1
 
-        # Circuit breaker: if max retries reached, wait longer before resetting
-        if _ws_reconnect_attempt > _WS_MAX_RETRY_ATTEMPTS:
-            logger.error(
-                "[WS] Max retry attempts (%d) reached. Circuit breaker activated. "
-                "Waiting %ds before resetting.",
-                _WS_MAX_RETRY_ATTEMPTS,
-                _WS_CIRCUIT_BREAKER_RESET_TIME,
+        # Check status before each attempt to prevent reconnect storms
+        state = broker_session_manager.get_state(active_broker)
+        status = state.get("status")
+        if status in ("AUTH_FAILED", "TOKEN_EXPIRED", "REAUTH_REQUIRED"):
+            broker_session_manager.log_event(
+                "[WS_BLOCKED]",
+                active_broker,
+                details=f"Aborting reconnect loop because broker status is {status}"
             )
-            _set_ws_state("FAILED")
-            await asyncio.sleep(_WS_CIRCUIT_BREAKER_RESET_TIME)
-            _ws_reconnect_attempt = 0  # Reset counter after waiting
-            logger.info("[WS] Circuit breaker reset. Resuming reconnection attempts.")
-            continue
+            _set_ws_state("AUTH_FAILED")
+            return
+
+        if _ws_reconnect_attempt > MAX_RECONNECT_ATTEMPTS:
+            logger.error(
+                "[WS_RECONNECT_ABORTED] Max reconnect attempts (%d) reached. Stopping reconnect loop. "
+                "Marking broker unavailable and requiring manual relogin.",
+                MAX_RECONNECT_ATTEMPTS,
+            )
+            _set_ws_state("AUTH_FAILED")
+            try:
+                if hasattr(connector, "_token_manager") and connector._token_manager:
+                    connector._token_manager._manual_relogin_required = True
+            except Exception as e:
+                logger.warning("[WS] Failed to mark manual relogin in connector: %s", e)
+            return
+
+        _set_ws_state("RECONNECTING")
 
         # Exponential backoff with randomized ±15% jitter to prevent reconnect storms
         base_wait = min(
@@ -665,9 +696,9 @@ async def _retry_ws_connect(symbols_list: list[str]):
         wait_s = max(1.0, min(_WS_MAX_BACKOFF_SECONDS, base_wait + jitter))
 
         logger.warning(
-            "[WS] Reconnect attempt %d/%d in %.1fs (exponential backoff with jitter)",
+            "[WS_RECONNECT] Reconnect attempt %d/%d in %.1fs (exponential backoff with jitter)",
             _ws_reconnect_attempt,
-            _WS_MAX_RETRY_ATTEMPTS,
+            MAX_RECONNECT_ATTEMPTS,
             wait_s,
         )
         
@@ -679,51 +710,114 @@ async def _retry_ws_connect(symbols_list: list[str]):
 
         await asyncio.sleep(wait_s)
 
-
         try:
             start_smartapi_ws(symbols_list)
             if _smartapi_ws_started:
                 logger.info(
-                    "[WS] Reconnection successful on attempt %d", _ws_reconnect_attempt
+                    "[WS_CONNECT] Reconnection successful on attempt %d", _ws_reconnect_attempt
                 )
+                _set_ws_state("CONNECTED")
                 return
         except Exception as exc:
+            # Check if it's an auth exception and hard stop if so
+            exc_str = str(exc).lower()
+            if "BrokerAuthenticationError" in type(exc).__name__ or "unauthorized" in exc_str or "401" in exc_str or "403" in exc_str or "token expired" in exc_str:
+                logger.error("[WS_DISCONNECT] Auth failure detected during WS connect. Transitioning to TOKEN_EXPIRED and stopping loop.")
+                broker_session_manager.update_state(active_broker, status="TOKEN_EXPIRED", token_valid=False)
+                await broker_session_manager.mark_token_expired_db(active_broker)
+                _set_ws_state("AUTH_FAILED")
+                return
+
+            _set_ws_state("RECONNECTING")
             logger.error(
-                "[WS] Reconnection attempt %d failed: %s", _ws_reconnect_attempt, exc
+                "[WS_DISCONNECT] Reconnection attempt %d failed: %s", _ws_reconnect_attempt, exc
             )
 
 
 def _schedule_reconnect(symbols_list: list[str]) -> None:
     global _ws_reconnect_task
+    # Duplicate reconnect tasks forbidden
     if _ws_reconnect_task and not _ws_reconnect_task.done():
+        logger.warning("[WS_RECONNECT_ABORTED] Reconnect task already active. Aborting duplicate scheduling.")
         return
     if not _event_loop or not _event_loop.is_running():
         return
+    _set_ws_state("RECONNECTING")
     _ws_reconnect_task = asyncio.run_coroutine_threadsafe(
         _retry_ws_connect(symbols_list), _event_loop
     )
 
 
 async def pre_populate_last_known_prices(symbols: list[str]) -> None:
-    """Pre-populate _last_known_prices to ensure correct tick normalization (paise-rupee)."""
+    """Pre-populate _last_known_prices in parallel with strict timeout (sub-5s total, 2s per request)."""
     try:
         from app.services.bundle_service import get_snapshot
     except ImportError:
         return
 
-    for s in symbols:
-        normalized = str(s or "").strip().upper()
+    import time
+    from app.services.metrics import WS_PRELOAD_DURATION, WS_PRELOAD_SUCCESS, WS_PRELOAD_FAILURES
+
+    start_time = time.perf_counter()
+    sem = asyncio.Semaphore(5)
+
+    success_count = 0
+    failure_count = 0
+
+    async def _preload_symbol(symbol: str):
+        nonlocal success_count, failure_count
+        normalized = str(symbol or "").strip().upper()
         if not normalized:
-            continue
-        try:
-            snap = await get_snapshot(normalized, allow_live=False)
-            price = float(snap.get("ltp") or snap.get("price") or 0.0)
-            if price > 0:
-                with _last_known_prices_lock:
-                    _last_known_prices[normalized] = price
-                logger.info("[WS] Pre-populated last known price for %s to %.2f", normalized, price)
-        except Exception as e:
-            logger.warning("[WS] Failed to pre-populate last known price for %s: %s", normalized, e)
+            return
+        async with sem:
+            try:
+                # strict 2s timeout per request
+                snap = await asyncio.wait_for(
+                    get_snapshot(normalized, allow_live=False),
+                    timeout=2.0
+                )
+                if snap:
+                    price = float(snap.get("ltp") or snap.get("price") or 0.0)
+                    if price > 0:
+                        with _last_known_prices_lock:
+                            _last_known_prices[normalized] = price
+                        logger.info("[WS] Pre-populated last known price for %s to %.2f", normalized, price)
+                        success_count += 1
+                        try:
+                            WS_PRELOAD_SUCCESS.inc()
+                        except Exception:
+                            pass
+                        return
+                failure_count += 1
+                try:
+                    WS_PRELOAD_FAILURES.inc()
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.warning("[WS] Failed to pre-populate last known price for %s: %s", normalized, e)
+                failure_count += 1
+                try:
+                    WS_PRELOAD_FAILURES.inc()
+                except Exception:
+                    pass
+
+    # Ensure total preload time under 5 seconds
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*[_preload_symbol(s) for s in symbols], return_exceptions=True),
+            timeout=5.0
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[WS] Pre-population partially timed out (>5s)")
+    except Exception as e:
+        logger.warning("[WS] Pre-population encountered gather error: %s", e)
+    
+    duration = time.perf_counter() - start_time
+    logger.info("[WS] Pre-population finished in %.3fs. Success: %d, Failures: %d", duration, success_count, failure_count)
+    try:
+        WS_PRELOAD_DURATION.set(duration)
+    except Exception:
+        pass
 
 
 async def auto_start_ws():

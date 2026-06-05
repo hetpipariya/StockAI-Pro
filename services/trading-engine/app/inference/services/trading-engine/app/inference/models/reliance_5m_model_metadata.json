@@ -1,0 +1,146 @@
+{
+  "model_name": "reliance_5m_model",
+  "model_version": "v1.0",
+  "feature_version": "v3.0_cpp",
+  "feature_count": 24,
+  "feature_names": [
+    "ema_9_21_ratio",
+    "close_to_ema50_pct",
+    "linreg_slope_20",
+    "adx_14",
+    "rsi_14",
+    "macd_hist_pct",
+    "stoch_rsi_k",
+    "cci_20_clamped",
+    "volume_ratio_20",
+    "mfi_14",
+    "relative_volume_intraday",
+    "atr_pct",
+    "bb_width_pct",
+    "bb_pct_b",
+    "vwap_distance_pct",
+    "vwap_zscore_20",
+    "cpr_width_pct",
+    "bos_strength_pct",
+    "fvg_gap_pct",
+    "candle_body_ratio",
+    "nifty_direction",
+    "sector_strength_pct",
+    "daily_distance_ema50_pct",
+    "session_progress_pct"
+  ],
+  "label_classes": [
+    -1,
+    0,
+    1
+  ],
+  "label_names": [
+    "SELL",
+    "HOLD",
+    "BUY"
+  ],
+  "xgboost_params": {
+    "n_estimators": 250,
+    "max_depth": 6,
+    "learning_rate": 0.05,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "objective": "multi:softprob",
+    "num_class": 3,
+    "random_state": 42,
+    "tree_method": "hist",
+    "eval_metric": "mlogloss"
+  },
+  "train_date": "2026-05-31T18:19:40.736046",
+  "metrics": {
+    "train": {
+      "accuracy": 0.919526627218935,
+      "precision": 0.9263926113458012,
+      "recall": 0.919526627218935,
+      "f1": 0.9040038060657051,
+      "confusion_matrix": [
+        [
+          64,
+          135,
+          0
+        ],
+        [
+          0,
+          2916,
+          0
+        ],
+        [
+          0,
+          137,
+          128
+        ]
+      ]
+    },
+    "validation": {
+      "accuracy": 0.8492063492063492,
+      "precision": 0.764180577993179,
+      "recall": 0.8492063492063492,
+      "f1": 0.7938019652305367,
+      "confusion_matrix": [
+        [
+          0,
+          49,
+          0
+        ],
+        [
+          1,
+          530,
+          5
+        ],
+        [
+          0,
+          40,
+          5
+        ]
+      ]
+    },
+    "test": {
+      "accuracy": 0.842,
+      "precision": 0.7776701902748414,
+      "recall": 0.842,
+      "f1": 0.8051155555555556,
+      "confusion_matrix": [
+        [
+          0,
+          26,
+          5
+        ],
+        [
+          6,
+          413,
+          8
+        ],
+        [
+          0,
+          34,
+          8
+        ]
+      ]
+    },
+    "walk_forward_validation": [
+      {
+        "split": 1,
+        "train_size": 1188,
+        "val_size": 1188,
+        "accuracy": 0.882996632996633
+      },
+      {
+        "split": 2,
+        "train_size": 2376,
+        "val_size": 1188,
+        "accuracy": 0.8207070707070707
+      },
+      {
+        "split": 3,
+        "train_size": 3564,
+        "val_size": 1188,
+        "accuracy": 0.8375420875420876
+      }
+    ]
+  }
+}

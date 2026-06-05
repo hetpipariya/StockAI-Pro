@@ -8,6 +8,7 @@ subpackage entrypoint so backend code can import it directly via:
 
 from __future__ import annotations
 
+import importlib
 import logging
 from types import ModuleType
 from typing import Any, Optional
@@ -21,7 +22,7 @@ stockai_cpp_engine: Optional[ModuleType]
 _import_error: Optional[Exception]
 
 try:
-    from . import stockai_cpp_engine as stockai_cpp_engine
+    stockai_cpp_engine = importlib.import_module(".stockai_cpp_engine", __name__)
 
     _import_error = None
     __version__ = getattr(stockai_cpp_engine, "FEATURE_VERSION", "unknown")

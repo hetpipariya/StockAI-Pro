@@ -156,6 +156,13 @@ async def lifespan(app: FastAPI):
             message="Server ready",
         )
 
+        # ✅ LOAD BROKER SESSIONS ON STARTUP
+        try:
+            from app.services.broker_session_manager import broker_session_manager
+            await broker_session_manager.load_sessions_on_startup()
+        except Exception as session_err:
+            logger.error("[STARTUP] Failed to load broker sessions on startup: %s", session_err)
+
         # ✅ PRE-WARM ML PROCESS EXECUTOR
         try:
             from app.inference.production_pipeline import get_process_executor

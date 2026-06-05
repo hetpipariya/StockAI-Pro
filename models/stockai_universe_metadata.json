@@ -1,0 +1,63 @@
+{
+    "timestamp": "2026-05-31T22:42:55.348491",
+    "total_symbols": 199,
+    "total_train_rows": 1282203,
+    "total_test_rows": 272434,
+    "feature_columns": [
+        "ema_9_21_ratio",
+        "close_to_ema50_pct",
+        "linreg_slope_20",
+        "adx_14",
+        "rsi_14",
+        "macd_hist_pct",
+        "stoch_rsi_k",
+        "cci_20_clamped",
+        "volume_ratio_20",
+        "mfi_14",
+        "relative_volume_intraday",
+        "atr_pct",
+        "bb_width_pct",
+        "bb_pct_b",
+        "vwap_distance_pct",
+        "vwap_zscore_20",
+        "cpr_width_pct",
+        "bos_strength_pct",
+        "fvg_gap_pct",
+        "candle_body_ratio",
+        "nifty_direction",
+        "sector_strength_pct",
+        "daily_distance_ema50_pct",
+        "session_progress_pct"
+    ],
+    "metrics": {
+        "train_accuracy": 0.4443836116433981,
+        "val_accuracy": 0.4175843880280322,
+        "test_accuracy": 0.426943773537811,
+        "precision": 0.3877952664433532,
+        "recall": 0.38343859947088216,
+        "f1": 0.38484105349361225,
+        "roc_auc": 0.5841528125402804
+    },
+    "trading_metrics": {
+        "total_trades": 240954,
+        "win_rate": 49.6754567261801,
+        "profit_factor": 1.4005048094675607,
+        "expectancy": 0.002891509085681899,
+        "sharpe": 3.624953936238593,
+        "sortino": 102.58678213776273,
+        "calmar": 0.027873090285726012,
+        "max_dd": 33152823.370897263
+    },
+    "top_features": [
+        "atr_pct",
+        "session_progress_pct",
+        "volume_ratio_20",
+        "relative_volume_intraday",
+        "bb_width_pct",
+        "cpr_width_pct",
+        "vwap_distance_pct",
+        "daily_distance_ema50_pct",
+        "close_to_ema50_pct",
+        "bb_pct_b"
+    ]
+}

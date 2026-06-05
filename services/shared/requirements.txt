@@ -1,0 +1,8 @@
+sqlalchemy
+redis
+orjson
+pydantic
+passlib
+bcrypt==4.0.1
+python-dotenv
+python-jose

@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+prometheus-fastapi-instrumentator
+gzip
+stockai_shared

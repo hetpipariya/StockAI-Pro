@@ -1,0 +1,10 @@
+{
+  "generated_at": "2026-05-21T14:40:52.103013",
+  "granularity": "1h",
+  "source_symbol": "NIFTY 50",
+  "row_count": 50,
+  "first_timestamp": "2024-01-01T09:15:00+05:30",
+  "last_timestamp": "2024-01-03T10:15:00+05:30",
+  "strict": false,
+  "max_allowed_gap_days": 4
+}

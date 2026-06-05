@@ -132,6 +132,15 @@ def stop_scheduler() -> None:
 
 async def auto_start_ws_job():
     """Wrapper to run auto_start_ws with a distributed lock."""
+    from app.websocket.handler import get_ws_state
+    state = get_ws_state()
+    if state == "CONNECTED":
+        logger.info("[SCHEDULER_SKIP] [WS_SKIP_ALREADY_CONNECTED] auto_start_ws_job skipped because WebSocket is CONNECTED")
+        return
+    if state == "RECONNECTING":
+        logger.info("[SCHEDULER_SKIP] [WS_SKIP_RECONNECTING] auto_start_ws_job skipped because WebSocket is RECONNECTING")
+        return
+
     async with distributed_job_lock("auto_start_ws", lock_ttl_seconds=50) as acquired:
         if not acquired:
             logger.info("[SCHEDULER] auto_start_ws skipped: lock already acquired by another instance")

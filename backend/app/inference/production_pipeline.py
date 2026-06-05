@@ -49,6 +49,12 @@ from app.services.feature_cache import InMemoryFeatureCache, RedisFeatureCache
 
 logger = logging.getLogger(__name__)
 
+import threading
+_pending_tasks = 0
+_running_tasks = 0
+_task_lock = threading.Lock()
+_QUEUE_DEPTH_THRESHOLD = 10
+
 # Persistent ProcessPoolExecutor to offload CPU-intensive Pandas calculations
 _cpu_count = os.cpu_count() or 4
 _max_workers = max(1, min(4, _cpu_count - 1))
@@ -213,6 +219,8 @@ class ProductionInferencePipeline:
             except Exception:
                 pass
             logger.error(f"[INFER] Pipeline failed for {symbol}: {exc}", exc_info=True)
+            if str(exc) == "system_busy":
+                return self._create_fallback_hold_signal(symbol, ohlcv_5m, reason="system_busy")
             return self._create_fallback_hold_signal(symbol, ohlcv_5m)
 
 
@@ -271,7 +279,7 @@ class ProductionInferencePipeline:
         Offloads heavy Pandas/numpy feature computation to persistent ProcessPoolExecutor
         to bypass the Python GIL and prevent blocking FastAPI event loop thread.
         """
-        from app.services.metrics import ML_ACTIVE_WORKERS, ML_WORKER_HEARTBEAT, ML_FALLBACK_SIGNALS
+        from app.services.metrics import ML_ACTIVE_WORKERS, ML_WORKER_HEARTBEAT, ML_FALLBACK_SIGNALS, ML_PROCESSPOOL_QUEUE_DEPTH
         
         # Report status to SRE metrics
         try:
@@ -280,8 +288,31 @@ class ProductionInferencePipeline:
         except Exception:
             pass
 
+        global _pending_tasks, _running_tasks
+        with _task_lock:
+            if _pending_tasks >= _QUEUE_DEPTH_THRESHOLD:
+                logger.warning(
+                    "[PROCESSPOOL_BUSY] ProcessPool queue depth %d exceeded threshold %d. Rejecting prediction request.",
+                    _pending_tasks,
+                    _QUEUE_DEPTH_THRESHOLD
+                )
+                try:
+                    ML_FALLBACK_SIGNALS.inc()
+                except Exception:
+                    pass
+                raise RuntimeError("system_busy")
+            
+            _pending_tasks += 1
+            try:
+                ML_PROCESSPOOL_QUEUE_DEPTH.set(_pending_tasks)
+            except Exception:
+                pass
+
         loop = asyncio.get_event_loop()
         try:
+            with _task_lock:
+                _running_tasks += 1
+
             # Enforce a strict 2.0-second execution guardrail to isolate computing latency
             features_df = await asyncio.wait_for(
                 loop.run_in_executor(
@@ -318,6 +349,14 @@ class ProductionInferencePipeline:
                 shutdown_process_executor()
                 
             return None
+        finally:
+            with _task_lock:
+                _pending_tasks = max(0, _pending_tasks - 1)
+                _running_tasks = max(0, _running_tasks - 1)
+                try:
+                    ML_PROCESSPOOL_QUEUE_DEPTH.set(_pending_tasks)
+                except Exception:
+                    pass
 
 
     # ────────────────────────────────────────────────────────────────
@@ -374,7 +413,7 @@ class ProductionInferencePipeline:
     # ────────────────────────────────────────────────────────────────
 
     def _create_fallback_hold_signal(
-        self, symbol: str, ohlcv: pd.DataFrame
+        self, symbol: str, ohlcv: pd.DataFrame, reason: str = "Pipeline error: defaulting to HOLD"
     ) -> TradeSignal:
         """Create safe fallback HOLD signal when pipeline fails."""
         close = ohlcv["close"].iloc[-1] if len(ohlcv) > 0 else 0.0
@@ -389,7 +428,7 @@ class ProductionInferencePipeline:
             position_size_pct=0.0,
             risk_reward_ratio=0.0,
             timestamp=datetime.now(),
-            reason="Pipeline error: defaulting to HOLD",
+            reason=reason,
             blocked_by=BlockReason.NONE,
         )
 

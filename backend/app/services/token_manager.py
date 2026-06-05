@@ -526,3 +526,49 @@ class TokenManager:
         with self._mutex:
             clear_session_sync()
             self._session = None
+
+
+class BrokerCircuitBreaker:
+    """Best-effort Broker Authentication Circuit Breaker.
+
+    Transitions:
+    - CLOSED -> 5 consecutive failures -> OPEN (for 10 minutes)
+    - OPEN -> 10 minutes elapsed -> HALF_OPEN (allows single test attempt)
+    - HALF_OPEN -> success -> CLOSED
+    - HALF_OPEN -> failure -> OPEN
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self.consecutive_failures = 0
+        self.open_until = 0.0
+        self._lock = threading.Lock()
+
+    def can_attempt(self) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            if self.state == "OPEN":
+                if now >= self.open_until:
+                    self.state = "HALF_OPEN"
+                    logger.warning("[BROKER_CIRCUIT_CLOSED] Circuit breaker for %s transitioning to HALF_OPEN. Testing connection.", self.name)
+                    return True
+                return False
+            return True
+
+    def record_success(self):
+        with self._lock:
+            if self.state != "CLOSED":
+                logger.info("[BROKER_CIRCUIT_CLOSED] Broker circuit closed for %s. Restored normal operations.", self.name)
+            self.state = "CLOSED"
+            self.consecutive_failures = 0
+            self.open_until = 0.0
+
+    def record_failure(self):
+        with self._lock:
+            self.consecutive_failures += 1
+            if self.consecutive_failures >= 5 or self.state == "HALF_OPEN":
+                self.state = "OPEN"
+                self.open_until = time.monotonic() + 600  # 10 minutes (600 seconds)
+                self.consecutive_failures = 5  # Clamp at threshold
+                logger.error("[BROKER_CIRCUIT_OPEN] Broker circuit opened for %s. Auth suspended for 10 minutes.", self.name)

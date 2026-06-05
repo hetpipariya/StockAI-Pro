@@ -66,6 +66,10 @@ backend/venv
 *.pyo
 *.pyd
 *.egg-info
+services/shared/build
+services/shared/dist
+services/shared/.venv
+services/shared/venv
 
 # =========================
 

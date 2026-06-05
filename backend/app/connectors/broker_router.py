@@ -108,6 +108,19 @@ class BrokerRouter:
         kind, detail = self._classify_failure(exc)
         with self._lock:
             self._open_breaker(broker, kind, detail)
+            if kind == "auth" or "unauthorized" in detail.lower() or "401" in detail.lower() or "403" in detail.lower() or "token expired" in detail.lower():
+                from app.services.broker_session_manager import broker_session_manager
+                broker_session_manager.update_state(broker, status="TOKEN_EXPIRED", token_valid=False)
+                try:
+                    import asyncio
+                    loop = asyncio.get_running_loop()
+                    if loop and loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            broker_session_manager.mark_token_expired_db(broker),
+                            loop
+                        )
+                except Exception:
+                    pass
         return kind, detail
 
     def _connector(self, broker: str) -> Any:
@@ -120,7 +133,7 @@ class BrokerRouter:
     def _create_upstox_connector(self, *, force_new: bool = True) -> UpstoxConnector:
         with self._lock:
             if force_new or self._upstox_connector is None:
-                self._upstox_connector = UpstoxConnector(validate_on_init=True)
+                self._upstox_connector = UpstoxConnector(validate_on_init=False)
             return self._upstox_connector
 
     def _invoke(self, broker: str, method_name: str, *args: Any, **kwargs: Any) -> Any:
@@ -129,6 +142,18 @@ class BrokerRouter:
         return method(*args, **kwargs)
 
     def _try_route(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        # Check active broker state before invocation (except for auth recovery methods)
+        if method_name not in ("login", "ensure_login", "refresh_session"):
+            from app.services.broker_session_manager import broker_session_manager
+            state = broker_session_manager.get_state(self._active_broker)
+            if state.get("status") in ("TOKEN_EXPIRED", "REAUTH_REQUIRED", "AUTH_FAILED"):
+                broker_session_manager.log_event(
+                    "[WS_BLOCKED]",
+                    self._active_broker,
+                    details=f"Blocked routed call {method_name} because broker state is {state.get('status')}"
+                )
+                raise RuntimeError(f"Broker connection blocked: token is expired or unauthorized ({state.get('status')})")
+
         attempts: list[str]
         with self._lock:
             active = self._active_broker

@@ -243,6 +243,8 @@ class SmartAPIConnector:
         self._auth_failure_count: int = 0
         self._auth_failure_window_start: float = 0.0
         self._auth_suspended_until: float = 0.0
+        from app.services.token_manager import BrokerCircuitBreaker
+        self._circuit_breaker = BrokerCircuitBreaker("SmartAPI")
         self._token_manager = TokenManager(
             login_callable=self._broker_login,
             refresh_callable=self._broker_refresh,
@@ -355,13 +357,28 @@ class SmartAPIConnector:
             raise ValueError("Missing SmartAPI credentials")
 
         del force
+        if not self._circuit_breaker.can_attempt():
+            logger.warning("[BROKER_AUTH_FAILED] [BROKER_CIRCUIT_OPEN] SmartAPI circuit breaker is OPEN. Suspending login attempt.")
+            raise RuntimeError("Broker auth suspended: circuit is OPEN")
+
         with self._session_lock:
             if self._obj is None:
                 self._create_client()
 
         totp = self._get_totp()
         _rate_limit()
-        return self._obj.generateSession(self.client_id, self.client_pwd, totp)
+        try:
+            res = self._obj.generateSession(self.client_id, self.client_pwd, totp)
+            if isinstance(res, dict) and (res.get("status") is True or res.get("success") is True):
+                self._circuit_breaker.record_success()
+            else:
+                self._circuit_breaker.record_failure()
+                logger.warning("[BROKER_AUTH_FAILED] SmartAPI generateSession failed.")
+            return res
+        except Exception as e:
+            self._circuit_breaker.record_failure()
+            logger.warning("[BROKER_AUTH_FAILED] SmartAPI generateSession exception: %s", e)
+            raise e
 
     def _broker_refresh(self, refresh_token: str) -> Any:
         refresh_token = str(refresh_token or "").strip()

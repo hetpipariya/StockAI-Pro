@@ -6,11 +6,16 @@ import ProtectedRoute from './components/ProtectedRoute';
 import { AppInitializer } from './components/AppInitializer';
 import { AuthProvider } from './context/AuthContext';
 import Dashboard from './pages/Dashboard';
+import Signals from './pages/Signals';
+import Trades from './pages/Trades';
+import Portfolio from './pages/Portfolio';
+import History from './pages/History';
+import Settings from './pages/Settings';
 import Login from './pages/Login';
 import SignupPage from './pages/SignupPage';
 import ForgotPassword from './pages/ForgotPassword';
 import Landing from './pages/Landing';
-import DesktopLayout from './layouts/DesktopLayout';
+import TabletLayout from './layouts/TabletLayout';
 import MobileLayout from './layouts/MobileLayout';
 import { LivePriceProvider } from './context/LivePriceContext';
 
@@ -35,7 +40,7 @@ function ResponsiveLayout({ children }) {
     return () => mediaQuery.removeListener(onChange);
   }, []);
 
-  return isMobile ? <MobileLayout>{children}</MobileLayout> : <DesktopLayout>{children}</DesktopLayout>;
+  return isMobile ? <MobileLayout>{children}</MobileLayout> : <TabletLayout>{children}</TabletLayout>;
 }
 function LandingEntry() {
   const [isMobile, setIsMobile] = useState(() => {
@@ -87,6 +92,56 @@ export default function App() {
                       <ProtectedRoute>
                         <ResponsiveLayout>
                           <Dashboard />
+                        </ResponsiveLayout>
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="/signals"
+                    element={
+                      <ProtectedRoute>
+                        <ResponsiveLayout>
+                          <Signals />
+                        </ResponsiveLayout>
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="/trades"
+                    element={
+                      <ProtectedRoute>
+                        <ResponsiveLayout>
+                          <Trades />
+                        </ResponsiveLayout>
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="/portfolio"
+                    element={
+                      <ProtectedRoute>
+                        <ResponsiveLayout>
+                          <Portfolio />
+                        </ResponsiveLayout>
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="/history"
+                    element={
+                      <ProtectedRoute>
+                        <ResponsiveLayout>
+                          <History />
+                        </ResponsiveLayout>
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="/settings"
+                    element={
+                      <ProtectedRoute>
+                        <ResponsiveLayout>
+                          <Settings />
                         </ResponsiveLayout>
                       </ProtectedRoute>
                     }

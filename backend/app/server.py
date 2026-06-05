@@ -164,26 +164,25 @@ async def health_live():
 
 @app.get("/health/ready")
 async def health_ready():
-    """Deep readiness check asserting database connection, Redis, and ML pipeline health."""
+    """Deep readiness check asserting database connection and Redis health."""
     from app.services.db import check_db_connection
     from app.services.redis_client import get_redis, is_degraded_mode
-    from app.websocket.handler import get_ws_state
-    from app.inference.production_pipeline import _process_executor
     from fastapi.responses import JSONResponse
+    import asyncio
 
+    # Lightweight DB ping with 1 retry, no delay
     db_ok = await check_db_connection(retries=1, delay=0.0)
 
+    # Lightweight Redis ping
     redis_ok = False
     redis_client = await get_redis()
     if redis_client:
         try:
-            await redis_client.ping()
+            # 100ms strict timeout for redis ping
+            await asyncio.wait_for(redis_client.ping(), timeout=0.1)
             redis_ok = True
         except Exception:
             pass
-
-    ml_ok = _process_executor is not None
-    ws_state = get_ws_state()
 
     # Database is critical; Redis is nominal if active OR running degraded local mode
     is_ready = db_ok and (redis_ok or is_degraded_mode())
@@ -194,12 +193,9 @@ async def health_ready():
         "subsystems": {
             "database": "nominal" if db_ok else "unreachable",
             "redis": "nominal" if redis_ok else ("degraded_fallback" if is_degraded_mode() else "unreachable"),
-            "ml_workers": "active" if ml_ok else "idle",
-            "websocket_stream": ws_state,
         }
     }
     return JSONResponse(content=payload, status_code=status_code)
-
 
 
 @app.get("/api/v1/health/detailed")
@@ -246,6 +242,170 @@ async def detailed_health():
     }
     await set_cache(_HEALTH_CACHE_KEY, payload, ttl=_HEALTH_CACHE_TTL_SECONDS)
     return payload
+
+@app.get("/callback")
+async def upstox_oauth_callback(code: str):
+    """Handle incoming Upstox OAuth redirect.
+
+    Exchanges authorize code for token, stores it in the database, and auto-starts ws stream.
+    """
+    from fastapi.responses import RedirectResponse
+    from app import config
+    from app.services.broker_session_manager import broker_session_manager
+    from app.services.db import AsyncSessionLocal, UserModel
+    from sqlalchemy import select
+    import requests
+
+    # Log authorization code reception
+    broker_session_manager.log_event(
+        "[OAUTH_CODE_RECEIVED]",
+        "upstox",
+        details=f"OAuth authorization code received: {code[:5]}..."
+    )
+
+    payload = {
+        "code": code,
+        "client_id": config.UPSTOX_API_KEY,
+        "client_secret": config.UPSTOX_API_SECRET,
+        "redirect_uri": config.UPSTOX_REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }
+    
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Api-Version": "2.0",
+    }
+
+    try:
+        response = requests.post(
+            "https://api.upstox.com/v2/login/authorization/token",
+            data=payload,
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
+        token_payload = response.json()
+
+        access_token = token_payload.get("access_token")
+        refresh_token = token_payload.get("refresh_token")
+
+        if not access_token:
+            logger.error("[BROKER_AUTH_FAILED] Upstox callback response missing access token")
+            broker_session_manager.log_event(
+                "[AUTH_FAILED]",
+                "upstox",
+                details="OAuth callback response missing access token"
+            )
+            return RedirectResponse("http://localhost:5173/settings?error=missing_token")
+
+        async with AsyncSessionLocal() as db_session:
+            user_res = await db_session.execute(select(UserModel.id).limit(1))
+            user_id = user_res.scalar_one_or_none()
+            if not user_id:
+                logger.error("[BROKER_AUTH_FAILED] No registered users in DB during OAuth callback")
+                broker_session_manager.log_event(
+                    "[AUTH_FAILED]",
+                    "upstox",
+                    details="No registered users in DB during OAuth callback"
+                )
+                return RedirectResponse("http://localhost:5173/settings?error=no_user")
+
+        user_str = str(user_id)
+
+        # Log token reception from exchange
+        broker_session_manager.log_event(
+            "[OAUTH_TOKEN_RECEIVED]",
+            "upstox",
+            user_id=user_str,
+            details="Access token successfully retrieved from auth code exchange."
+        )
+
+        await broker_session_manager.save_or_update_session(
+            user_id=user_id,
+            broker_name="upstox",
+            access_token=access_token,
+            refresh_token=refresh_token
+        )
+
+        # Log token persistence
+        broker_session_manager.log_event(
+            "[OAUTH_TOKEN_SAVED]",
+            "upstox",
+            user_id=user_str,
+            details="Dynamic access token successfully persisted to the database."
+        )
+
+        try:
+            from app.connectors import get_market_data_connector
+            router = get_market_data_connector()
+            router._active_broker = "upstox"
+            upstox = router._create_upstox_connector(force_new=True)
+            upstox.access_token = access_token
+            upstox.refresh_token = refresh_token
+            upstox._session.headers["Authorization"] = f"Bearer {access_token}"
+            upstox._is_logged_in = True
+
+            from app.websocket.handler import auto_start_ws
+            await auto_start_ws()
+            broker_session_manager.update_state("upstox", websocket_connected=True)
+            logger.info("[BROKER_WS_CONNECTED] WebSocket auto-started successfully after OAuth callback.")
+            
+            # Log successful validation
+            broker_session_manager.log_event(
+                "[OAUTH_TOKEN_VALIDATED]",
+                "upstox",
+                user_id=user_str,
+                details="OAuth token successfully validated and WebSocket feed initialized."
+            )
+        except Exception as ws_err:
+            logger.error("[BROKER_WS_DISCONNECTED] Failed to start WebSocket: %s", ws_err)
+
+        return RedirectResponse("http://localhost:5173/settings?broker_connected=upstox")
+
+    except Exception as exc:
+        logger.error("[BROKER_AUTH_FAILED] Upstox callback handler failed: %s", exc)
+        broker_session_manager.log_event(
+            "[AUTH_FAILED]",
+            "upstox",
+            details=f"Upstox OAuth callback exchange failed: {exc}"
+        )
+        return RedirectResponse("http://localhost:5173/settings?error=auth_failed")
+
+
+@app.get("/login/upstox")
+async def root_login_upstox_redirect():
+    """Build and redirect the browser directly to the Upstox authorize dialog page."""
+    from fastapi.responses import RedirectResponse
+    from app import config
+    import urllib.parse
+    
+    redirect_encoded = urllib.parse.quote_plus(config.UPSTOX_REDIRECT_URI)
+    upstox_url = f"https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id={config.UPSTOX_API_KEY}&redirect_uri={redirect_encoded}"
+    logger.info(f"[BROKER_CONNECTED] Redirecting browser to Upstox login page.")
+    return RedirectResponse(upstox_url)
+
+
+# Fallback /broker/status route directly on app
+@app.get("/broker/status")
+async def get_direct_broker_status():
+    from app.services.broker_session_manager import broker_session_manager
+    from app.websocket.handler import get_ws_state
+
+    upstox_state = broker_session_manager.get_state("upstox")
+    ws_state = get_ws_state()
+    upstox_state["websocket_connected"] = (ws_state == "CONNECTED")
+
+    return {
+        "broker": "upstox",
+        "status": upstox_state.get("status", "DISCONNECTED"),
+        "token_valid": upstox_state.get("token_valid", False),
+        "websocket_connected": upstox_state.get("websocket_connected", False),
+        "last_auth_success": upstox_state.get("last_auth_success"),
+        "last_auth_failure": upstox_state.get("last_auth_failure"),
+        "reconnect_attempts": upstox_state.get("reconnect_attempts", 0)
+    }
+
 
 @app.get("/")
 async def root_status():

@@ -21,6 +21,11 @@ _WS_RECONNECT_BASE_SECONDS = max(0.5, float(os.getenv("UPSTOX_WS_RECONNECT_BASE_
 _WS_RECONNECT_MAX_SECONDS = max(5.0, float(os.getenv("UPSTOX_WS_RECONNECT_MAX_SECONDS", "60.0")))
 
 
+class BrokerAuthenticationError(RuntimeError):
+    """Custom exception raised when broker requests fail with 401/403 status codes."""
+    pass
+
+
 class UpstoxConnector:
     """Best-effort Upstox market-data connector with SmartAPI-compatible methods."""
 
@@ -46,15 +51,27 @@ class UpstoxConnector:
         refresh_token: Optional[str] = None,
         auth_code: Optional[str] = None,
         ws_url: Optional[str] = None,
-        validate_on_init: bool = True,
+        validate_on_init: bool = False,
     ) -> None:
         self._reload_runtime_env()
 
         self.api_key = api_key or os.getenv("UPSTOX_API_KEY", "")
         self.api_secret = api_secret or os.getenv("UPSTOX_API_SECRET", "")
         self.redirect_uri = redirect_uri or os.getenv("UPSTOX_REDIRECT_URI", "")
-        self.access_token = access_token if access_token is not None else os.getenv("UPSTOX_ACCESS_TOKEN", "")
-        self.refresh_token = refresh_token if refresh_token is not None else os.getenv("UPSTOX_REFRESH_TOKEN", "")
+
+        # Single source of truth check: load dynamic token from database first
+        from app.services.broker_session_manager import broker_session_manager
+        db_token = broker_session_manager.get_active_token_sync("upstox")
+
+        self.access_token = access_token
+        if self.access_token is None:
+            self.access_token = db_token or os.getenv("UPSTOX_ACCESS_TOKEN", "")
+
+        self.refresh_token = refresh_token
+        if self.refresh_token is None:
+            state = broker_session_manager.get_state("upstox")
+            self.refresh_token = state.get("refresh_token") or os.getenv("UPSTOX_REFRESH_TOKEN", "")
+
         self.auth_code = auth_code if auth_code is not None else os.getenv("UPSTOX_AUTH_CODE", "")
         self.ws_url = ws_url or os.getenv("UPSTOX_WS_URL", "wss://api.upstox.com/v2/feed/market-data-feed")
         self.base_url = "https://api.upstox.com/v2"
@@ -71,6 +88,8 @@ class UpstoxConnector:
         self._login_lock = threading.Lock()
         self._last_rest_call = 0.0
         self._is_logged_in = False
+        from app.services.token_manager import BrokerCircuitBreaker
+        self._circuit_breaker = BrokerCircuitBreaker("Upstox")
         self._ws = None
         self._ws_thread: Optional[threading.Thread] = None
         self._ws_should_reconnect = True
@@ -83,7 +102,7 @@ class UpstoxConnector:
             "[UPSTOX] init token_loaded=%s token_length=%d token_source=%s refresh_loaded=%s",
             token_loaded,
             len(str(self.access_token or "").strip()),
-            "runtime_env" if token_loaded else "missing",
+            "database" if db_token else ("runtime_env" if token_loaded else "missing"),
             bool(str(self.refresh_token or "").strip()),
         )
 
@@ -138,6 +157,13 @@ class UpstoxConnector:
                     retry_after = float(response.headers.get("Retry-After", "1") or 1)
                     time.sleep(retry_after)
                     continue
+
+                if response.status_code in (401, 403):
+                    msg = f"Broker authentication failed with status code {response.status_code}: {response.text}"
+                    from app.services.broker_session_manager import broker_session_manager
+                    broker_session_manager.log_event("[AUTH_FAILED]", "upstox", details=msg)
+                    raise BrokerAuthenticationError(msg)
+
                 response.raise_for_status()
                 if not response.text:
                     return {"status": True, "data": {}}
@@ -145,6 +171,9 @@ class UpstoxConnector:
                 if isinstance(payload, dict):
                     return payload
                 return {"status": True, "data": payload}
+            except BrokerAuthenticationError as exc:
+                # Fast fail, bypass retry loop
+                raise exc
             except Exception as exc:
                 last_error = exc
                 if attempt < _DEFAULT_RETRY_ATTEMPTS - 1:
@@ -178,6 +207,15 @@ class UpstoxConnector:
                 len(str(self.access_token or "").strip()),
             )
             return True
+        except BrokerAuthenticationError as exc:
+            logger.warning(
+                "[UPSTOX] auth_validation=failed token_loaded=%s token_length=%d error=%s",
+                bool(str(self.access_token or "").strip()),
+                len(str(self.access_token or "").strip()),
+                exc,
+            )
+            self._is_logged_in = False
+            raise exc
         except Exception as exc:
             logger.warning(
                 "[UPSTOX] auth_validation=failed token_loaded=%s token_length=%d error=%s",
@@ -189,17 +227,14 @@ class UpstoxConnector:
             return False
 
     def login(self, force: bool = False) -> dict[str, Any]:
-        with self._login_lock:
-            if self.access_token and not force and self._validate_token():
-                return {
-                    "status": True,
-                    "accessToken": self.access_token,
-                    "refreshToken": self.refresh_token,
-                    "feedToken": self.access_token,
-                }
+        if not self._circuit_breaker.can_attempt():
+            logger.warning("[BROKER_AUTH_FAILED] [BROKER_CIRCUIT_OPEN] Upstox circuit breaker is OPEN. Suspending login attempt.")
+            raise RuntimeError("Broker auth suspended: circuit is OPEN")
 
-            if self.refresh_token:
-                if self.refresh_session():
+        with self._login_lock:
+            try:
+                if self.access_token and not force and self._validate_token():
+                    self._circuit_breaker.record_success()
                     return {
                         "status": True,
                         "accessToken": self.access_token,
@@ -207,27 +242,9 @@ class UpstoxConnector:
                         "feedToken": self.access_token,
                     }
 
-            if self.auth_code and self.api_key and self.api_secret and self.redirect_uri:
-                # Best-effort OAuth exchange scaffold. Upstox will return a JSON token payload
-                # when the auth code is still valid.
-                payload = self._request_json(
-                    "POST",
-                    "/login/authorization/token",
-                    json_body={
-                        "code": self.auth_code,
-                        "client_id": self.api_key,
-                        "client_secret": self.api_secret,
-                        "redirect_uri": self.redirect_uri,
-                        "grant_type": "authorization_code",
-                    },
-                )
-                token_data = payload.get("data", payload)
-                if isinstance(token_data, dict):
-                    self.access_token = str(token_data.get("access_token") or token_data.get("accessToken") or "").strip()
-                    self.refresh_token = str(token_data.get("refresh_token") or token_data.get("refreshToken") or self.refresh_token or "").strip()
-                    if self.access_token:
-                        self._session.headers["Authorization"] = f"Bearer {self.access_token}"
-                        self._is_logged_in = True
+                if self.refresh_token:
+                    if self.refresh_session():
+                        self._circuit_breaker.record_success()
                         return {
                             "status": True,
                             "accessToken": self.access_token,
@@ -235,7 +252,40 @@ class UpstoxConnector:
                             "feedToken": self.access_token,
                         }
 
-            raise RuntimeError("Upstox login failed: missing or invalid access token")
+                if self.auth_code and self.api_key and self.api_secret and self.redirect_uri:
+                    # Best-effort OAuth exchange scaffold. Upstox will return a JSON token payload
+                    # when the auth code is still valid.
+                    payload = self._request_json(
+                        "POST",
+                        "/login/authorization/token",
+                        json_body={
+                            "code": self.auth_code,
+                            "client_id": self.api_key,
+                            "client_secret": self.api_secret,
+                            "redirect_uri": self.redirect_uri,
+                            "grant_type": "authorization_code",
+                        },
+                    )
+                    token_data = payload.get("data", payload)
+                    if isinstance(token_data, dict):
+                        self.access_token = str(token_data.get("access_token") or token_data.get("accessToken") or "").strip()
+                        self.refresh_token = str(token_data.get("refresh_token") or token_data.get("refreshToken") or self.refresh_token or "").strip()
+                        if self.access_token:
+                            self._session.headers["Authorization"] = f"Bearer {self.access_token}"
+                            self._is_logged_in = True
+                            self._circuit_breaker.record_success()
+                            return {
+                                "status": True,
+                                "accessToken": self.access_token,
+                                "refreshToken": self.refresh_token,
+                                "feedToken": self.access_token,
+                            }
+
+                raise RuntimeError("Upstox login failed: missing or invalid access token")
+            except Exception as e:
+                self._circuit_breaker.record_failure()
+                logger.warning("[BROKER_AUTH_FAILED] Upstox login attempt failed: %s", e)
+                raise e
 
     def ensure_login(self) -> None:
         if not self.login(force=False):
@@ -246,6 +296,8 @@ class UpstoxConnector:
             return self._validate_token()
 
         try:
+            from app.services.broker_session_manager import broker_session_manager
+            broker_session_manager.log_event("[TOKEN_REFRESH]", "upstox", details="Attempting token refresh")
             payload = self._request_json(
                 "POST",
                 "/login/authorization/token",
