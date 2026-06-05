@@ -1,8 +1,0 @@
-{
-  "type": "module",
-  "dependencies": {
-    "@openrouter/sdk": "^0.12.35",
-    "dotenv": "^17.4.2",
-    "figma-make": "^0.1.0-beta.10"
-  }
-}
